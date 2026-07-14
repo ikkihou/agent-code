@@ -223,3 +223,69 @@ def load_gitignore(cwd: Path) -> pathspec.PathSpec | None:
         return None
     lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
     return pathspec.PathSpec.from_lines("gitwildmatch", lines)
+
+
+def ensure_read_before_edit(state: ReadFileState, path: Path) -> str | None:
+    """检查文件是否在本次对话中被读过。未读过则返回error
+
+    Args:
+        state (ReadFileState): 文件阅读状态注册表
+        path (path): 文件路径
+
+    """
+    if path not in state.entries:
+        return (
+            f"error: file has not been read yet. ",
+            f"Read {path.name} first before editing. ",
+        )
+
+    return None
+
+
+def check_mtime_conflict(state: ReadFileState, path: Path) -> str | None:
+    """检查文件在read之后是否被外部修改过。mtime变了（表示文件被修改过）则返回error。"""
+    entry = state.entries.get(path)
+    if entry is None:
+        return None
+
+    read_mtime_ns, _ = entry
+
+    try:
+        current_time_ns = path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+    if current_time_ns > read_mtime_ns:
+        return (
+            f"error: file was modified after read. ",
+            f"Read {path.name} again before editing. ",
+        )
+
+    return None
+
+
+def apply_single_replace(
+    content: str, old: str, new: str, replace_all: bool
+) -> tuple[str | None, str | None]:
+    """在 content 中查找 old 并替换为 new。
+    返回 (new_content, error)：成功时 error 为 None，失败时 new_content 为 None。"""
+    if old == "":
+        # str.count("") 会返回 len+1，str.replace("", x) 会在每个字符之间插入 x。
+        # 这两个行为对模型完全没用，直接拒绝。
+        return None, "error: old_string must not be empty."
+    if old == new:
+        return None, "error: old_string and new_string are exactly the same."
+
+    count = content.count(old)
+    if count == 0:
+        return None, "error: string to replace not found in file."
+    if count > 1 and not replace_all:
+        return None, (
+            f"error: found {count} matches for old_string. "
+            f"Use replace_all=True to replace all, or make old_string more specific."
+        )
+
+    if replace_all:
+        return content.replace(old, new), None
+    else:
+        return content.replace(old, new, 1), None

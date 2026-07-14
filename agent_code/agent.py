@@ -18,7 +18,14 @@ from typing import Any
 
 from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolRegistry, ToolContext
-from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd
+from .fs_safety import (
+    SkipPolicy,
+    load_gitignore,
+    resolve_in_cwd,
+    ensure_read_before_edit,
+    apply_single_replace,
+    check_mtime_conflict,
+)
 
 from rich.console import Console
 from .diff_ui import confirm_edit, render_diff
@@ -110,45 +117,41 @@ def run_agent(
                     )
                     continue
 
-            old_content = path.read_text(encoding="utf-8") if path.exists() else ""
+                old_content = path.read_text(encoding="utf-8") if path.exists() else ""
 
-            ## (1) 前置校验
-            validation_error: str | None = None
-            if call.name == "file_write" and path.exists():
-                if path not in ctx.read_state.entries:
-                    validation_error = (
-                        "error: file has not been read yet.",
-                        f"Read {path_str} first before editing.",
+                ## (1) 前置校验
+                validation_error: str | None = None
+                if call.name == "file_write" and path.exists():
+                    if path not in ctx.read_state.entries:
+                        validation_error = (
+                            "error: file has not been read yet.",
+                            f"Read {path_str} first before editing.",
+                        )
+                else:  ## file_edit
+                    if not path.exists():
+                        validation_error = f"error: file does not exist: {path_str}"
+                    else:
+                        validation_error = ensure_read_before_edit(
+                            ctx.read_state, path
+                        ) or check_mtime_conflict(ctx.read_state, path)
+
+                ## (2) 计算new content
+                new_content: str | None = None
+                if call.name == "file_write":
+                    new_content = call.arguments.get("content", "")
+                elif call.name == "file_edit" and validation_error is None:
+                    new_content, replace_err = apply_single_replace(
+                        old_content,
+                        call.arguments.get("old_string", ""),
+                        call.arguments.get("new_string", ""),
+                        bool(call.arguments.get("replace_all", False)),
                     )
+                    if replace_err is not None:
+                        validation_error = replace_err
 
-            ## (2) 计算new content
-            new_content: str | None = None
-            if call.name == "file_write":
-                new_content = call.arguments.get("content", "")
-
-            ## (3) 校验失败：不渲染 diff、不问用户，直接 error observation
-            if validation_error is not None:
-                result = ToolResult(call.id, validation_error, is_error=True)
-                emit(f"observation: {result.content}")
-                tool_result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": result.tool_call_id,
-                        "content": result.content,
-                        "is_error": True,
-                    }
-                )
-                continue
-
-            ## (4) 校验通过：渲染 diff + 用户确认
-            if new_content is not None:
-                diff_text = render_diff(old_content, new_content, path_str)
-                console.print(f"\n[bold]Diff for {path_str}:[/bold]")
-                console.print(diff_text)
-                if not confirm_edit(path_str):
-                    result = ToolResult(
-                        call.id, "error: edit rejected by user", is_error=True
-                    )
+                ## (3) 校验失败：不渲染 diff、不问用户，直接 error observation
+                if validation_error is not None:
+                    result = ToolResult(call.id, validation_error, is_error=True)
                     emit(f"observation: {result.content}")
                     tool_result_blocks.append(
                         {
@@ -159,6 +162,26 @@ def run_agent(
                         }
                     )
                     continue
+
+                ## (4) 校验通过：渲染 diff + 用户确认
+                if new_content is not None:
+                    diff_text = render_diff(old_content, new_content, path_str)
+                    console.print(f"\n[bold]Diff for {path_str}:[/bold]")
+                    console.print(diff_text)
+                    if not confirm_edit(path_str):
+                        result = ToolResult(
+                            call.id, "error: edit rejected by user", is_error=True
+                        )
+                        emit(f"observation: {result.content}")
+                        tool_result_blocks.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": result.tool_call_id,
+                                "content": result.content,
+                                "is_error": True,
+                            }
+                        )
+                        continue
 
             result = tools.run(call, ctx)
             emit(f"observation: {result.content}")
