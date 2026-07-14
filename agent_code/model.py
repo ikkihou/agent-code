@@ -99,12 +99,15 @@ def _parse_tool_input(value: object) -> dict[str, Any]:
 def _content_block_to_dict(block: Any) -> dict[str, Any]:
     if hasattr(block, "model_dump"):
         return block.model_dump(exclude_none=True)
+
     if hasattr(block, "dict"):
         return block.dict(exclude_none=True)
+
     data = {"type": block.type}
     for name in ("text", "id", "name", "input", "thinking", "signature"):
         if hasattr(block, name):
             data[name] = getattr(block, name)
+
     return data
 
 

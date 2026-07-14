@@ -18,7 +18,7 @@ import typer
 from rich.console import Console
 
 from .agent import run_agent
-from .model import ModelProvider, AnthropicProvider
+from .model import AnthropicProvider
 from .tools import default_tools
 
 console = Console()
@@ -42,9 +42,7 @@ def handle_slash(line: str) -> bool:
 def run_once(prompt: str, cwd: Path) -> None:
     render_header(cwd)
     try:
-        result = run_agent(prompt, AnthropicProvider(), default_tools(), cwd=cwd)
-        for line in result.trace:
-            console.print(line)
+        run_agent(prompt, AnthropicProvider(), default_tools(), cwd=cwd)
     except Exception as e:
         console.print(f"[red]Agent 出错：{e}[/red]")
 

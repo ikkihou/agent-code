@@ -16,9 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model import ModelProvider, ModelResponse
+from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolRegistry, ToolContext
-from .fs_safety import SkipPolicy, load_gitignore
+from .fs_safety import SkipPolicy, load_gitignore, resolve_in_cwd
+
+from rich.console import Console
+from .diff_ui import confirm_edit, render_diff
+
+console = Console()
 
 
 @dataclass
@@ -48,22 +53,6 @@ def _assistant_message(response: ModelResponse) -> dict[str, Any]:
     return {"role": "assistant", "content": content}
 
 
-# def _tool_result_message(
-#     tool_call_id: str, content: str, is_error: bool = False
-# ) -> dict[str, Any]:
-#     return {
-#         "role": "user",
-#         "content": [
-#             {
-#                 "type": "tool_result",
-#                 "tool_use_id": tool_call_id,
-#                 "content": content,
-#                 "is_error": is_error,
-#             }
-#         ],
-#     }
-
-
 def run_agent(
     prompt: str,
     provider: ModelProvider,
@@ -77,22 +66,102 @@ def run_agent(
         skip_policy=SkipPolicy.default(gitignore=load_gitignore(resolved_cwd)),
     )
     messsages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+
+    def emit(line: str) -> None:
+        trace.append(line)
+        console.print(line)
+
     trace: list[str] = []
 
     for step in range(max_steps):
+        ## 1. sending api request
         response = provider.complete(messsages, tools=tools.list())
+
+        ## 2. add LLM response to history
         messsages.append(_assistant_message(response))
 
+        ## 3(1). tool call or end execution
         if not response.tool_calls:
             final = response.text or ""
-            trace.append(f"final: {final}")
+            emit(f"final: {final}")
             return AgentResult(final=final, trace=trace, messages=messsages)
 
+        ## 3(2). execute all tool calls
         tool_result_blocks: list[dict[str, Any]] = []
         for call in response.tool_calls:
-            trace.append(f"tool_call: {call.name} {call.arguments}")
+            emit(f"tool_call: {call.name} {call.arguments}")
+
+            # file_write / file_edit 的harness拦截:先做前置校验,再渲染diff,最后让用户确认
+            if call.name in ("file_write", "file_edit"):
+                path_str = call.arguments.get("file_path", "")
+
+                try:
+                    path = resolve_in_cwd(ctx.cwd, path_str)
+                except (ValueError, OSError) as e:
+                    result = ToolResult(call.id, f"error: {e}", is_error=True)
+                    emit(f"observation: {result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.tool_call_id,
+                            "content": result.content,
+                            "is_error": result.is_error,
+                        }
+                    )
+                    continue
+
+            old_content = path.read_text(encoding="utf-8") if path.exists() else ""
+
+            ## (1) 前置校验
+            validation_error: str | None = None
+            if call.name == "file_write" and path.exists():
+                if path not in ctx.read_state.entries:
+                    validation_error = (
+                        "error: file has not been read yet.",
+                        f"Read {path_str} first before editing.",
+                    )
+
+            ## (2) 计算new content
+            new_content: str | None = None
+            if call.name == "file_write":
+                new_content = call.arguments.get("content", "")
+
+            ## (3) 校验失败：不渲染 diff、不问用户，直接 error observation
+            if validation_error is not None:
+                result = ToolResult(call.id, validation_error, is_error=True)
+                emit(f"observation: {result.content}")
+                tool_result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": result.tool_call_id,
+                        "content": result.content,
+                        "is_error": True,
+                    }
+                )
+                continue
+
+            ## (4) 校验通过：渲染 diff + 用户确认
+            if new_content is not None:
+                diff_text = render_diff(old_content, new_content, path_str)
+                console.print(f"\n[bold]Diff for {path_str}:[/bold]")
+                console.print(diff_text)
+                if not confirm_edit(path_str):
+                    result = ToolResult(
+                        call.id, "error: edit rejected by user", is_error=True
+                    )
+                    emit(f"observation: {result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.tool_call_id,
+                            "content": result.content,
+                            "is_error": True,
+                        }
+                    )
+                    continue
+
             result = tools.run(call, ctx)
-            trace.append(f"observation: {result.content}")
+            emit(f"observation: {result.content}")
             tool_result_blocks.append(
                 {
                     "type": "tool_result",
@@ -104,5 +173,5 @@ def run_agent(
         messsages.append({"role": "user", "content": tool_result_blocks})
 
     final = f"Agent reached max steps ({max_steps}) without finishing. Last response: {response}"
-    trace.append(f"final: {final}")
+    emit(f"final: {final}")
     return AgentResult(final=final, trace=trace, messages=messsages)
