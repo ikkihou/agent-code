@@ -121,13 +121,16 @@ def run_agent(
 
                 ## (1) 前置校验
                 validation_error: str | None = None
-                if call.name == "file_write" and path.exists():
-                    if path not in ctx.read_state.entries:
-                        validation_error = (
-                            "error: file has not been read yet.",
-                            f"Read {path_str} first before editing.",
-                        )
-                else:  ## file_edit
+                if call.name == "file_write":
+                    ## file_write: 新建文件直接放行，覆盖已有文件需先读且无 mtime 冲突
+                    if path.exists():
+                        if path not in ctx.read_state.entries:
+                            validation_error = f"error: file has not been read yet. Read {path_str} first before editing."
+                        else:
+                            validation_error = check_mtime_conflict(
+                                ctx.read_state, path
+                            )
+                elif call.name == "file_edit":
                     if not path.exists():
                         validation_error = f"error: file does not exist: {path_str}"
                     else:

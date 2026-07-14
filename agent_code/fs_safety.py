@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import pathspec
 
-
 # 文本文件后缀白名单：直接放行，不用 peek 文件头。
 TEXT_SUFFIXES = {
     ".py",
@@ -234,10 +233,7 @@ def ensure_read_before_edit(state: ReadFileState, path: Path) -> str | None:
 
     """
     if path not in state.entries:
-        return (
-            f"error: file has not been read yet. ",
-            f"Read {path.name} first before editing. ",
-        )
+        return f"error: file has not been read yet. Read {path.name} first before editing."
 
     return None
 
@@ -256,10 +252,7 @@ def check_mtime_conflict(state: ReadFileState, path: Path) -> str | None:
         return None
 
     if current_time_ns > read_mtime_ns:
-        return (
-            f"error: file was modified after read. ",
-            f"Read {path.name} again before editing. ",
-        )
+        return f"error: file was modified after read. Read {path.name} again before editing."
 
     return None
 
