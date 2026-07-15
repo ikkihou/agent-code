@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from turtle import back
 from typing import Any, Callable
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from .fs_safety import (
     truncate_output,
     apply_single_replace,
 )
+from .file_history import backup
 
 
 @dataclass
@@ -248,6 +250,12 @@ def file_write(args: dict[str, any], ctx: ToolContext) -> str:
         return f"error: {e}"
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            old = path.read_text(encoding="utf-8")
+            backup(ctx.cwd, path, old)
+        except Exception:
+            pass
     path.write_text(content, encoding="utf-8")
     ctx.read_state.record(path, content)
 
@@ -269,6 +277,7 @@ def file_edit(args: dict[str, any], ctx: ToolContext) -> str:
 
     try:
         content = path.read_text(encoding="utf-8")
+        backup(ctx.cwd, path, content)
     except (FileNotFoundError, IsADirectoryError) as exc:
         return f"error: {exc}"
 
