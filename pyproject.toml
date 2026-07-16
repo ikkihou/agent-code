@@ -28,5 +28,8 @@ packages = ["agent_code"]
 [tool.uv]
 package = true
 
+[tool.ruff.lint]
+ignore = ["F401"]
+
 [dependency-groups]
 dev = ["pytest>=9.1.0"]

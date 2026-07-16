@@ -33,6 +33,7 @@ from .fs_safety import (
     apply_single_replace,
 )
 from .file_history import backup
+from .bash_runner import run_sync as _bash_run_sync
 
 
 @dataclass
@@ -294,6 +295,31 @@ def file_edit(args: dict[str, any], ctx: ToolContext) -> str:
     return f"Edited {path_str}: replaced {len(old_string)} chars with {len(new_string)} chars"
 
 
+def _git_status(args: dict[str, Any], ctx: ToolContext) -> str:
+    """薄包装 git status——只读、默认 allow。"""
+    return _bash_run_sync("git status", ctx.cwd, timeout=10)
+
+
+def _git_diff(args: dict[str, Any], ctx: ToolContext) -> str:
+    """薄包装 git diff——只读、默认 allow。"""
+    return _bash_run_sync("git diff", ctx.cwd, timeout=10)
+
+
+def bash(args: dict[str, Any], ctx: ToolContext) -> str:
+    """执行 shell 命令。前置校验和用户确认在 agent.py 拦截块完成。"""
+    command = args.get("command", "")
+    if not command:
+        return "error: missing required argument 'command'"
+    timeout = int(args.get("timeout", 30))
+    background = bool(args.get("background", False))
+
+    # v1 只做同步；v4 接 background=True 分支
+    if background:
+        return "error: background mode not implemented yet (coming in v4)"
+
+    return _bash_run_sync(command, ctx.cwd, timeout=timeout)
+
+
 # ---------------------------------------------
 
 
@@ -464,6 +490,53 @@ def default_tools() -> ToolRegistry:
                     },
                 },
                 "required": ["file_path", "old_string", "new_string"],
+            },
+        )
+    )
+    registry.register(
+        Tool(
+            name="git_status",
+            description="Run git status to see the current state of the working directory.",
+            run=_git_status,
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+    )
+    registry.register(
+        Tool(
+            name="git_diff",
+            description="Run git diff to see unstaged changes in the working directory.",
+            run=_git_diff,
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+    )
+    registry.register(
+        Tool(
+            name="bash",
+            description=(
+                "Execute a shell command. Working directory persists but shell state "
+                "does not (each call is a fresh shell). timeout in seconds (default 30). "
+                "Avoid cd; use the tool's implicit cwd instead."
+            ),
+            run=bash,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute.",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds, default 30.",
+                        "default": 30,
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "Run in background. Returns immediately with a background_id. Default false.",
+                        "default": False,
+                    },
+                },
+                "required": ["command"],
             },
         )
     )

@@ -233,7 +233,9 @@ def ensure_read_before_edit(state: ReadFileState, path: Path) -> str | None:
 
     """
     if path not in state.entries:
-        return f"error: file has not been read yet. Read {path.name} first before editing."
+        return (
+            f"error: file has not been read yet. Read {path.name} first before editing."
+        )
 
     return None
 

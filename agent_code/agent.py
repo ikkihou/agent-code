@@ -29,6 +29,7 @@ from .fs_safety import (
 
 from rich.console import Console
 from .diff_ui import confirm_edit, render_diff
+from .prompt_ui import confirm_command
 
 console = Console()
 
@@ -185,6 +186,26 @@ def run_agent(
                             }
                         )
                         continue
+            # bash 拦截：打印命令预览，让用户确认后再执行
+            elif call.name == "bash":
+                command = call.arguments.get("command", "")
+                timeout = call.arguments.get("timeout", 30)
+                console.print(f"\n[bold yellow]Command:[/bold yellow] {command}")
+                console.print(f"[dim]timeout: {timeout}s  cwd: {ctx.cwd}[/dim]")
+                if not confirm_command(command):
+                    result = ToolResult(
+                        call.id, "error: command rejected by user", is_error=True
+                    )
+                    emit(f"observation: {result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.tool_call_id,
+                            "content": result.content,
+                            "is_error": True,
+                        }
+                    )
+                    continue
 
             result = tools.run(call, ctx)
             emit(f"observation: {result.content}")
