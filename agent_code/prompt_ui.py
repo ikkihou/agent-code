@@ -55,3 +55,23 @@ def confirm_command(command: str) -> bool:
 def confirm_tool_use(tool_name: str, detail: str) -> bool:
     """让用户确认非 bash 的 ask 类工具，例如访问外部网络。"""
     return typer.confirm(f"Allow {tool_name}: {detail}?", default=False)
+
+
+def prompt_single_choice(question: str, labels: list[str]) -> str | None:
+    """展示一个 numbered menu 让用户单选，返回被选中的 label。"""
+    from rich.console import Console
+
+    console = Console()
+    console.print(f"\n[bold yellow]? {question}[/bold yellow]")
+    for i, label in enumerate(labels, 1):
+        console.print(f"  {i}. {label}")
+    console.print(f"  0. [dim]Skip / Other[/dim]")
+
+    try:
+        choice = typer.prompt("Choice", default="0")
+        idx = int(choice)
+        if 1 <= idx <= len(labels):
+            return labels[idx - 1]
+        return None
+    except (ValueError, TypeError):
+        return None

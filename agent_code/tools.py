@@ -320,6 +320,22 @@ def bash(args: dict[str, Any], ctx: ToolContext) -> str:
     return _bash_run_sync(command, ctx.cwd, timeout=timeout)
 
 
+def _ask_user_question(args: dict[str, Any], ctx: ToolContext) -> str:
+    """由 agent.py 拦截块处理——工具函数本身不读 stdin。
+    拦截块识别 call.name == "ask_user_question"，调 prompt_ui 后把结果作为 observation 返回。"""
+    prompt = args.get("prompt", "")
+    options = args.get("options", [])
+    if not prompt:
+        return "error: missing required argument 'prompt'"
+    if not options or not isinstance(options, list):
+        return "error: options must be a non-empty list"
+    # 实际交互在 agent.py 拦截块里完成——这里只返回占位。
+    # 正常路径不会走到这里，因为拦截块会先处理。
+    return (
+        "error: ask_user_question must be handled by the harness, not executed directly"
+    )
+
+
 # ---------------------------------------------
 
 
@@ -537,6 +553,32 @@ def default_tools() -> ToolRegistry:
                     },
                 },
                 "required": ["command"],
+            },
+        )
+    )
+    registry.register(
+        Tool(
+            name="ask_user_question",
+            description=(
+                "Ask the user a structured single-choice question. "
+                "Use when you need to decide between multiple approaches "
+                "or need user preference before proceeding."
+            ),
+            run=_ask_user_question,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question to ask the user. Should end with ?.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "description": "List of option labels (2-4 recommended).",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["prompt", "options"],
             },
         )
     )

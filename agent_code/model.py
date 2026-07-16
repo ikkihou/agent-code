@@ -111,6 +111,12 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
     return data
 
 
+class MockProvider:
+    def complete(self, prompt: str) -> ModelResponse:
+        # 一个假模型，固定回一句话，够用来打通 CLI <-> Provider 这条边界。
+        return ModelResponse(text=f"我是 MockProvider，你说了：{prompt}")
+
+
 class AnthropicProvider:
     def __init__(
         self,
@@ -185,3 +191,15 @@ class AnthropicProvider:
             assistant_content=assistant_content,
             stop_reason=response.stop_reason or "end_turn",
         )
+
+
+def create_provider(
+    name: str,
+    model: str,
+    base_url: str | None = None,
+) -> ModelProvider:
+    if name == "anthropic":
+        return AnthropicProvider(model=model, base_url=base_url)
+    if name == "mock":
+        return MockProvider()
+    raise ValueError(f"unknown provider: {name}")
