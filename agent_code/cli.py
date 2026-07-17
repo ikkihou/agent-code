@@ -99,7 +99,7 @@ def main_command(
         return
 
     # REPL 分支——命令后面没跟 prompt，走下面交互循环
-    render_header(resolved_cwd)
+    render_header(resolved_cwd, provider, model, base_url)
     console.print("输入 /help 查看命令，输入 /exit 退出。")
     while True:
         line = _prompt()

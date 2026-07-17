@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from typer._click.termui import V
 
 
 def backup(cwd: Path, path: Path, old_content: str) -> Path | None:
