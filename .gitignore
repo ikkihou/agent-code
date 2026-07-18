@@ -11,4 +11,4 @@ wheels/
 .env
 
 # Project run generated files
-.agent/history/*
+.agent/*

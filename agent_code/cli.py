@@ -11,6 +11,8 @@
 
 # here put the import lib
 from __future__ import annotations
+from random import seed
+from tkinter import SE
 
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from rich.console import Console
 from .agent import run_agent
 from .model import AnthropicProvider, create_provider
 from .tools import default_tools
+from .session import Session
 
 console = Console()
 app = typer.Typer(add_completion=False)
@@ -50,8 +53,12 @@ def run_once(
     base_url: str | None,
     max_steps: int,
     permission_mode: str,
+    session: Session | None = None,
 ) -> None:
     render_header(cwd, provider_name, model, base_url)
+    if session:
+        suffix = " (resumed)" if session.resumed else ""
+        console.print(f"[dim]session: {session.session_id}{suffix}[/dim]")
     provider = create_provider(provider_name, model, base_url)
     run_agent(
         prompt,
@@ -60,6 +67,7 @@ def run_once(
         max_steps=max_steps,
         cwd=cwd,
         permission_mode=permission_mode,
+        session=session,
     )
 
 
@@ -85,22 +93,51 @@ def main_command(
         "--permission-mode",
         help="Permission mode: default, acceptEdits, plan",
     ),
+    resume: str | None = typer.Option(
+        None, "--resume", help="按 session id 恢复指定会话"
+    ),
+    continue_: bool = typer.Option(
+        False, "--continue", "-c", help="恢复 cwd 最近一次会话"
+    ),
 ) -> None:
 
     # 启动时只解析一次 cwd，让整次运行共享同一个工作目录。
     resolved_cwd = cwd.resolve()
-    text = prompt.strip()
 
+    #
+    session: Session | None = None
+    if continue_:
+        session = Session.load_latest(resolved_cwd)
+        if session is None:
+            console.print("[red]没有找到历史会话，无法 --continue。[/red]")
+            raise typer.Exit(code=1)
+    elif resume:
+        session = Session.load_by_id(resolved_cwd, resume)
+        if session is None:
+            console.print(f"[red]找不到 session: {resume}[/red]")
+            raise typer.Exit(code=1)
+
+    text = prompt.strip()
     if text:
-        # 有 prompt 参数时进入一次性模式：运行一次就退出。
+        if session is None:
+            session = Session.create(resolved_cwd)
         run_once(
-            text, resolved_cwd, provider, model, base_url, max_steps, permission_mode
+            text,
+            resolved_cwd,
+            provider,
+            model,
+            base_url,
+            max_steps,
+            permission_mode,
+            session=session,
         )
         return
 
     # REPL 分支——命令后面没跟 prompt，走下面交互循环
     render_header(resolved_cwd, provider, model, base_url)
     console.print("输入 /help 查看命令，输入 /exit 退出。")
+    if not session:
+        session = Session.create(resolved_cwd)
     while True:
         line = _prompt()
         if line is None:  # EOF / Ctrl+D / Ctrl+C
@@ -114,7 +151,14 @@ def main_command(
         if line.startswith("/") and handle_slash(line):
             continue
         run_once(
-            text, resolved_cwd, provider, model, base_url, max_steps, permission_mode
+            text,
+            resolved_cwd,
+            provider,
+            model,
+            base_url,
+            max_steps,
+            permission_mode,
+            session,
         )
 
 

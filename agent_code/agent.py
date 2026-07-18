@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolRegistry, ToolContext
@@ -36,6 +36,7 @@ from .prompt_ui import (
     prompt_single_choice,
 )
 from .permissions import PermissionRequest, decide_permission
+from .session import Session
 
 console = Console()
 
@@ -74,13 +75,22 @@ def run_agent(
     max_steps: int = 8,
     cwd: Path | None = None,
     permission_mode: str = "default",  # 新增：default | acceptEdits | plan
+    session: Session | None = None,
 ) -> AgentResult:
     resolved_cwd = cwd or Path.cwd()
     ctx = ToolContext(
         cwd=resolved_cwd,
         skip_policy=SkipPolicy.default(gitignore=load_gitignore(resolved_cwd)),
     )
-    messsages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+    messages: list[dict[str, Any]] = []
+    if session and session.history:
+        messages = list(session.history)
+        messages.append({"role": "user", "content": prompt})
+    else:
+        messages = [{"role": "user", "content": prompt}]
+
+    if session:
+        session.append_messages([messages[-1]])
 
     def emit(line: str) -> None:
         trace.append(line)
@@ -90,16 +100,18 @@ def run_agent(
 
     for step in range(max_steps):
         ## 1. sending api request
-        response = provider.complete(messsages, tools=tools.list())
+        response = provider.complete(messages, tools.list())
 
         ## 2. add LLM response to history
-        messsages.append(_assistant_message(response))
+        messages.append(_assistant_message(response))
 
         ## 3(1). tool call or end execution
         if not response.tool_calls:
             final = response.text or ""
             emit(f"final: {final}")
-            return AgentResult(final=final, trace=trace, messages=messsages)
+            if session:
+                session.append_messages([messages[-1]])
+            return AgentResult(final=final, trace=trace, messages=messages)
 
         ## 3(2). execute all tool calls
         tool_result_blocks: list[dict[str, Any]] = []
@@ -174,7 +186,12 @@ def run_agent(
                     )
                     continue
 
-                edit_preview = (path_str, old_content, new_content)
+                # Ensure new_content is a str to satisfy expected type tuple[str, str, str]
+                edit_preview = (
+                    path_str,
+                    old_content,
+                    new_content if new_content is not None else "",
+                )
 
             if decision.behavior == "deny":
                 # deny 路径：直接返回 error observation，不弹 UI
@@ -295,8 +312,10 @@ def run_agent(
                     "is_error": result.is_error,
                 }
             )
-        messsages.append({"role": "user", "content": tool_result_blocks})
+        messages.append({"role": "user", "content": tool_result_blocks})
+        if session:
+            session.append_messages(messages[-2:])
 
     final = f"Agent reached max steps ({max_steps}) without finishing. Last response: {response}"
     emit(f"final: {final}")
-    return AgentResult(final=final, trace=trace, messages=messsages)
+    return AgentResult(final=final, trace=trace, messages=messages)

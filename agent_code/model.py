@@ -112,9 +112,9 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
 
 
 class MockProvider:
-    def complete(self, prompt: str) -> ModelResponse:
+    def complete(self, messages: list[dict[str, str]]) -> ModelResponse:
         # 一个假模型，固定回一句话，够用来打通 CLI <-> Provider 这条边界。
-        return ModelResponse(text=f"我是 MockProvider，你说了：{prompt}")
+        return ModelResponse(text="我是 MockProvider，你说了：mocking")
 
 
 class AnthropicProvider:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from turtle import back
-from typing import Any, Callable
+from typing import Any, Callable, List
 from datetime import datetime
 from pathlib import Path
 import subprocess
@@ -237,7 +237,7 @@ def _grep_python(
     return truncate_output("\n".join(hits) or "(no matches)")
 
 
-def file_write(args: dict[str, any], ctx: ToolContext) -> str:
+def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
     """整文件覆盖写入。前置校验由 agent.py 的拦截块完成。"""
     path_str = args.get("file_path", "")
     content = args.get("content", "")
@@ -263,7 +263,7 @@ def file_write(args: dict[str, any], ctx: ToolContext) -> str:
     return f"Wrote {len(content)} chars to {path_str}"
 
 
-def file_edit(args: dict[str, any], ctx: ToolContext) -> str:
+def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
     """字符串替换编辑。前置校验在 agent.py 拦截块里完成。"""
     path_str = args.get("file_path", "")
     old_string = args.get("old_string", "")
@@ -289,6 +289,7 @@ def file_edit(args: dict[str, any], ctx: ToolContext) -> str:
     )
     if err:
         return err
+    assert new_content is not None
 
     path.write_text(new_content, encoding="utf-8")
     ctx.read_state.record(path, new_content)
@@ -355,7 +356,7 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
-    def list(self) -> list[Tool]:
+    def list(self) -> List[Tool]:
         return list(self._tools.values())
 
     def run(self, call: ToolCall, context: ToolContext) -> ToolResult:
