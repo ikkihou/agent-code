@@ -1,4 +1,5 @@
 from __future__ import annotations
+from docstring_parser.numpydoc import RETURN_KEY_REGEX
 
 import re
 from dataclasses import dataclass
@@ -60,8 +61,12 @@ _READONLY_TOOLS = frozenset(
         "git_diff",
         "system_date",
         "echo",
+        "memory_recall",
     }
 )
+
+# default / acceptEdits 直接放行；plan 模式仍然 deny——plan 的硬约束就是只读。
+_LOW_RISK_WRITES = frozenset({"memory_write"})
 
 # 交互和网络都不是写入，但仍需要用户知道 Agent 正在停下来问人或访问外部资源。
 _ASK_TOOLS = frozenset({"ask_user_question", "web_fetch", "web_search"})
@@ -103,6 +108,9 @@ def decide_permission(request: PermissionRequest) -> PermissionDecision:
     if mode == "acceptEdits":
         if tool_name in ("file_write", "file_edit"):
             return PermissionDecision("allow")
+
+    if tool_name in _LOW_RISK_WRITES:
+        return PermissionDecision("allow")
 
     # 默认模式：写文件和 bash 需要确认
     return PermissionDecision("ask")

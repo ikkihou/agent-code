@@ -11,13 +11,14 @@
 
 # here put the import lib
 from __future__ import annotations
-from random import seed
-from tkinter import SE
 
+import json
+from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from .agent import run_agent, build_system_prompt
 from .model import AnthropicProvider, create_provider
@@ -37,10 +38,65 @@ def render_header(cwd: Path, provider: str, model: str, base_url: str | None) ->
     console.print()
 
 
-def handle_slash(line: str) -> bool:
+def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
+    """返回 session_id、user/assistant 消息数和文件修改时间。"""
+    from .session import _session_dir
+
+    sessions_dir = _session_dir(cwd)
+    summaries: list[tuple[str, int, float]] = []
+
+    if not sessions_dir.is_dir():
+        return summaries
+
+    for file_path in sessions_dir.rglob("*.jsonl"):
+        message_count = 0
+        try:
+            for line in file_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and record.get("role") in {
+                    "user",
+                    "assistant",
+                }:
+                    message_count += 1
+            modified_at = file_path.stat().st_mtime
+        except (OSError, UnicodeError):
+            continue
+
+        summaries.append((file_path.stem, message_count, modified_at))
+
+    return sorted(summaries, key=lambda item: item[2], reverse=True)
+
+
+def _render_sessions(cwd: Path) -> None:
+    summaries = _session_summaries(cwd)
+    if not summaries:
+        console.print("[dim]没有找到会话。[/dim]")
+        return
+
+    table = Table(title="Sessions")
+    table.add_column("session_id")
+    table.add_column("消息数", justify="right")
+    table.add_column("最后更新时间")
+    for session_id, message_count, modified_at in summaries:
+        updated = (
+            datetime.fromtimestamp(modified_at)
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
+        table.add_row(session_id, str(message_count), updated)
+    console.print(table)
+
+
+def handle_slash(line: str, cwd: Path | None = None) -> bool:
     # slash command 是 CLI 控制命令，不交给模型。
     if line == "/help":
-        console.print("可用命令：/help, /exit")
+        console.print("可用命令：/help, /sessions, /exit")
+        return True
+    if line == "/sessions":
+        _render_sessions(cwd or Path.cwd())
         return True
     return False
 
@@ -133,8 +189,7 @@ def main_command(
             max_steps,
             permission_mode,
             session,
-            system_prompt
-
+            system_prompt,
         )
         return
 
@@ -153,7 +208,7 @@ def main_command(
         if line == "/exit":
             console.print("Bye.")
             return
-        if line.startswith("/") and handle_slash(line):
+        if line.startswith("/") and handle_slash(line, resolved_cwd):
             continue
         run_once(
             text,

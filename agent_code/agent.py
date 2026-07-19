@@ -38,6 +38,7 @@ from .prompt_ui import (
 from .permissions import PermissionRequest, decide_permission
 from .session import Session
 from .project_memory import load_agent_md
+from .compact_basic import compact
 
 console = Console()
 
@@ -58,10 +59,19 @@ _SYSTEM_CORE = (
 
 
 def build_system_prompt(cwd: Path) -> str:
+    """组装 system prompt：核心指南 + AGENT.md + MEMORY.md 索引。
+    注入顺序：core prompt → 项目规则 → 跨 session 记忆索引。"""
+    from .memdir.store import load_index as load_memory_index
+
     parts: list[str] = [_SYSTEM_CORE]
     agent_md = load_agent_md(cwd)
     if agent_md:
         parts.append(agent_md)
+
+    memory_idx = load_memory_index(cwd)
+    if memory_idx:
+        parts.append(f"<project-memory>\n{memory_idx}\n</project-memory>")
+
     return "\n\n".join(parts)
 
 
@@ -85,7 +95,7 @@ def _assistant_message(response: ModelResponse) -> dict[str, Any]:
     return {"role": "assistant", "content": content}
 
 
-def run_agent(
+def run_agent(  ## AGENT LOOP
     prompt: str,
     provider: ModelProvider,
     tools: ToolRegistry,
@@ -118,6 +128,9 @@ def run_agent(
 
     for step in range(max_steps):
         ## 1. sending api request
+        if len(messages) > 40:
+            messages = compact(messages, keep=8)
+            console.print(f"[dim]compacted: {len(messages)} messages remaining[/dim]")
         response = provider.complete(messages, tools.list(), system_prompt)
 
         ## 2. add LLM response to history
