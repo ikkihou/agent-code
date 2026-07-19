@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from operator import truediv
 from pathlib import Path
+from subprocess import TimeoutExpired
 from typing import Any, Protocol
 
 from .model import ModelProvider, ModelResponse, ToolResult
@@ -39,6 +41,7 @@ from .permissions import PermissionRequest, decide_permission
 from .session import Session
 from .project_memory import load_agent_md
 from .compact_basic import compact
+from .hooks import run_hooks
 
 console = Console()
 
@@ -122,7 +125,7 @@ def run_agent(  ## AGENT LOOP
 
     def emit(line: str) -> None:
         trace.append(line)
-        console.print(line)
+        console.print(line, markup=False)
 
     trace: list[str] = []
 
@@ -157,6 +160,31 @@ def run_agent(  ## AGENT LOOP
                 cwd=ctx.cwd,
             )
             decision = decide_permission(request)
+
+            if decision.behavior != "deny":
+                pre_hooks = run_hooks(
+                    "PreToolUse",
+                    call.name,
+                    call.arguments,
+                    ctx.cwd,
+                )
+
+                pre_blocked = [h for h in pre_hooks if not h["success"]]
+                if pre_blocked:
+                    blocked_msgs = "\n".join(
+                        f" [hook] {h['command']}: {h['output']}" for h in pre_blocked
+                    )
+                    observation = f"tool blocked by PreToolUse hook:\n {blocked_msgs}"
+                    emit(f"observation : {observation}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call.id,
+                            "content": observation,
+                            "is_error": True,
+                        }
+                    )
+                    continue
 
             edit_preview: tuple[str, str, str] | None = None
             if call.name in ("file_write", "file_edit") and decision.behavior != "deny":

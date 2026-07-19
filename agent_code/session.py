@@ -24,6 +24,61 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
+
+def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
+    """返回 session_id、user/assistant 消息数和文件修改时间。"""
+    sessions_dir = _session_dir(cwd)
+    summaries: list[tuple[str, int, float]] = []
+
+    if not sessions_dir.is_dir():
+        return summaries
+
+    for file_path in sessions_dir.rglob("*.jsonl"):
+        message_count = 0
+        try:
+            for line in file_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and record.get("role") in {
+                    "user",
+                    "assistant",
+                }:
+                    message_count += 1
+            modified_at = file_path.stat().st_mtime
+        except (OSError, UnicodeError):
+            continue
+
+        summaries.append((file_path.stem, message_count, modified_at))
+
+    return sorted(summaries, key=lambda item: item[2], reverse=True)
+
+
+def _render_sessions(cwd: Path) -> None:
+    summaries = _session_summaries(cwd)
+    if not summaries:
+        console.print("[dim]没有找到会话。[/dim]")
+        return
+
+    table = Table(title="Sessions")
+    table.add_column("session_id")
+    table.add_column("消息数", justify="right")
+    table.add_column("最后更新时间")
+    for session_id, message_count, modified_at in summaries:
+        updated = (
+            datetime.fromtimestamp(modified_at)
+            .astimezone()
+            .isoformat(timespec="seconds")
+        )
+        table.add_row(session_id, str(message_count), updated)
+    console.print(table)
+
 
 def _sanitize_cwd(cwd: Path) -> str:
     path_str = str(cwd.resolve())
