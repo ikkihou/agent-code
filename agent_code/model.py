@@ -45,7 +45,12 @@ class ModelResponse:
 
 
 class ModelProvider(Protocol):
-    def complete(self, messages: list[dict[str, str]]) -> ModelResponse:
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[Any] | None = None,
+        system: str | None = None,
+    ) -> ModelResponse:
         last = messages[-1]
 
         if last["role"] == "user":
@@ -152,6 +157,7 @@ class AnthropicProvider:
         self,
         messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
+        system: str | None = None,
     ) -> ModelResponse:
 
         kwargs: dict[str, Any] = {
@@ -162,6 +168,9 @@ class AnthropicProvider:
 
         if tools:
             kwargs["tools"] = _to_anthropic_tools(tools)
+
+        if system:
+            kwargs["system"] = system
 
         response = self.client.messages.create(**kwargs)
 

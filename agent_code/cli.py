@@ -19,7 +19,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from .agent import run_agent
+from .agent import run_agent, build_system_prompt
 from .model import AnthropicProvider, create_provider
 from .tools import default_tools
 from .session import Session
@@ -54,6 +54,7 @@ def run_once(
     max_steps: int,
     permission_mode: str,
     session: Session | None = None,
+    system_prompt: str | None = None,
 ) -> None:
     render_header(cwd, provider_name, model, base_url)
     if session:
@@ -68,6 +69,7 @@ def run_once(
         cwd=cwd,
         permission_mode=permission_mode,
         session=session,
+        system_prompt=system_prompt,
     )
 
 
@@ -117,6 +119,7 @@ def main_command(
             console.print(f"[red]找不到 session: {resume}[/red]")
             raise typer.Exit(code=1)
 
+    system_prompt = build_system_prompt(cwd)
     text = prompt.strip()
     if text:
         if session is None:
@@ -129,7 +132,9 @@ def main_command(
             base_url,
             max_steps,
             permission_mode,
-            session=session,
+            session,
+            system_prompt
+
         )
         return
 
@@ -159,6 +164,7 @@ def main_command(
             max_steps,
             permission_mode,
             session,
+            system_prompt,
         )
 
 

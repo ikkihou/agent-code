@@ -37,6 +37,7 @@ from .prompt_ui import (
 )
 from .permissions import PermissionRequest, decide_permission
 from .session import Session
+from .project_memory import load_agent_md
 
 console = Console()
 
@@ -46,6 +47,22 @@ class AgentResult:
     final: str
     trace: list[str]
     messages: list[dict[str, Any]]
+
+
+_SYSTEM_CORE = (
+    "You are an AI coding agent running inside a CLI harness. "
+    "You have access to tools for reading/writing files, running shell commands, "
+    "searching the web, and asking the user questions. "
+    "Use tools when needed; respond directly when you can."
+)
+
+
+def build_system_prompt(cwd: Path) -> str:
+    parts: list[str] = [_SYSTEM_CORE]
+    agent_md = load_agent_md(cwd)
+    if agent_md:
+        parts.append(agent_md)
+    return "\n\n".join(parts)
 
 
 # 把内部 ModelResponse 还原成 Anthropic Messages API 的 assistant content blocks格式
@@ -76,6 +93,7 @@ def run_agent(
     cwd: Path | None = None,
     permission_mode: str = "default",  # 新增：default | acceptEdits | plan
     session: Session | None = None,
+    system_prompt: str | None = None,
 ) -> AgentResult:
     resolved_cwd = cwd or Path.cwd()
     ctx = ToolContext(
@@ -100,7 +118,7 @@ def run_agent(
 
     for step in range(max_steps):
         ## 1. sending api request
-        response = provider.complete(messages, tools.list())
+        response = provider.complete(messages, tools.list(), system_prompt)
 
         ## 2. add LLM response to history
         messages.append(_assistant_message(response))
