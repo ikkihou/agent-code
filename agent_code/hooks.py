@@ -34,6 +34,11 @@ def load_hooks(cwd: Path) -> dict[str, list[dict[str, Any]]]:
 
 
 def _matches(tool_name: str, matcher: str) -> bool:
+    """matcher 和 tool_name 的匹配规则：
+    - "*" 匹配所有工具
+    - 单值精确匹配
+    - "a|b" 多值匹配
+    不做正则和支持通配符，保持简单可预期。"""
     if matcher == "*":
         return True
 

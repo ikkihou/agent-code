@@ -188,8 +188,23 @@ def run_agent(  ## AGENT LOOP
 
             edit_preview: tuple[str, str, str] | None = None
             if call.name in ("file_write", "file_edit") and decision.behavior != "deny":
-                # acceptEdits 只跳过确认 UI，不能跳过 Day 4 的安全校验
                 path_str = call.arguments.get("file_path", "")
+                if not path_str:
+                    result = ToolResult(
+                        call.id,
+                        "error: missing required argument 'file_path'",
+                        is_error=True,
+                    )
+                    emit(f"observation: {result.content}")
+                    tool_result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.tool_call_id,
+                            "content": result.content,
+                            "is_error": True,
+                        }
+                    )
+                    continue
                 try:
                     path = resolve_in_cwd(ctx.cwd, path_str)
                 except (ValueError, OSError) as exc:
@@ -363,6 +378,17 @@ def run_agent(  ## AGENT LOOP
 
             result = tools.run(call, ctx)
             emit(f"observation: {result.content}")
+            if not result.is_error:
+                post_hooks = run_hooks(
+                    "PostToolUse",
+                    call.name,
+                    call.arguments,
+                    ctx.cwd,
+                    tool_result=result.content,
+                )
+                for h in post_hooks:
+                    status = "ok" if h["success"] else f"warning: {h['output']}"
+                    console.print(f"[dim]hook: PostToolUse {call.name} {status}[/dim]")
             tool_result_blocks.append(
                 {
                     "type": "tool_result",

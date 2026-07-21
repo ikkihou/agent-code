@@ -1,5 +1,4 @@
 from __future__ import annotations
-from pydantic import FilePath
 
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
