@@ -186,14 +186,20 @@ def main_command(
 
     input_queue: Queue[str | None] = Queue()
     stop_repl = threading.Event()
+    prompt_ready = threading.Event()
+    prompt_ready.set()
 
     def _read_input() -> None:
         while not stop_repl.is_set():
+            prompt_ready.wait()
+            if stop_repl.is_set():
+                return
             try:
                 line = typer.prompt(">").strip()
             except (KeyboardInterrupt, EOFError, Abort):
                 input_queue.put(None)
                 return
+            prompt_ready.clear()
             input_queue.put(line)
 
     input_thread = threading.Thread(target=_read_input, daemon=True)
@@ -214,13 +220,18 @@ def main_command(
             if line is None:
                 break
             if not line:
+                prompt_ready.set()
                 continue
             if line == "/exit":
                 console.print("Bye.")
                 break
-            run_user_input(line)
+            try:
+                run_user_input(line)
+            finally:
+                prompt_ready.set()
     finally:
         stop_repl.set()
+        prompt_ready.set()
         scheduler.stop()
 
 
