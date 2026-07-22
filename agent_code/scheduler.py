@@ -94,3 +94,105 @@ def _save_jobs(cwd: Path, jobs: list[CronJob]) -> None:
         ]
     }
     fpath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+class CronScheduler:
+    """REPL 内 cron 调度器。
+
+    - 后台线程只负责到点把 prompt 放进 pending queue，绝不直接调用 run_agent
+    - REPL 主循环在每次 run_once 返回后 drain queue，把待处理 prompt 作为新一轮用户输入
+    - 调度器只在 REPL 模式激活；一次性模式不创建后台线程
+    """
+
+    def __init__(self, cwd: Path) -> None:
+        self.cwd = cwd
+        self._jobs: list[CronJob] = _load_jobs(cwd)
+        self._pending: Queue[str] = Queue()  # 到点排队的 prompt
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+
+    def add_job(self, slash: str, every_seconds: int, label: str = "") -> CronJob:
+        jid = uuid.uuid4().hex[:12]
+        job = CronJob(
+            job_id=jid,
+            slash=slash,
+            every_seconds=every_seconds,
+            label=label,
+        )
+        with self._lock:
+            self._jobs.append(job)
+            _save_jobs(self.cwd, self._jobs)
+        return job
+
+    def list_jobs(self) -> list[CronJob]:
+        with self._lock:
+            return list(self._jobs)
+
+    def cancel_job(self, jid: str) -> bool:
+        with self._lock:
+            for i, j in enumerate(self._jobs):
+                if j.id == jid:
+                    self._jobs.pop(i)
+                    _save_jobs(self.cwd, self._jobs)
+
+                    return True
+
+        return False
+
+    def drain_pending(self) -> list[str]:
+        items: list[str] = []
+        while not self._pending.empty:
+            try:
+                items.append(self._pending.get_nowait())
+            except Exception:
+                break
+
+        return items
+
+    def _loop(self) -> None:
+        while not self._stop_event.is_set():
+            self._stop_event.wait(1.0)
+            if self._stop_event.is_set():
+                break
+
+            now_ts = datetime.now(timezone.utc).timestamp()
+            dirty = False
+            with self._lock:
+                for job in self._jobs:
+                    baseline = job.last_run_at or job.created_at
+                    last_ts = 0.0
+
+                    if baseline:
+                        try:
+                            last_dt = datetime.fromisoformat(baseline)
+                            if last_dt.tzinfo is None:
+                                last_dt = last_dt.replace(tzinfo=timezone.utc)
+                            last_ts = last_dt.timestamp()
+                        except ValueError:
+                            pass
+
+                    if now_ts - last_ts > job.every_seconds:
+                        self._pending.put(job.slash)
+                        job.last_run_at = datetime.now(timezone.utc).isoformat()
+                        dirty = True
+
+                    if dirty:
+                        _save_jobs(self.cwd, self._jobs)
+
+    def start(self) -> None:
+        """启动后台调度线程（daemon，随主进程退出自动回收）。"""
+        if self._running:
+            return
+        self._running = True
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """停止调度器。不 join——daemon thread 会在主线程退出时回收。"""
+        if not self._running:
+            return
+        self._running = False
+        self._stop_event.set()

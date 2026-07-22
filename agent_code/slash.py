@@ -170,6 +170,99 @@ def _cmd_sessions(args: list[str], ctx: SlashContext) -> SlashResult:
     )
 
 
+def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
+    """本地 /loop add：直接调 cron_create 的函数逻辑，不用绕模型。"""
+    from .cron_tools import cron_create
+    from .tools import ToolContext
+
+    if not args:
+        return SlashResult(
+            handled=True,
+            message="用法: /loop add <slash或prompt> --every <60s|5m|2h> --label <标签>",
+        )
+    # 简单解析：参数以 -- 开头的是选项，其余拼成 slash
+    slash_parts: list[str] = []
+    every_seconds: int | None = None
+    label = ""
+    i = 0
+
+    def _parse_every(raw: str) -> int:
+        units = {"s": 1, "m": 60, "h": 3600}
+        if raw[-1:] in units:
+            return int(raw[:-1]) * units[raw[-1]]
+        return int(raw)
+
+    while i < len(args):
+        if args[i] == "--every" and i + 1 < len(args):
+            try:
+                every_seconds = _parse_every(args[i + 1])
+            except (ValueError, IndexError):
+                return SlashResult(
+                    handled=True,
+                    message="--every 需要整数秒，或 60s / 5m / 2h 这种格式",
+                )
+            i += 2
+        elif args[i] == "--label" and i + 1 < len(args):
+            label = args[i + 1]
+            i += 2
+        else:
+            slash_parts.append(args[i])
+            i += 1
+    slash = " ".join(slash_parts)
+    if not slash:
+        return SlashResult(
+            handled=True, message="用法: /loop add <slash或prompt> --every <60s|5m|2h>"
+        )
+    if every_seconds is None:
+        return SlashResult(
+            handled=True,
+            message="缺少 --every。用法: /loop add <slash或prompt> --every <60s|5m|2h>",
+        )
+    tool_ctx = ToolContext(cwd=ctx.cwd)
+    msg = cron_create(
+        {"slash": slash, "every_seconds": every_seconds, "label": label}, tool_ctx
+    )
+    return SlashResult(handled=True, message=msg)
+
+
+def _cmd_loop_list(_args: list[str], ctx: SlashContext) -> SlashResult:
+    from .cron_tools import cron_list
+    from .tools import ToolContext
+
+    tool_ctx = ToolContext(cwd=ctx.cwd)
+    msg = cron_list({}, tool_ctx)
+    return SlashResult(handled=True, message=msg)
+
+
+def _cmd_loop_cancel(args: list[str], ctx: SlashContext) -> SlashResult:
+    from .cron_tools import cron_cancel
+    from .tools import ToolContext
+
+    if not args:
+        return SlashResult(handled=True, message="用法: /loop cancel <id>")
+    tool_ctx = ToolContext(cwd=ctx.cwd)
+    msg = cron_cancel({"id": args[0]}, tool_ctx)
+    return SlashResult(handled=True, message=msg)
+
+
+def _cmd_loop(args: list[str], ctx: SlashContext) -> SlashResult:
+    """管理 cron 定时任务：/loop add/list/cancel。"""
+    if not args:
+        return SlashResult(
+            handled=True,
+            message="用法: /loop add <slash或prompt> --every <60s|5m|2h> --label <标签>\n      /loop list\n      /loop cancel <id>",
+        )
+    subcommand = args[0]
+    rest = args[1:]
+    if subcommand == "add":
+        return _cmd_loop_add(rest, ctx)
+    if subcommand == "list":
+        return _cmd_loop_list(rest, ctx)
+    if subcommand == "cancel":
+        return _cmd_loop_cancel(rest, ctx)
+    return SlashResult(handled=True, message=f"Unknown /loop subcommand: {subcommand}")
+
+
 # --- 注册内置命令 ---
 register("help", "显示所有可用 slash command", _cmd_help)
 register("model", "显示当前模型/provider", _cmd_model)
@@ -178,3 +271,4 @@ register("compact", "显示 compact 状态", _cmd_compact)
 register("permissions", "显示权限模式 (default/acceptEdits/plan)", _cmd_permissions)
 register("plan", "显示 plan 模式提示", _cmd_plan)
 register("sessions", "显示当前路径下所有的会话记录", _cmd_sessions)
+register("loop", "管理 cron 定时任务: add/list/cancel", _cmd_loop)

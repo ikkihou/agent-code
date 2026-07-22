@@ -7,10 +7,12 @@ authors = [{ name = "ikkihou", email = "oye20000101@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.109.1",
+    "click>=8.4.2",
     "dotenv>=0.9.9",
     "html2text>=2025.4.15",
     "httpx[socks]>=0.28.1",
     "pathspec>=1.1.1",
+    "prompt-toolkit>=3.0.52",
     "rich>=15.0.0",
     "typer>=0.26.7",
 ]
@@ -29,7 +31,7 @@ packages = ["agent_code"]
 package = true
 
 [tool.ruff.lint]
-ignore = ["F401"]
+ignore = ["F401", "E402"]
 
 [dependency-groups]
 dev = ["pytest>=9.1.0"]

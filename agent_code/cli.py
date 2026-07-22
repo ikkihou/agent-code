@@ -12,19 +12,21 @@
 # here put the import lib
 from __future__ import annotations
 
-import json
-from datetime import datetime
+import threading
 from pathlib import Path
+from queue import Empty, Queue
 
 import typer
 from rich.console import Console
-from rich.table import Table
+from click.exceptions import Abort
 
 from .agent import run_agent, build_system_prompt
 from .slash import SlashContext, dispatch_slash
-from .model import AnthropicProvider, create_provider
+from .model import create_provider
 from .tools import default_tools
-from .session import Session, _session_summaries
+from .session import Session
+from .scheduler import CronScheduler
+from .cron_tools import set_scheduler
 
 console = Console()
 app = typer.Typer(add_completion=False)
@@ -100,7 +102,7 @@ def main_command(
     # 启动时只解析一次 cwd，让整次运行共享同一个工作目录。
     resolved_cwd = cwd.resolve()
 
-    #
+    # 加载对话记录
     session: Session | None = None
     if continue_:
         session = Session.load_latest(resolved_cwd)
@@ -113,6 +115,12 @@ def main_command(
             console.print(f"[red]找不到 session: {resume}[/red]")
             raise typer.Exit(code=1)
 
+    ## Create and start cron scheduler
+    scheduler = CronScheduler(resolved_cwd)
+    set_scheduler(scheduler)
+    scheduler.start()
+
+    # 构造系统提示词
     system_prompt = build_system_prompt(cwd)
 
     def run_user_input(line: str) -> None:
@@ -163,27 +171,57 @@ def main_command(
             system_prompt=system_prompt,
         )
 
+    # (1) 一次性调用分支
     text = prompt.strip()
     if text:
         run_user_input(text.strip())
         return
 
-    # REPL 分支——命令后面没跟 prompt，走下面交互循环
+    # (2) REPL 分支——命令后面没跟 prompt，走下面交互循环
     render_header(resolved_cwd, provider, model, base_url)
     console.print("输入 /help 查看命令，输入 /exit 退出。")
     if not session:
+        ## create an new Session
         session = Session.create(resolved_cwd)
-    while True:
-        line = _prompt()
-        if line is None:  # EOF / Ctrl+D / Ctrl+C
-            console.print("\nBye.")
-            return
-        if not line:
-            continue
-        if line == "/exit":
-            console.print("Bye.")
-            return
-        run_user_input(line)
+
+    input_queue: Queue[str | None] = Queue()
+    stop_repl = threading.Event()
+
+    def _read_input() -> None:
+        while not stop_repl.is_set():
+            try:
+                line = typer.prompt(">").strip()
+            except (KeyboardInterrupt, EOFError, Abort):
+                input_queue.put(None)
+                return
+            input_queue.put(line)
+
+    input_thread = threading.Thread(target=_read_input, daemon=True)
+    input_thread.start()
+
+    try:
+        while True:
+            # 即使用户没有敲下一行，主线程也会定期检查 cron pending queue。
+            for pp in scheduler.drain_pending():
+                console.print(f"[dim]cron: running scheduled job → {pp}[/dim]")
+                run_user_input(pp)
+
+            try:
+                line = input_queue.get(timeout=0.5)
+            except Empty:
+                continue
+
+            if line is None:
+                break
+            if not line:
+                continue
+            if line == "/exit":
+                console.print("Bye.")
+                break
+            run_user_input(line)
+    finally:
+        stop_repl.set()
+        scheduler.stop()
 
 
 def main() -> None:

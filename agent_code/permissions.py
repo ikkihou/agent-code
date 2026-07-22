@@ -62,14 +62,27 @@ _READONLY_TOOLS = frozenset(
         "system_date",
         "echo",
         "memory_recall",
+        "cron_list",
     }
 )
 
 # default / acceptEdits 直接放行；plan 模式仍然 deny——plan 的硬约束就是只读。
-_LOW_RISK_WRITES = frozenset({"memory_write"})
+_LOW_RISK_WRITES = frozenset(
+    {
+        "memory_write",
+        "cron_create",
+        "cron_cancel",
+    }
+)
 
 # 交互和网络都不是写入，但仍需要用户知道 Agent 正在停下来问人或访问外部资源。
-_ASK_TOOLS = frozenset({"ask_user_question", "web_fetch", "web_search"})
+_ASK_TOOLS = frozenset(
+    {
+        "ask_user_question",
+        "web_fetch",
+        "web_search",
+    }
+)
 
 
 def decide_permission(request: PermissionRequest) -> PermissionDecision:
