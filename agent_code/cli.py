@@ -69,15 +69,6 @@ def run_once(
     )
 
 
-def _prompt() -> str | None:
-    """读取一行用户输入，返回 stripped 内容，EOF/中断时返回 None。"""
-    try:
-        line = input("> ")
-        return line.strip()
-    except (EOFError, KeyboardInterrupt):
-        return None
-
-
 @app.callback(invoke_without_command=True)
 def main_command(
     prompt: str = typer.Argument("", help="Prompt to send to the agent."),
@@ -181,7 +172,6 @@ def main_command(
     render_header(resolved_cwd, provider, model, base_url)
     console.print("输入 /help 查看命令，输入 /exit 退出。")
     if not session:
-        ## create an new Session
         session = Session.create(resolved_cwd)
 
     input_queue: Queue[str | None] = Queue()
@@ -207,7 +197,6 @@ def main_command(
 
     try:
         while True:
-            # 即使用户没有敲下一行，主线程也会定期检查 cron pending queue。
             for pp in scheduler.drain_pending():
                 console.print(f"[dim]cron: running scheduled job → {pp}[/dim]")
                 run_user_input(pp)
@@ -219,12 +208,15 @@ def main_command(
 
             if line is None:
                 break
+
             if not line:
                 prompt_ready.set()
                 continue
+
             if line == "/exit":
                 console.print("Bye.")
                 break
+
             try:
                 run_user_input(line)
             finally:
