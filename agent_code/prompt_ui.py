@@ -15,6 +15,21 @@ from __future__ import annotations
 import difflib
 import typer
 
+_terminal_asker = None  # 交互 shell 启动时由 interactive.py 注入；one-shot 保持 None
+
+
+def set_terminal_asker(asker) -> None:
+    global _terminal_asker
+    _terminal_asker = asker
+
+
+def _ask(func):
+    """worker 要问用户时走这里。交互 shell 注入了 asker → 丢回主线程事件循环问；
+    one-shot 没注入（_terminal_asker is None）→ 直接问。"""
+    if _terminal_asker is not None:
+        return _terminal_asker(func)
+    return func()
+
 
 def render_diff(old: str, new: str, path: str) -> str:
     """用 difflib 生成 unified diff，给增删行加 rich markup 着色。"""
@@ -44,17 +59,17 @@ def render_diff(old: str, new: str, path: str) -> str:
 
 def confirm_edit(path: str) -> bool:
     """让用户确认是否应用这次编辑，默认不应用。"""
-    return typer.confirm(f"Apply this edit to {path}?", default=False)
+    return _ask(lambda: typer.confirm(f"Apply this edit to {path}?", default=False))
 
 
 def confirm_command(command: str) -> bool:
     """让用户确认是否执行这条 bash 命令，默认不执行。"""
-    return typer.confirm("Run this command?", default=False)
+    return _ask(lambda: typer.confirm("Run this command?", default=False))
 
 
 def confirm_tool_use(tool_name: str, detail: str) -> bool:
     """让用户确认非 bash 的 ask 类工具，例如访问外部网络。"""
-    return typer.confirm(f"Allow {tool_name}: {detail}?", default=False)
+    return _ask(lambda: typer.confirm(f"Allow {tool_name}: {detail}?", default=False))
 
 
 def prompt_single_choice(question: str, labels: list[str]) -> str | None:
@@ -65,7 +80,7 @@ def prompt_single_choice(question: str, labels: list[str]) -> str | None:
     console.print(f"\n[bold yellow]? {question}[/bold yellow]")
     for i, label in enumerate(labels, 1):
         console.print(f"  {i}. {label}")
-    console.print(f"  0. [dim]Skip / Other[/dim]")
+    console.print("  0. [dim]Skip / Other[/dim]")
 
     try:
         choice = typer.prompt("Choice", default="0")

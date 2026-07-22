@@ -12,13 +12,10 @@
 # here put the import lib
 from __future__ import annotations
 
-import threading
 from pathlib import Path
-from queue import Empty, Queue
 
 import typer
 from rich.console import Console
-from click.exceptions import Abort
 
 from .agent import run_agent, build_system_prompt
 from .slash import SlashContext, dispatch_slash
@@ -27,6 +24,8 @@ from .tools import default_tools
 from .session import Session
 from .scheduler import CronScheduler
 from .cron_tools import set_scheduler
+from .runtime import RuntimeState
+from .interactive import run_interactive_shell
 
 console = Console()
 app = typer.Typer(add_completion=False)
@@ -57,13 +56,16 @@ def run_once(
         suffix = " (resumed)" if session.resumed else ""
         console.print(f"[dim]session: {session.session_id}{suffix}[/dim]")
     provider = create_provider(provider_name, model, base_url)
+    state = RuntimeState(
+        permission_mode=permission_mode, model=model, provider=provider_name
+    )
     run_agent(
         prompt,
         provider,
         default_tools(),
         max_steps=max_steps,
         cwd=cwd,
-        permission_mode=permission_mode,
+        state=state,
         session=session,
         system_prompt=system_prompt,
     )
@@ -170,61 +172,38 @@ def main_command(
 
     # (2) REPL 分支——命令后面没跟 prompt，走下面交互循环
     render_header(resolved_cwd, provider, model, base_url)
-    console.print("输入 /help 查看命令，输入 /exit 退出。")
-    if not session:
+    if session is None:
         session = Session.create(resolved_cwd)
 
-    input_queue: Queue[str | None] = Queue()
-    stop_repl = threading.Event()
-    prompt_ready = threading.Event()
-    prompt_ready.set()
+    state = RuntimeState(
+        permission_mode=permission_mode, model=model, provider=provider
+    )
+    tools = default_tools()
 
-    def _read_input() -> None:
-        while not stop_repl.is_set():
-            prompt_ready.wait()
-            if stop_repl.is_set():
-                return
-            try:
-                line = typer.prompt(">").strip()
-            except (KeyboardInterrupt, EOFError, Abort):
-                input_queue.put(None)
-                return
-            prompt_ready.clear()
-            input_queue.put(line)
+    def run_turn(line: str) -> None:
+        turn_provider = create_provider(state.provider, state.model, base_url)
+        run_agent(
+            line,
+            turn_provider,
+            tools,
+            max_steps=max_steps,
+            cwd=resolved_cwd,
+            state=state,
+            session=session,
+            system_prompt=system_prompt,
+        )
 
-    input_thread = threading.Thread(target=_read_input, daemon=True)
-    input_thread.start()
+    def make_slash_context() -> SlashContext:
+        return SlashContext(
+            cwd=resolved_cwd,
+            permission_mode=state.permission_mode,
+            model=state.model,
+            provider=state.provider,
+            session_id=session.session_id if session else None,
+        )
 
-    try:
-        while True:
-            for pp in scheduler.drain_pending():
-                console.print(f"[dim]cron: running scheduled job → {pp}[/dim]")
-                run_user_input(pp)
-
-            try:
-                line = input_queue.get(timeout=0.5)
-            except Empty:
-                continue
-
-            if line is None:
-                break
-
-            if not line:
-                prompt_ready.set()
-                continue
-
-            if line == "/exit":
-                console.print("Bye.")
-                break
-
-            try:
-                run_user_input(line)
-            finally:
-                prompt_ready.set()
-    finally:
-        stop_repl.set()
-        prompt_ready.set()
-        scheduler.stop()
+    console.print("输入 /help 查看命令，输入 /exit 退出。")
+    run_interactive_shell(state, run_turn, make_slash_context)
 
 
 def main() -> None:

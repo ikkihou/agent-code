@@ -33,6 +33,7 @@ from .fs_safety import (
 )
 from .file_history import backup
 from .bash_runner import run_sync as _bash_run_sync
+from .runtime import RuntimeState
 
 
 @dataclass
@@ -40,6 +41,8 @@ class ToolContext:
     cwd: Path
     skip_policy: SkipPolicy = field(default_factory=SkipPolicy.default)
     read_state: ReadFileState = field(default_factory=ReadFileState)
+    state: RuntimeState | None = None
+
 
 
 ToolFunc = Callable[

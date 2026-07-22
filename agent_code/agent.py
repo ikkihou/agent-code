@@ -42,6 +42,7 @@ from .session import Session
 from .project_memory import load_agent_md
 from .compact_basic import compact
 from .hooks import run_hooks
+from .runtime import RuntimeState
 
 console = Console()
 
@@ -104,7 +105,7 @@ def run_agent(  ## AGENT LOOP
     tools: ToolRegistry,
     max_steps: int = 8,
     cwd: Path | None = None,
-    permission_mode: str = "default",  # 新增：default | acceptEdits | plan
+    state: RuntimeState | None = None,
     session: Session | None = None,
     system_prompt: str | None = None,
 ) -> AgentResult:
@@ -112,6 +113,7 @@ def run_agent(  ## AGENT LOOP
     ctx = ToolContext(
         cwd=resolved_cwd,
         skip_policy=SkipPolicy.default(gitignore=load_gitignore(resolved_cwd)),
+        state=state,
     )
     messages: list[dict[str, Any]] = []
     if session and session.history:
@@ -156,7 +158,7 @@ def run_agent(  ## AGENT LOOP
             request = PermissionRequest(
                 tool_name=call.name,
                 args=call.arguments,
-                mode=permission_mode,
+                mode=state.permission_mode,
                 cwd=ctx.cwd,
             )
             decision = decide_permission(request)
