@@ -22,3 +22,9 @@ class RuntimeState:
     provider: str = "anthropic"
     abort_event: threading.Event = field(default_factory=threading.Event)
     input_queue: Queue[str] = field(default_factory=Queue)
+
+    def cycle_permission_mode(self) -> str:
+        order = ["default", "acceptEdits", "plan"]
+        idx = order.index(self.permission_mode) if self.permission_mode in order else 0
+        self.permission_mode = order[(idx + 1) % len(order)]
+        return self.permission_mode

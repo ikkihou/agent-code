@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .runtime import RuntimeState
+
 
 @dataclass
 class SlashContext:
@@ -18,6 +20,7 @@ class SlashContext:
     model: str
     provider: str
     session_id: str | None
+    state: RuntimeState | None = None
 
 
 class SlashResult:
@@ -97,11 +100,11 @@ def _cmd_model(args: list[str], ctx: SlashContext) -> SlashResult:
             handled=True,
             message=f"provider: {ctx.provider}  model: {ctx.model}",
         )
-    # 切换模型需要重建 provider，牵涉到 Anthropic/OpenAI 客户端实例化，
-    # 当前版本不支持 REPL 中热切换。Day 8 随着 Plan Mode 一起做。
+    target = args[0]
+    if ctx.state is not None:
+        ctx.state.model = target  # 下一轮 run_turn 按 state.model 重建 provider
     return SlashResult(
-        handled=True,
-        message=f"Cannot change model at runtime. Current: {ctx.provider}/{ctx.model}",
+        handled=True, message=f"model → {target}（下一轮生效，当前轮不变）"
     )
 
 
@@ -137,9 +140,11 @@ def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
         return SlashResult(
             handled=True, message=f"Unknown mode: {target}. Use: {', '.join(modes)}"
         )
+    assert ctx.state is not None
+    ctx.state.permission_mode = target
     return SlashResult(
         handled=True,
-        message=f"当前版本不在 REPL 内热切换权限模式。请用 --permission-mode {target} 重新启动。",
+        message=f"Agent 权限已切换至 {target}",
     )
 
 

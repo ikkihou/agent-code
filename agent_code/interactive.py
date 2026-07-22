@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -17,8 +18,10 @@ worker 线程 = run_agent（阻塞 provider.complete + 工具执行）。
 
 import asyncio
 import queue
+import sys
 import threading
 from typing import Any, Callable
+from contextlib import redirect_stderr, redirect_stdout
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import run_in_terminal
@@ -28,6 +31,15 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from . import prompt_ui
 from .runtime import RuntimeState
 from .slash import SlashContext, dispatch_slash
+
+
+def _call_with_terminal_output(func: Callable[[], Any], stdout_proxy: Any) -> Any:
+    """Run a blocking prompt against the real terminal, not StdoutProxy."""
+    terminal_output = getattr(stdout_proxy, "original_stdout", None)
+    if terminal_output is None:
+        return func()
+    with redirect_stdout(terminal_output), redirect_stderr(terminal_output):
+        return func()
 
 
 def run_interactive_shell(
@@ -56,36 +68,52 @@ def run_interactive_shell(
     async def _run() -> None:
         loop = asyncio.get_running_loop()
 
-        def terminal_asker(func: Callable[[], Any]) -> Any:
-            return asyncio.run_coroutine_threadsafe(
-                run_in_terminal(func), loop
-            ).result()
+        with patch_stdout(raw=True):
+            stdout_proxy = sys.stdout
 
-        prompt_ui.set_terminal_asker(terminal_asker)
+            def terminal_asker(func: Callable[[], Any]) -> Any:
+                def call_on_real_terminal() -> Any:
+                    # ``typer.confirm`` writes a prompt without a trailing newline.
+                    # StdoutProxy buffers that prompt, so it remains invisible while
+                    # input() blocks the event loop. Bypass the proxy while the
+                    # prompt-toolkit application is suspended by run_in_terminal.
+                    return _call_with_terminal_output(func, stdout_proxy)
 
-        with patch_stdout():
-            while True:
-                try:
-                    text = (await session.prompt_async("> ")).strip()
-                except (KeyboardInterrupt, EOFError):
-                    break
+                async def _run_in_terminal() -> Any:
+                    return await run_in_terminal(call_on_real_terminal)
 
-                if not text:
-                    continue
+                return asyncio.run_coroutine_threadsafe(
+                    _run_in_terminal(), loop
+                ).result()
 
-                if text == "/exit":
-                    break
+            prompt_ui.set_terminal_asker(terminal_asker)
+            try:
+                while True:
+                    try:
+                        text = (await session.prompt_async("> ")).strip()
+                    except (KeyboardInterrupt, EOFError):
+                        break
 
-                if text.startswith("/"):
-                    result = dispatch_slash(text, make_slash_context())
-                    if result.handled:
-                        if result.message:
-                            print(result.message)
-                        if result.should_query:
-                            job_queue.put(result.prompt)
+                    if not text:
                         continue
 
-                job_queue.put(text)
+                    if text == "/exit":
+                        break
+
+                    if text.startswith("/"):
+                        result = dispatch_slash(text, make_slash_context())
+                        if result.handled:
+                            if result.message:
+                                from rich.console import Console
+                                console = Console()
+                                console.print(result.message)
+                            if result.should_query:
+                                job_queue.put(result.prompt)
+                            continue
+
+                    job_queue.put(text)
+            finally:
+                prompt_ui.set_terminal_asker(None)
 
     asyncio.run(_run())
     job_queue.put("__EXIT__")
@@ -98,6 +126,11 @@ def build_key_bindings(state: RuntimeState) -> KeyBindings:
     @kb.add("escape")
     def _(event: Any) -> None:
         state.abort_event.set()  # 只置标志，真正的中断在 Agent Loop 步间处理（v3）
+
+    @kb.add("s-tab")
+    def _(event: Any) -> None:
+        new_mode = state.cycle_permission_mode()
+        print(f"[mode → {new_mode}]")  # 提示切到了哪个模式
 
     return kb
 

@@ -200,6 +200,7 @@ def main_command(
             model=state.model,
             provider=state.provider,
             session_id=session.session_id if session else None,
+            state=state,
         )
 
     console.print("输入 /help 查看命令，输入 /exit 退出。")

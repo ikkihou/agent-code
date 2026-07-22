@@ -73,20 +73,22 @@ def confirm_tool_use(tool_name: str, detail: str) -> bool:
 
 
 def prompt_single_choice(question: str, labels: list[str]) -> str | None:
-    """展示一个 numbered menu 让用户单选，返回被选中的 label。"""
-    from rich.console import Console
+    def ask_choice() -> str:
+        from rich.console import Console
 
-    console = Console()
-    console.print(f"\n[bold yellow]? {question}[/bold yellow]")
-    for i, label in enumerate(labels, 1):
-        console.print(f"  {i}. {label}")
-    console.print("  0. [dim]Skip / Other[/dim]")
+        console = Console()
+        console.print(f"\n[bold yellow]? {question}[/bold yellow]")
+        for i, label in enumerate(labels, 1):
+            console.print(f"  {i}. {label}")
+        console.print("  0. [dim]Skip / Other[/dim]")
+
+        return typer.prompt("Choice", default="0")
 
     try:
-        choice = typer.prompt("Choice", default="0")
+        choice = _ask(ask_choice)
         idx = int(choice)
         if 1 <= idx <= len(labels):
             return labels[idx - 1]
         return None
-    except (ValueError, TypeError):
+    except (ValueError, typer.Abort):
         return None

@@ -11,6 +11,7 @@
 
 # here put the import lib
 from __future__ import annotations
+import stat
 
 from dataclasses import dataclass
 from operator import truediv
@@ -158,7 +159,7 @@ def run_agent(  ## AGENT LOOP
             request = PermissionRequest(
                 tool_name=call.name,
                 args=call.arguments,
-                mode=state.permission_mode,
+                mode=state.permission_mode if state else "default",
                 cwd=ctx.cwd,
             )
             decision = decide_permission(request)
