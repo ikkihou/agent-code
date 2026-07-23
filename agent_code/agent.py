@@ -11,14 +11,11 @@
 
 # here put the import lib
 from __future__ import annotations
-from weakref import finalize
-import stat
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from operator import truediv
 from pathlib import Path
-from subprocess import TimeoutExpired
-from typing import Any, Protocol
+from typing import Any
 
 from .model import ModelProvider, ModelResponse, ToolResult
 from .tools import ToolRegistry, ToolContext
@@ -128,8 +125,11 @@ def run_agent(  ## AGENT LOOP
         session.append_messages([messages[-1]])
 
     def emit(line: str) -> None:
+        # 工具结果可能很长：完整内容只通过 tool_result 回填给模型，终端只看工具调用/最终回答。
+        if line.startswith("observation:"):
+            return
         trace.append(line)
-        console.print(line, markup=False)
+        console.print(line, markup=False, highlight=False)
 
     trace: list[str] = []
     continuation_count = 0
@@ -194,255 +194,34 @@ def run_agent(  ## AGENT LOOP
             return AgentResult(final=final, trace=trace, messages=messages)
 
         ## 3(2). execute all tool calls
-        tool_result_blocks: list[dict[str, Any]] = []
-        for call in response.tool_calls:
-            emit(f"tool_call: {call.name} {call.arguments}")
-
-            # 权限引擎统一入口：所有工具调用先包装成 PermissionRequest
-            request = PermissionRequest(
-                tool_name=call.name,
-                args=call.arguments,
-                mode=state.permission_mode if state else "default",
-                cwd=ctx.cwd,
-            )
-            decision = decide_permission(request)
-
-            if decision.behavior != "deny":
-                pre_hooks = run_hooks(
-                    "PreToolUse",
-                    call.name,
-                    call.arguments,
-                    ctx.cwd,
-                )
-
-                pre_blocked = [h for h in pre_hooks if not h["success"]]
-                if pre_blocked:
-                    blocked_msgs = "\n".join(
-                        f" [hook] {h['command']}: {h['output']}" for h in pre_blocked
-                    )
-                    observation = f"tool blocked by PreToolUse hook:\n {blocked_msgs}"
-                    emit(f"observation : {observation}")
+        tool_result_blocks = execute_plan_boundary_calls(
+            response.tool_calls,
+            ctx,
+            state,
+            tools,
+            emit,
+        )
+        if tool_result_blocks is None:
+            tool_result_blocks = []
+            for batch in partition_tool_calls(response.tool_calls, tools):
+                if len(batch) == 1:
                     tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": call.id,
-                            "content": observation,
-                            "is_error": True,
-                        }
+                        execute_one_tool_call(batch[0], ctx, state, tools, emit)
                     )
-                    continue
-
-            edit_preview: tuple[str, str, str] | None = None
-            if call.name in ("file_write", "file_edit") and decision.behavior != "deny":
-                path_str = call.arguments.get("file_path", "")
-                if not path_str:
-                    result = ToolResult(
-                        call.id,
-                        "error: missing required argument 'file_path'",
-                        is_error=True,
-                    )
-                    emit(f"observation: {result.content}")
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": result.tool_call_id,
-                            "content": result.content,
-                            "is_error": True,
-                        }
-                    )
-                    continue
-                try:
-                    path = resolve_in_cwd(ctx.cwd, path_str)
-                except (ValueError, OSError) as exc:
-                    result = ToolResult(call.id, f"error: {exc}", is_error=True)
-                    emit(f"observation: {result.content}")
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": result.tool_call_id,
-                            "content": result.content,
-                            "is_error": True,
-                        }
-                    )
-                    continue
-
-                old_content = path.read_text(encoding="utf-8") if path.exists() else ""
-
-                validation_error: str | None = None
-                if call.name == "file_write":
-                    if path.exists():
-                        validation_error = ensure_read_before_edit(
-                            ctx.read_state, path
-                        ) or check_mtime_conflict(ctx.read_state, path)
-                    new_content = call.arguments.get("content", "")
-                else:  # file_edit
-                    new_content = ""
-                    if not path.exists():
-                        validation_error = f"error: file does not exist: {path_str}"
-                    else:
-                        validation_error = ensure_read_before_edit(
-                            ctx.read_state, path
-                        ) or check_mtime_conflict(ctx.read_state, path)
-                    if validation_error is None:
-                        new_content, replace_err = apply_single_replace(
-                            old_content,
-                            call.arguments.get("old_string", ""),
-                            call.arguments.get("new_string", ""),
-                            bool(call.arguments.get("replace_all", False)),
-                        )
-                        if replace_err is not None:
-                            validation_error = replace_err
-
-                if validation_error is not None:
-                    result = ToolResult(call.id, validation_error, is_error=True)
-                    emit(f"observation: {result.content}")
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": result.tool_call_id,
-                            "content": result.content,
-                            "is_error": True,
-                        }
-                    )
-                    continue
-
-                # Ensure new_content is a str to satisfy expected type tuple[str, str, str]
-                edit_preview = (
-                    path_str,
-                    old_content,
-                    new_content if new_content is not None else "",
-                )
-
-            if decision.behavior == "deny":
-                # deny 路径：直接返回 error observation，不弹 UI
-                result = ToolResult(
-                    call.id, f"error: {decision.message}", is_error=True
-                )
-                emit(f"observation: {result.content}")
-                tool_result_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": result.tool_call_id,
-                        "content": result.content,
-                        "is_error": True,
-                    }
-                )
-                continue
-
-            elif decision.behavior == "ask":
-                # ask 路径：按工具类型分发不同的预览和确认 UI
-                if call.name in ("file_write", "file_edit"):
-                    # --- 文件编辑：安全校验已经做过；ask 模式只负责 diff + confirm ---
-                    if edit_preview is not None:
-                        path_str, old_content, new_content = edit_preview
-                        diff_text = render_diff(old_content, new_content, path_str)
-                        console.print(f"\n[bold]Diff for {path_str}:[/bold]")
-                        console.print(diff_text)
-                        if not confirm_edit(path_str):
-                            result = ToolResult(
-                                call.id, "error: edit rejected by user", is_error=True
+                else:
+                    # 只读组并行。ex.map 按输入顺序返回结果，
+                    # 所以 tool_result 顺序天然对齐 tool_use 顺序——这是必须守的协议约束。
+                    with ThreadPoolExecutor(max_workers=4) as ex:
+                        results = list(
+                            ex.map(
+                                lambda c: execute_one_tool_call(
+                                    c, ctx, state, tools, emit
+                                ),
+                                batch,
                             )
-                            emit(f"observation: {result.content}")
-                            tool_result_blocks.append(
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": result.tool_call_id,
-                                    "content": result.content,
-                                    "is_error": True,
-                                }
-                            )
-                            continue
+                        )
+                    tool_result_blocks.extend(results)
 
-                elif call.name == "bash":
-                    # --- bash：命令预览 + confirm ---
-                    command = call.arguments.get("command", "")
-                    timeout = call.arguments.get("timeout", 30)
-                    console.print(f"\n[bold yellow]Command:[/bold yellow] {command}")
-                    console.print(f"[dim]timeout: {timeout}s  cwd: {ctx.cwd}[/dim]")
-                    if not confirm_command(command):
-                        result = ToolResult(
-                            call.id, "error: command rejected by user", is_error=True
-                        )
-                        emit(f"observation: {result.content}")
-                        tool_result_blocks.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": result.tool_call_id,
-                                "content": result.content,
-                                "is_error": True,
-                            }
-                        )
-                        continue
-
-                elif call.name in ("web_fetch", "web_search"):
-                    # --- 网络工具：不写本地文件，但要让用户确认是否访问外部资源 ---
-                    detail = (
-                        call.arguments.get("url")
-                        or call.arguments.get("query")
-                        or str(call.arguments)
-                    )
-                    if not confirm_tool_use(call.name, detail):
-                        result = ToolResult(
-                            call.id, "error: tool use rejected by user", is_error=True
-                        )
-                        emit(f"observation: {result.content}")
-                        tool_result_blocks.append(
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": result.tool_call_id,
-                                "content": result.content,
-                                "is_error": True,
-                            }
-                        )
-                        continue
-
-                elif call.name == "ask_user_question":
-                    question = call.arguments.get("prompt", "")
-                    options = call.arguments.get("options", [])
-                    if not isinstance(options, list):
-                        options = []
-                    labels = [str(o) for o in options]
-                    selected = prompt_single_choice(question, labels)
-                    if selected is None:
-                        result = ToolResult(
-                            call.id, "User skipped the question.", is_error=False
-                        )
-                    else:
-                        result = ToolResult(
-                            call.id, f'User selected: "{selected}"', is_error=False
-                        )
-                    emit(f"observation: {result.content}")
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": result.tool_call_id,
-                            "content": result.content,
-                            "is_error": result.is_error,
-                        }
-                    )
-                    continue
-
-            result = tools.run(call, ctx)
-            emit(f"observation: {result.content}")
-            if not result.is_error:
-                post_hooks = run_hooks(
-                    "PostToolUse",
-                    call.name,
-                    call.arguments,
-                    ctx.cwd,
-                    tool_result=result.content,
-                )
-                for h in post_hooks:
-                    status = "ok" if h["success"] else f"warning: {h['output']}"
-                    console.print(f"[dim]hook: PostToolUse {call.name} {status}[/dim]")
-            tool_result_blocks.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": result.tool_call_id,
-                    "content": result.content,
-                    "is_error": result.is_error,
-                }
-            )
         messages.append({"role": "user", "content": tool_result_blocks})
         if session:
             session.append_messages(messages[-2:])
@@ -450,3 +229,249 @@ def run_agent(  ## AGENT LOOP
     final = f"Agent reached max steps ({max_steps}) without finishing. Last response: {response}"
     emit(f"final: {final}")
     return AgentResult(final=final, trace=trace, messages=messages)
+
+
+def _format_call_args(args: dict[str, Any]) -> str:
+    """trace 里的工具参数可能很大（file_write 的内容、后面 v6 exit_plan_mode 的整段计划）。
+    长字符串只在 trace 里截断，完整参数仍照常传给工具。"""
+    preview: dict[str, Any] = {}
+    for key, value in args.items():
+        if isinstance(value, str) and len(value) > 80:
+            preview[key] = value[:80] + "…"
+        else:
+            preview[key] = value
+    return str(preview)
+
+
+def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
+    """跑单个工具，返回一个 tool_result block。"""
+    emit(f"tool_call: {call.name} {_format_call_args(call.arguments)}")
+
+    request = PermissionRequest(
+        tool_name=call.name,
+        args=call.arguments,
+        mode=state.permission_mode,
+        cwd=ctx.cwd,
+    )
+    decision = decide_permission(request)
+
+    if decision.behavior != "deny":
+        pre = run_hooks("PreToolUse", call.name, call.arguments, ctx.cwd)
+        blocked = [h for h in pre if not h["success"]]
+        if blocked:
+            msg = "\n".join(f"  [hook] {h['command']}: {h['output']}" for h in blocked)
+            obs = f"tool blocked by PreToolUse hook:\n{msg}"
+            emit(f"observation: {obs}")
+            return {
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": obs,
+                "is_error": True,
+            }
+
+    # 文件写前置校验（file_write/file_edit；acceptEdits 也要过校验，只是后面跳过确认 UI）
+    edit_preview: tuple[str, str, str] | None = None
+    if call.name in ("file_write", "file_edit") and decision.behavior != "deny":
+        path_str = call.arguments.get("file_path", "")
+        if not path_str:
+            r = ToolResult(
+                call.id,
+                "error: missing required argument 'file_path'",
+                is_error=True,
+            )
+            emit(f"observation: {r.content}")
+            return {
+                "type": "tool_result",
+                "tool_use_id": r.tool_call_id,
+                "content": r.content,
+                "is_error": True,
+            }
+        try:
+            path = resolve_in_cwd(ctx.cwd, path_str)
+        except (ValueError, OSError) as exc:
+            r = ToolResult(call.id, f"error: {exc}", is_error=True)
+            emit(f"observation: {r.content}")
+            return {
+                "type": "tool_result",
+                "tool_use_id": r.tool_call_id,
+                "content": r.content,
+                "is_error": True,
+            }
+        old_content = path.read_text(encoding="utf-8") if path.exists() else ""
+        validation_error: str | None = None
+        if call.name == "file_write":
+            if path.exists():
+                validation_error = ensure_read_before_edit(
+                    ctx.read_state, path
+                ) or check_mtime_conflict(ctx.read_state, path)
+            new_content = call.arguments.get("content", "")
+        else:
+            new_content = ""
+            if not path.exists():
+                validation_error = f"error: file does not exist: {path_str}"
+            else:
+                validation_error = ensure_read_before_edit(
+                    ctx.read_state, path
+                ) or check_mtime_conflict(ctx.read_state, path)
+            if validation_error is None:
+                new_content, replace_err = apply_single_replace(
+                    old_content,
+                    call.arguments.get("old_string", ""),
+                    call.arguments.get("new_string", ""),
+                    bool(call.arguments.get("replace_all", False)),
+                )
+                if replace_err is not None:
+                    validation_error = replace_err
+        if validation_error is not None:
+            r = ToolResult(call.id, validation_error, is_error=True)
+            emit(f"observation: {r.content}")
+            return {
+                "type": "tool_result",
+                "tool_use_id": r.tool_call_id,
+                "content": r.content,
+                "is_error": True,
+            }
+        edit_preview = (path_str, old_content, new_content if new_content else "")
+
+    # deny：直接返回 error，不弹 UI
+    if decision.behavior == "deny":
+        r = ToolResult(call.id, f"error: {decision.message}", is_error=True)
+        emit(f"observation: {r.content}")
+        return {
+            "type": "tool_result",
+            "tool_use_id": r.tool_call_id,
+            "content": r.content,
+            "is_error": True,
+        }
+
+    # ask：按工具类型分发确认 UI（confirm_* 已在 1.5 包了 _ask，自动借回终端）
+    if decision.behavior == "ask":
+        if call.name in ("file_write", "file_edit") and edit_preview is not None:
+            path_str, old_content, new_content = edit_preview
+            console.print(f"\n[bold]Diff for {path_str}:[/bold]")
+            console.print(render_diff(old_content, new_content, path_str))
+            if not confirm_edit(path_str):
+                r = ToolResult(call.id, "error: edit rejected by user", is_error=True)
+                emit(f"observation: {r.content}")
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": r.tool_call_id,
+                    "content": r.content,
+                    "is_error": True,
+                }
+        elif call.name == "bash":
+            command = call.arguments.get("command", "")
+            console.print(f"\n[bold yellow]Command:[/bold yellow] {command}")
+            if not confirm_command(command):
+                r = ToolResult(
+                    call.id, "error: command rejected by user", is_error=True
+                )
+                emit(f"observation: {r.content}")
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": r.tool_call_id,
+                    "content": r.content,
+                    "is_error": True,
+                }
+        elif call.name in ("web_fetch", "web_search"):
+            detail = (
+                call.arguments.get("url")
+                or call.arguments.get("query")
+                or str(call.arguments)
+            )
+            if not confirm_tool_use(call.name, detail):
+                r = ToolResult(
+                    call.id, "error: tool use rejected by user", is_error=True
+                )
+                emit(f"observation: {r.content}")
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": r.tool_call_id,
+                    "content": r.content,
+                    "is_error": True,
+                }
+        elif call.name == "ask_user_question":
+            options = call.arguments.get("options", [])
+            labels = [str(o) for o in options] if isinstance(options, list) else []
+            selected = prompt_single_choice(call.arguments.get("prompt", ""), labels)
+            content = (
+                "User skipped the question."
+                if selected is None
+                else f'User selected: "{selected}"'
+            )
+            emit(f"observation: {content}")
+            return {
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": content,
+                "is_error": False,
+            }
+
+    # allow / ask 通过：执行
+    result = tools.run(call, ctx)
+    emit(f"observation: {result.content}")
+    if not result.is_error:
+        for h in run_hooks(
+            "PostToolUse",
+            call.name,
+            call.arguments,
+            ctx.cwd,
+            tool_result=result.content,
+        ):
+            status = "ok" if h["success"] else f"warning: {h['output']}"
+            console.print(f"[dim]hook: PostToolUse {call.name} {status}[/dim]")
+    return {
+        "type": "tool_result",
+        "tool_use_id": result.tool_call_id,
+        "content": result.content,
+        "is_error": result.is_error,
+    }
+
+
+def partition_tool_calls(calls, tools) -> list[list]:
+    """连续只读工具合成并行组；写工具截断、自成串行组。
+    例：[Read, Read, Write, Read] → [[Read, Read], [Write], [Read]]"""
+    batches: list[list] = []
+    current: list = []
+    for call in calls:
+        tool = tools.get(call.name)
+        if tool is not None and tool.is_read_only:
+            current.append(call)
+        else:
+            if current:  # 写工具前先收掉前面攒的只读组
+                batches.append(current)
+                current = []
+            batches.append([call])  # 写/未知工具单独一组（未知 fail-closed 当串行）
+    if current:
+        batches.append(current)
+    return batches
+
+
+def execute_plan_boundary_calls(
+    calls,
+    ctx,
+    state,
+    tools,
+    emit,
+) -> list[dict[str, Any]] | None:
+    """plan 模式下，exit_plan_mode 是 turn boundary：同轮其它工具不执行。"""
+    if state.permission_mode != "plan":
+        return None
+    exit_call = next((call for call in calls if call.name == "exit_plan_mode"), None)
+    if exit_call is None:
+        return None
+
+    blocks: list[dict[str, Any]] = []
+    for call in calls:
+        if call is exit_call:
+            blocks.append(execute_one_tool_call(call, ctx, state, tools, emit))
+            continue
+        blocks.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": call.id,
+                "content": "Skipped because exit_plan_mode is waiting for approval. Re-issue this tool after approval if needed.",
+                "is_error": True,
+            }
+        )
+    return blocks

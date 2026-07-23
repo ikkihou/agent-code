@@ -44,7 +44,6 @@ class ToolContext:
     state: RuntimeState | None = None
 
 
-
 ToolFunc = Callable[
     [dict[str, Any], ToolContext],
     str,
@@ -63,6 +62,7 @@ class Tool:
             "required": [],
         }
     )
+    is_read_only: bool = False
 
 
 # ---------------------------------------------
@@ -418,6 +418,9 @@ class ToolRegistry:
             tool_call_id=call.id, content=tool.run(call.arguments, context)
         )
 
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
 
 def default_tools() -> ToolRegistry:
     # Day 1 只有一个工具，后面会在这里加文件和 bash 工具。
@@ -427,6 +430,7 @@ def default_tools() -> ToolRegistry:
             name="echo",
             description="Return the input text.",
             run=echo,
+            is_read_only=True,
             parameters={
                 "type": "object",
                 "properties": {"text": {"type": "string"}},
@@ -439,6 +443,7 @@ def default_tools() -> ToolRegistry:
             name="system_date",
             description="Return the current system date and time.",
             run=system_date,
+            is_read_only=True,
         )
     )
     registry.register(
@@ -446,6 +451,7 @@ def default_tools() -> ToolRegistry:
             name="read_file",
             description="Read a text file under the current working directory. Argument 'path' is the file path relative to the working directory.",
             run=read_file,
+            is_read_only=True,
             parameters={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -458,6 +464,7 @@ def default_tools() -> ToolRegistry:
             name="list_files",
             description="List files in a directory under the current working directory. Argument 'path' is the directory path relative to the working directory, default is current directory.",
             run=list_files,
+            is_read_only=True,
             parameters={
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
@@ -470,6 +477,7 @@ def default_tools() -> ToolRegistry:
             name="glob",
             description="Find files by glob pattern, e.g. '**/*.py'.",
             run=glob,
+            is_read_only=True,
             parameters={
                 "type": "object",
                 "properties": {
@@ -486,6 +494,7 @@ def default_tools() -> ToolRegistry:
             name="grep",
             description="Search file contents with a regular expression (ripgrep if available).",
             run=grep,
+            is_read_only=True,
             parameters={
                 "type": "object",
                 "properties": {
@@ -569,6 +578,7 @@ def default_tools() -> ToolRegistry:
             name="git_status",
             description="Run git status to see the current state of the working directory.",
             run=_git_status,
+            is_read_only=True,
             parameters={"type": "object", "properties": {}, "required": []},
         )
     )
@@ -577,6 +587,7 @@ def default_tools() -> ToolRegistry:
             name="git_diff",
             description="Run git diff to see unstaged changes in the working directory.",
             run=_git_diff,
+            is_read_only=True,
             parameters={"type": "object", "properties": {}, "required": []},
         )
     )
@@ -675,6 +686,7 @@ def default_tools() -> ToolRegistry:
                 "Use when you need to recall facts about the user, project, or past decisions."
             ),
             run=_memory_recall,
+            is_read_only=True,
             parameters={
                 "type": "object",
                 "properties": {
@@ -728,6 +740,7 @@ def default_tools() -> ToolRegistry:
             name="cron_list",
             description="List all active cron jobs with their IDs, intervals, and last-run times.",
             run=cron_list,
+            is_read_only=True,
             parameters={"type": "object", "properties": {}, "required": []},
         )
     )

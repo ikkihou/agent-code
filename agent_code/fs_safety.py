@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 import pathspec
@@ -86,6 +87,7 @@ class ReadFileState:
     """
 
     entries: dict[Path, tuple[int, int]] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def record(self, path: Path, content: str) -> None:
         """记录一次文件读取。
@@ -101,7 +103,8 @@ class ReadFileState:
             mtime_ns = path.stat().st_mtime_ns
         except OSError:
             return
-        self.entries[path] = (mtime_ns, len(content))
+        with self._lock:
+            self.entries[path] = (mtime_ns, len(content))
 
 
 def resolve_in_cwd(cwd: Path, user_path: str) -> Path:

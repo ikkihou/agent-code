@@ -31,7 +31,7 @@ packages = ["agent_code"]
 package = true
 
 [tool.ruff.lint]
-ignore = ["F401", "E402"]
+# ignore = ["F401", "E402"]
 
 [dependency-groups]
 dev = ["pytest>=9.1.0"]
