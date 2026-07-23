@@ -267,6 +267,11 @@ def _cmd_loop(args: list[str], ctx: SlashContext) -> SlashResult:
         return _cmd_loop_cancel(rest, ctx)
     return SlashResult(handled=True, message=f"Unknown /loop subcommand: {subcommand}")
 
+def _cmd_todo(_args: list[str], ctx: SlashContext) -> SlashResult:
+    items = ctx.state.todo_store if ctx.state else []
+    icon = {"pending": "○", "in_progress": "◉", "completed": "✓"}
+    body = "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items) or "(no todos)"
+    return SlashResult(handled=True, message=body)
 
 # --- 注册内置命令 ---
 register("help", "显示所有可用 slash command", _cmd_help)
@@ -277,3 +282,4 @@ register("permissions", "显示权限模式 (default/acceptEdits/plan)", _cmd_pe
 register("plan", "显示 plan 模式提示", _cmd_plan)
 register("sessions", "显示当前路径下所有的会话记录", _cmd_sessions)
 register("loop", "管理 cron 定时任务: add/list/cancel", _cmd_loop)
+register("todo", "显示当前 todo 列表", _cmd_todo)

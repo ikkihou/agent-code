@@ -62,16 +62,13 @@ _READONLY_TOOLS = frozenset(
         "echo",
         "memory_recall",
         "cron_list",
+        "todo_read",
     }
 )
 
 # default / acceptEdits 直接放行；plan 模式仍然 deny——plan 的硬约束就是只读。
 _LOW_RISK_WRITES = frozenset(
-    {
-        "memory_write",
-        "cron_create",
-        "cron_cancel",
-    }
+    {"memory_write", "cron_create", "cron_cancel", "todo_write"}
 )
 
 # 交互和网络都不是写入，但仍需要用户知道 Agent 正在停下来问人或访问外部资源。

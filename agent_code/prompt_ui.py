@@ -15,6 +15,8 @@ from __future__ import annotations
 import difflib
 import typer
 
+from .runtime import TodoItem
+
 _terminal_asker = None  # 交互 shell 启动时由 interactive.py 注入；one-shot 保持 None
 
 
@@ -92,3 +94,4 @@ def prompt_single_choice(question: str, labels: list[str]) -> str | None:
         return None
     except (ValueError, typer.Abort):
         return None
+

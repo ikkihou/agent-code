@@ -151,4 +151,8 @@ def bottom_toolbar(state: RuntimeState) -> str:
     mode = {"default": "default", "acceptEdits": "accept edits", "plan": "plan"}.get(
         state.permission_mode, state.permission_mode
     )
-    return f" {mode} · {state.model} "
+    active = next(
+        (t.active_form for t in state.todo_store if t.status == "in_progress"), ""
+    )
+    todo = f" · {active}" if active else ""
+    return f" {mode} · {state.model}{todo} "

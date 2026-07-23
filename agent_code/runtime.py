@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class ToDoItem:
+class TodoItem:
     content: str
     status: str
     active_form: str
@@ -25,6 +25,7 @@ class RuntimeState:
     provider: str = "anthropic"
     abort_event: threading.Event = field(default_factory=threading.Event)
     input_queue: Queue[str] = field(default_factory=Queue)
+    todo_store: list[TodoItem] = field(default_factory=list)
 
     def cycle_permission_mode(self) -> str:
         order = ["default", "acceptEdits", "plan"]
