@@ -11,6 +11,7 @@
 
 # here put the import lib
 from __future__ import annotations
+from weakref import finalize
 import stat
 
 from dataclasses import dataclass
@@ -104,9 +105,9 @@ def run_agent(  ## AGENT LOOP
     prompt: str,
     provider: ModelProvider,
     tools: ToolRegistry,
+    state: RuntimeState,
     max_steps: int = 8,
     cwd: Path | None = None,
-    state: RuntimeState | None = None,
     session: Session | None = None,
     system_prompt: str | None = None,
 ) -> AgentResult:
@@ -116,7 +117,7 @@ def run_agent(  ## AGENT LOOP
         skip_policy=SkipPolicy.default(gitignore=load_gitignore(resolved_cwd)),
         state=state,
     )
-    messages: list[dict[str, Any]] = []
+
     if session and session.history:
         messages = list(session.history)
         messages.append({"role": "user", "content": prompt})
@@ -131,7 +132,7 @@ def run_agent(  ## AGENT LOOP
         console.print(line, markup=False)
 
     trace: list[str] = []
-
+    continuation_count = 0
     for step in range(max_steps):
         ## 1. sending api request
         if len(messages) > 40:
@@ -142,9 +143,51 @@ def run_agent(  ## AGENT LOOP
         ## 2. add LLM response to history
         messages.append(_assistant_message(response))
 
+        ## 2.5 turn abort
+        if state.abort_event.is_set():
+            emit("interrupted by user")
+            if response.tool_calls:
+                blocks = [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": c.id,
+                        "content": "Interrupted by user",
+                        "is_error": True,
+                    }
+                    for c in response.tool_calls
+                ]
+                messages.append({"role": "user", "content": blocks})
+                if session:
+                    session.append_messages(messages[-2:])
+            elif session:
+                session.append_messages([messages[-1]])
+
+            return AgentResult(final="interrupted", trace=trace, messages=messages)
+
         ## 3(1). tool call or end execution
         if not response.tool_calls:
             final = response.text or ""
+            from .hooks import run_hooks_raw
+
+            forced: str | None = None
+            if continuation_count < 2:
+                payload = {
+                    "event": "Stop",
+                    "final_text": final,
+                    "cwd": str(ctx.cwd),
+                    "continuation_count": continuation_count,
+                }
+                for h in run_hooks_raw("Stop", payload, ctx.cwd):
+                    if not h["success"] and h["output"].strip():
+                        forced = h["output"].strip()
+                        break
+            if forced is not None:
+                continuation_count += 1
+                emit(f"continue: {forced}")
+                messages.append({"role": "user", "content": f"continue: {forced}"})
+                if session:
+                    session.append_messages(messages[-2:])
+                continue  # 回到 loop 顶，再跑一轮
             emit(f"final: {final}")
             if session:
                 session.append_messages([messages[-1]])

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from anthropic._utils import is_sequence_t
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -23,6 +25,7 @@ import threading
 from typing import Any, Callable
 from contextlib import redirect_stderr, redirect_stdout
 
+from rich.console import Console
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.key_binding import KeyBindings
@@ -31,6 +34,8 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from . import prompt_ui
 from .runtime import RuntimeState
 from .slash import SlashContext, dispatch_slash
+
+console = Console()
 
 
 def _call_with_terminal_output(func: Callable[[], Any], stdout_proxy: Any) -> Any:
@@ -48,6 +53,7 @@ def run_interactive_shell(
     make_slash_context: Callable[[], SlashContext],
 ) -> None:
     job_queue: queue.Queue[str] = queue.Queue()
+    busy = threading.Event()
 
     def work_loop() -> None:
         while True:
@@ -55,7 +61,17 @@ def run_interactive_shell(
             if text == "__EXIT__":
                 break
             state.abort_event.clear()
-            run_turn(text)
+            busy.set()
+
+            try:
+                run_turn(text)
+            except Exception as e:  # provider/工具异常别让 worker 静默死掉
+                print(f"[error] {e}")
+            finally:
+                busy.clear()
+
+            while not state.input_queue.empty():
+                job_queue.put(state.input_queue.get())
 
     worker = threading.Thread(target=work_loop, daemon=True)
     worker.start()
@@ -104,14 +120,16 @@ def run_interactive_shell(
                         result = dispatch_slash(text, make_slash_context())
                         if result.handled:
                             if result.message:
-                                from rich.console import Console
-                                console = Console()
                                 console.print(result.message)
                             if result.should_query:
                                 job_queue.put(result.prompt)
                             continue
 
-                    job_queue.put(text)
+                    if busy.is_set():
+                        state.input_queue.put(text)
+                        console.print("[queued] turn 结束后处理")
+                    else:
+                        job_queue.put(text)
             finally:
                 prompt_ui.set_terminal_asker(None)
 
@@ -129,8 +147,7 @@ def build_key_bindings(state: RuntimeState) -> KeyBindings:
 
     @kb.add("s-tab")
     def _(event: Any) -> None:
-        new_mode = state.cycle_permission_mode()
-        print(f"[mode → {new_mode}]")  # 提示切到了哪个模式
+        state.cycle_permission_mode()
 
     return kb
 

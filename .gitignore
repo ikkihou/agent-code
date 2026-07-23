@@ -12,3 +12,4 @@ wheels/
 
 # Project run generated files
 .agent/*
+hooks.json

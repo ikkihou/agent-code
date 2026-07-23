@@ -118,3 +118,32 @@ def run_hooks(
                 }
             )
     return results
+
+
+def run_hooks_raw(
+    event: str, payload: dict[str, Any], cwd: Path
+) -> list[dict[str, Any]]:
+    """跑没有工具上下文的 hook（如 Stop）。payload 整个作为 stdin JSON 传给 hook。"""
+    config = load_hooks(cwd)
+    results: list[dict[str, Any]] = []
+    for entry in config.get(event, []):
+        matcher = entry.get("matcher", "*")
+        if matcher not in ("*", ""):  # Stop 没有 tool_name，只认 * / 空 matcher
+            continue
+        commands: list[str] = []
+        if "run" in entry:
+            commands = [entry["run"]]
+        else:
+            for h in entry.get("hooks", []):
+                if (
+                    isinstance(h, dict)
+                    and h.get("type") == "command"
+                    and h.get("command")
+                ):
+                    commands.append(h["command"])
+        for cmd in commands:
+            success, output = _run_hook_command(cmd, payload, cwd)
+            results.append(
+                {"event": event, "command": cmd, "success": success, "output": output}
+            )
+    return results
