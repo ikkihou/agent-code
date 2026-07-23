@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 #!/usr/bin/env python3
 """
 ##
@@ -12,6 +10,8 @@ from __future__ import annotations
 """
 
 # here put the import lib
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, Callable, List
 from datetime import datetime

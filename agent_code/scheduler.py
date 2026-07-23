@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -10,13 +8,14 @@ Contact   :   yihui.bao@apopgeei.com
 """
 
 # here put the import lib
+from __future__ import annotations
+
 import json
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue
-from typing import Any
 
 
 class CronJob:

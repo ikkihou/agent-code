@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 File      :   runtime.py
 Date      :   2026-07-22 15:22:36
@@ -9,10 +5,17 @@ Author    :   baoyihui
 Contact   :   yihui.bao@apopgeei.com
 """
 
-# here put the import lib
+from __future__ import annotations
 from queue import Queue
 import threading
 from dataclasses import dataclass, field
+
+
+@dataclass
+class ToDoItem:
+    content: str
+    status: str
+    active_form: str
 
 
 @dataclass

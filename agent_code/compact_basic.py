@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -11,6 +9,7 @@ from __future__ import annotations
 """
 
 # here put the import lib
+from __future__ import annotations
 from typing import Any
 
 

@@ -16,7 +16,6 @@ import os
 import subprocess
 from pathlib import Path
 
-from pathspec.pattern import RegexMatchResult
 
 from .fs_safety import truncate_output
 
@@ -41,7 +40,7 @@ def run_sync(command: str, cwd: Path, timeout: int = 30) -> str:
             capture_output=True,
             timeout=timeout,
         )
-    except subprocess.subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired:
         return f"error: command timed out after {timeout}s"
 
     output = proc.stdout.decode(encoding="utf-8", errors="replace")

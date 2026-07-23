@@ -4,6 +4,8 @@ from typing import Any
 
 from .tools import ToolContext
 
+_scheduler: Any = None
+
 
 def set_scheduler(scheduler: Any) -> None:
     """cli.py 在创建 CronScheduler 后调用这个函数，让工具函数能访问同一个实例。"""

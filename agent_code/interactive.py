@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-from anthropic._utils import is_sequence_t
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -9,15 +5,13 @@ File      :   interactive.py
 Date      :   2026-07-22 15:28:36
 Author    :   baoyihui
 Contact   :   yihui.bao@apopgeei.com
-"""
 
-# here put the import lib
-
-"""
 主线程 = PromptSession（输入、键位、状态栏 + slash 分派）；
 worker 线程 = run_agent（阻塞 provider.complete + 工具执行）。
 """
 
+# here put the import lib
+from __future__ import annotations
 import asyncio
 import queue
 import sys

@@ -1,5 +1,4 @@
 from __future__ import annotations
-from docstring_parser.numpydoc import RETURN_KEY_REGEX
 
 import re
 from dataclasses import dataclass

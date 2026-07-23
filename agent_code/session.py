@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -8,15 +6,16 @@ from __future__ import annotations
 @Author  :   Paul_Bao
 @Version :   1.0
 @Contact :   paulbao@mail.ecust.edu.cn
-"""
 
-"""session.py的功能：
+session.py的功能：
 1. 创建会话
 2. 管理已有会话
 3. 读/写消息历史
 """
 
 # here put the import lib
+from __future__ import annotations
+
 import json
 import uuid
 from datetime import datetime, timezone
