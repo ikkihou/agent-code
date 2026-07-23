@@ -68,7 +68,14 @@ _READONLY_TOOLS = frozenset(
 
 # default / acceptEdits 直接放行；plan 模式仍然 deny——plan 的硬约束就是只读。
 _LOW_RISK_WRITES = frozenset(
-    {"memory_write", "cron_create", "cron_cancel", "todo_write"}
+    {
+        "memory_write",
+        "cron_create",
+        "cron_cancel",
+        "todo_write",
+        "enter_plan_mode",
+        "exit_plan_mode",
+    }
 )
 
 # 交互和网络都不是写入，但仍需要用户知道 Agent 正在停下来问人或访问外部资源。
@@ -94,6 +101,13 @@ def decide_permission(request: PermissionRequest) -> PermissionDecision:
     # 写类工具一律 deny。
     if mode == "plan":
         if tool_name in _READONLY_TOOLS:
+            return PermissionDecision("allow")
+        if tool_name in (
+            "enter_plan_mode",
+            "exit_plan_mode",
+            "todo_write",
+            "todo_read",
+        ):
             return PermissionDecision("allow")
         return PermissionDecision(
             "deny",
