@@ -36,12 +36,6 @@ def _ask(func):
     return func()
 
 
-def _write_real_terminal(text: str) -> None:
-    stream = getattr(str, "__stdout__", None) or sys.stdout
-    stream.write(text)
-    stream.flush()
-
-
 def render_diff(old: str, new: str, path: str) -> str:
     """用 difflib 生成 unified diff，给增删行加 rich markup 着色。"""
     old_lines = old.splitlines(keepends=True)
@@ -97,10 +91,8 @@ def confirm_plan(plan_summary: str) -> bool:
             )
         )
         panel = buffer.getvalue()
-        if _terminal_asker is not None:
-            _write_real_terminal(panel)
-        else:
-            typer.echo(panel, nl=False)
+
+        typer.echo(panel, nl=False)
 
         return typer.confirm("Approve this plan and exit plan mode?", default=False)
 
