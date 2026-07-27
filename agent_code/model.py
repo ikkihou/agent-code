@@ -54,9 +54,7 @@ class ModelProvider(Protocol):
 
         if last["role"] == "user":
             # 第一轮不直接回答，而是请求 harness 执行工具。
-            text = (
-                last["content"].replace("用 echo 工具说", "").strip() or last["content"]
-            )
+            text = last["content"].replace("用 echo 工具说", "").strip() or last["content"]
             return ModelResponse(
                 tool_calls=[
                     ToolCall(
@@ -116,7 +114,12 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
 
 
 class MockProvider:
-    def complete(self, messages: list[dict[str, str]]) -> ModelResponse:
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[Any] | None = None,
+        system: str | None = None,
+    ) -> ModelResponse:
         # 一个假模型，固定回一句话，够用来打通 CLI <-> Provider 这条边界。
         return ModelResponse(text="我是 MockProvider，你说了：mocking")
 
