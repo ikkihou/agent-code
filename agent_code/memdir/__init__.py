@@ -1,3 +1,3 @@
-from .paths import get_memdir, ensure_memdir
-from .types import MemoryEntry, make_slug, MEMORY_TYPES
-from .store import write_memory, recall_memory, load_index
+from .paths import ensure_memdir, get_memdir
+from .store import load_index, recall_memory, write_memory
+from .types import MEMORY_TYPES, MemoryEntry, make_slug

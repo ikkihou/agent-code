@@ -6,9 +6,10 @@ Contact   :   yihui.bao@apopgeei.com
 """
 
 from __future__ import annotations
-from queue import Queue
+
 import threading
 from dataclasses import dataclass, field
+from queue import Queue
 
 
 @dataclass

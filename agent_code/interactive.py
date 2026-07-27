@@ -12,18 +12,19 @@ worker 线程 = run_agent（阻塞 provider.complete + 工具执行）。
 
 # here put the import lib
 from __future__ import annotations
+
 import asyncio
 import queue
 import sys
 import threading
-from typing import Any, Callable
 from contextlib import redirect_stderr, redirect_stdout
+from typing import Any, Callable
 
-from rich.console import Console
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
+from rich.console import Console
 
 from . import prompt_ui
 from .runtime import RuntimeState

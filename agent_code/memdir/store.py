@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from .paths import (
+    INDEX_MAX_BYTES,
+    INDEX_MAX_LINES,
     ensure_memdir,
     get_memdir,
     index_path,
     topic_path,
-    INDEX_MAX_LINES,
-    INDEX_MAX_BYTES,
 )
-from .types import MemoryEntry, MEMORY_TYPES, make_slug
+from .types import MEMORY_TYPES, MemoryEntry, make_slug
 
 
 def load_index(cwd: Path) -> str | None:

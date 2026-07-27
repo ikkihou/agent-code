@@ -17,15 +17,15 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from .agent import run_agent, build_system_prompt
-from .slash import SlashContext, dispatch_slash
-from .model import create_provider
-from .tools import default_tools
-from .session import Session
-from .scheduler import CronScheduler
+from .agent import build_system_prompt, run_agent
 from .cron_tools import set_scheduler
-from .runtime import RuntimeState
 from .interactive import run_interactive_shell
+from .model import create_provider
+from .runtime import RuntimeState
+from .scheduler import CronScheduler
+from .session import Session
+from .slash import SlashContext, dispatch_slash
+from .tools import default_tools
 
 console = Console()
 app = typer.Typer(add_completion=False)

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import shlex
-
 from dataclasses import dataclass
+from operator import truediv
 from pathlib import Path
 from typing import Callable
 
@@ -150,19 +150,13 @@ def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
 
 def _cmd_plan(args: list[str], ctx: SlashContext) -> SlashResult:
     """显示 plan 模式提示。完整 Plan Mode 闭环等 Day 8。"""
+    if ctx.state is None:
+        return SlashResult(handled=True, message="plan 模式需要交互 shell")
     if args and args[0] == "off":
-        return SlashResult(
-            handled=True,
-            message="当前版本不在 REPL 内热切换权限模式。请重新用 --permission-mode default 启动。",
-        )
-    if ctx.permission_mode == "plan":
-        return SlashResult(
-            handled=True, message="当前已经是 plan 模式。完整审批闭环会在 Day 8 实现。"
-        )
-    return SlashResult(
-        handled=True,
-        message="要进入 plan 模式，请重新用 --permission-mode plan 启动。完整审批闭环会在 Day 8 实现。",
-    )
+        ctx.state.permission_mode = "default"
+        return SlashResult(handled=True, message="exited plan mode")
+    ctx.state.permission_mode = "plan"
+    return SlashResult(handled=True, message="entered plan mode")
 
 
 def _cmd_sessions(args: list[str], ctx: SlashContext) -> SlashResult:
@@ -267,11 +261,16 @@ def _cmd_loop(args: list[str], ctx: SlashContext) -> SlashResult:
         return _cmd_loop_cancel(rest, ctx)
     return SlashResult(handled=True, message=f"Unknown /loop subcommand: {subcommand}")
 
+
 def _cmd_todo(_args: list[str], ctx: SlashContext) -> SlashResult:
     items = ctx.state.todo_store if ctx.state else []
     icon = {"pending": "○", "in_progress": "◉", "completed": "✓"}
-    body = "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items) or "(no todos)"
+    body = (
+        "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items)
+        or "(no todos)"
+    )
     return SlashResult(handled=True, message=body)
+
 
 # --- 注册内置命令 ---
 register("help", "显示所有可用 slash command", _cmd_help)
@@ -279,7 +278,7 @@ register("model", "显示当前模型/provider", _cmd_model)
 register("context", "显示当前 session、cwd、权限模式", _cmd_context)
 register("compact", "显示 compact 状态", _cmd_compact)
 register("permissions", "显示权限模式 (default/acceptEdits/plan)", _cmd_permissions)
-register("plan", "显示 plan 模式提示", _cmd_plan)
+register("plan", "进入/退出 plan 模式", _cmd_plan)
 register("sessions", "显示当前路径下所有的会话记录", _cmd_sessions)
 register("loop", "管理 cron 定时任务: add/list/cancel", _cmd_loop)
 register("todo", "显示当前 todo 列表", _cmd_todo)

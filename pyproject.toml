@@ -14,6 +14,7 @@ dependencies = [
     "pathspec>=1.1.1",
     "prompt-toolkit>=3.0.52",
     "rich>=15.0.0",
+    "ruff>=0.16.0",
     "typer>=0.26.7",
 ]
 
@@ -31,7 +32,14 @@ packages = ["agent_code"]
 package = true
 
 [tool.ruff.lint]
-ignore = ["F401", "E402"]
+select = ["E", "F", "I"]
+ignore = ["F401", "E402", "E501"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+quote-style = "double"
 
 [dependency-groups]
 dev = ["pytest>=9.1.0"]

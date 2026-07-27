@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 ##
 ##       filename: agent.py
@@ -17,31 +17,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .model import ModelProvider, ModelResponse, ToolResult
-from .tools import ToolRegistry, ToolContext
+from rich.console import Console
+
+from .compact_basic import compact
 from .fs_safety import (
     SkipPolicy,
-    load_gitignore,
-    resolve_in_cwd,
-    ensure_read_before_edit,
     apply_single_replace,
     check_mtime_conflict,
+    ensure_read_before_edit,
+    load_gitignore,
+    resolve_in_cwd,
 )
-
-from rich.console import Console
+from .hooks import run_hooks
+from .model import ModelProvider, ModelResponse, ToolResult
+from .permissions import PermissionRequest, decide_permission
+from .project_memory import load_agent_md
 from .prompt_ui import (
     confirm_command,
     confirm_edit,
+    confirm_plan,
     confirm_tool_use,
-    render_diff,
     prompt_single_choice,
+    render_diff,
 )
-from .permissions import PermissionRequest, decide_permission
-from .session import Session
-from .project_memory import load_agent_md
-from .compact_basic import compact
-from .hooks import run_hooks
 from .runtime import RuntimeState
+from .session import Session
+from .tools import ToolContext, ToolRegistry
 
 console = Console()
 
@@ -108,13 +109,16 @@ def run_agent(  ## AGENT LOOP
     session: Session | None = None,
     system_prompt: str | None = None,
 ) -> AgentResult:
+    ## 解析 cwd
     resolved_cwd = cwd or Path.cwd()
+    ## 构建工具上下文
     ctx = ToolContext(
         cwd=resolved_cwd,
         skip_policy=SkipPolicy.default(gitignore=load_gitignore(resolved_cwd)),
         state=state,
     )
 
+    ## 加载历史对话
     if session and session.history:
         messages = list(session.history)
         messages.append({"role": "user", "content": prompt})
@@ -167,6 +171,23 @@ def run_agent(  ## AGENT LOOP
         ## 3(1). tool call or end execution
         if not response.tool_calls:
             final = response.text or ""
+            if state.permission_mode == "plan" and final.strip():
+                if confirm_plan(final):
+                    state.permission_mode = "acceptEdits"
+                    messages.append(
+                        {"role": "user", "content": "Plan approved. Implement it now."}
+                    )
+                else:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "Plan not approved. Revise the plan and present it again.",
+                        }
+                    )
+                if session:
+                    session.append_messages(messages[-2:])
+                continue
+
             from .hooks import run_hooks_raw
 
             forced: str | None = None
@@ -268,6 +289,19 @@ def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
                 "content": obs,
                 "is_error": True,
             }
+
+        if call.name == "exit_plan_mode":
+            plan_summary = call.arguments.get("plan_summary", "")
+            if not confirm_plan(plan_summary):
+                obs = "Plan not approved. Revise the plan and call exit_plan_mode again"
+                emit(f"Observation: {obs}")
+                return {
+                    "type": "tool_result",
+                    "tool_use_id": call.id,
+                    "content": obs,
+                    "is_error": True,
+                }
+            state.permission_mode = "acceptEdits"
 
     # 文件写前置校验（file_write/file_edit；acceptEdits 也要过校验，只是后面跳过确认 UI）
     edit_preview: tuple[str, str, str] | None = None

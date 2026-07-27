@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
 import pathspec
 
 # 文本文件后缀白名单：直接放行，不用 peek 文件头。

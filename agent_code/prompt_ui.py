@@ -13,6 +13,9 @@
 from __future__ import annotations
 
 import difflib
+import sys
+from io import StringIO
+
 import typer
 
 from .runtime import TodoItem
@@ -31,6 +34,12 @@ def _ask(func):
     if _terminal_asker is not None:
         return _terminal_asker(func)
     return func()
+
+
+def _write_real_terminal(text: str) -> None:
+    stream = getattr(str, "__stdout__", None) or sys.stdout
+    stream.write(text)
+    stream.flush()
 
 
 def render_diff(old: str, new: str, path: str) -> str:
@@ -74,6 +83,30 @@ def confirm_tool_use(tool_name: str, detail: str) -> bool:
     return _ask(lambda: typer.confirm(f"Allow {tool_name}: {detail}?", default=False))
 
 
+def confirm_plan(plan_summary: str) -> bool:
+    def _do() -> bool:
+        from rich.console import Console
+        from rich.panel import Panel
+
+        buffer = StringIO()
+        Console(file=buffer, no_color=True).print(
+            Panel(
+                plan_summary or "(empty plan_summary)",
+                title="Plan",
+                border_style="blue",
+            )
+        )
+        panel = buffer.getvalue()
+        if _terminal_asker is not None:
+            _write_real_terminal(panel)
+        else:
+            typer.echo(panel, nl=False)
+
+        return typer.confirm("Approve this plan and exit plan mode?", default=False)
+
+    return _ask(_do)
+
+
 def prompt_single_choice(question: str, labels: list[str]) -> str | None:
     def ask_choice() -> str:
         from rich.console import Console
@@ -94,4 +127,3 @@ def prompt_single_choice(question: str, labels: list[str]) -> str | None:
         return None
     except (ValueError, typer.Abort):
         return None
-
