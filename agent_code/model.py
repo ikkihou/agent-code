@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from anthropic import Anthropic
 
@@ -43,34 +45,41 @@ class ModelResponse:
     stop_reason: str = "end_turn"
 
 
+class CancellationSignal(Protocol):
+    """Provider-facing cancellation contract implemented by threading.Event."""
+
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
+class ModelRequestAborted(RuntimeError):
+    """Raised when the caller cancels an in-flight model request."""
+
+
+@dataclass(frozen=True)
+class ModelStreamEvent:
+    type: Literal["text_delta", "completed"]
+    text: str | None = None
+    response: ModelResponse | None = None
+
+
 class ModelProvider(Protocol):
     def complete(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
         system: str | None = None,
-    ) -> ModelResponse:
-        last = messages[-1]
+    ) -> ModelResponse: ...
 
-        if last["role"] == "user":
-            # 第一轮不直接回答，而是请求 harness 执行工具。
-            text = last["content"].replace("用 echo 工具说", "").strip() or last["content"]
-            return ModelResponse(
-                tool_calls=[
-                    ToolCall(
-                        id="call_echo_1",
-                        name="echo",
-                        arguments={"text": text},
-                    )
-                ],
-                stop_reason="tool_use",
-            )
-
-        if last["role"] == "tool":
-            # 第二轮把工具观察结果变成最终回答。
-            return ModelResponse(text=f"echo 工具返回：{last['content']}")
-
-        return ModelResponse(text="我现在只能演示 echo 工具。")
+    def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        system: str | None = None,
+        *,
+        signal: CancellationSignal | None = None,
+    ) -> Iterator[ModelStreamEvent]: ...
 
 
 def _load_claude_settings() -> dict[str, str]:
@@ -113,15 +122,69 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
     return data
 
 
+def _to_model_response(response: Any) -> ModelResponse:
+    """Convert an Anthropic-compatible response into the provider-neutral model."""
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    assistant_content: list[dict[str, Any]] = []
+
+    for block in response.content:
+        # Preserve thinking/signature and unknown compatible fields for later turns.
+        assistant_content.append(_content_block_to_dict(block))
+
+        if block.type == "text":
+            text_parts.append(block.text)
+        elif block.type == "tool_use":
+            tool_calls.append(
+                ToolCall(
+                    id=block.id,
+                    name=block.name,
+                    arguments=_parse_tool_input(block.input),
+                )
+            )
+
+    return ModelResponse(
+        text="\n".join(text_parts) or None,
+        tool_calls=tool_calls or None,
+        assistant_content=assistant_content,
+        stop_reason=response.stop_reason or "end_turn",
+    )
+
+
+def _completed_response(events: Iterator[ModelStreamEvent]) -> ModelResponse:
+    for event in events:
+        if event.type == "completed" and event.response is not None:
+            return event.response
+    raise RuntimeError("provider stream ended without a completed response")
+
+
 class MockProvider:
     def complete(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
         system: str | None = None,
     ) -> ModelResponse:
+        return _completed_response(self.complete_stream(messages, tools, system))
+
+    def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        system: str | None = None,
+        *,
+        signal: CancellationSignal | None = None,
+    ) -> Iterator[ModelStreamEvent]:
+        if signal is not None and signal.is_set():
+            raise ModelRequestAborted()
+
         # 一个假模型，固定回一句话，够用来打通 CLI <-> Provider 这条边界。
-        return ModelResponse(text="我是 MockProvider，你说了：mocking")
+        response = ModelResponse(text="我是 MockProvider，你说了：mocking")
+        yield ModelStreamEvent(type="text_delta", text=response.text)
+
+        if signal is not None and signal.is_set():
+            raise ModelRequestAborted()
+        yield ModelStreamEvent(type="completed", response=response)
 
 
 class AnthropicProvider:
@@ -155,13 +218,12 @@ class AnthropicProvider:
         )
         self.client = Anthropic(api_key=api_key, base_url=self.base_url)
 
-    def complete(
+    def _request_kwargs(
         self,
         messages: list[dict[str, Any]],
         tools: list[Any] | None = None,
         system: str | None = None,
-    ) -> ModelResponse:
-
+    ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -174,34 +236,85 @@ class AnthropicProvider:
         if system:
             kwargs["system"] = system
 
-        response = self.client.messages.create(**kwargs)
+        return kwargs
 
-        text_parts: list[str] = []
-        tool_calls: list[ToolCall] = []
-        assistant_content: list[dict[str, Any]] = []
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        system: str | None = None,
+    ) -> ModelResponse:
+        return _completed_response(self.complete_stream(messages, tools, system))
 
-        for block in response.content:
-            # 原样保存 assistant content，后面 agent.py 会把它放回 messages。
-            # 这能保留 thinking / signature 等额外 block，避免下一轮请求丢上下文。
-            assistant_content.append(_content_block_to_dict(block))
+    def complete_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[Any] | None = None,
+        system: str | None = None,
+        *,
+        signal: CancellationSignal | None = None,
+    ) -> Iterator[ModelStreamEvent]:
+        """Yield text deltas and actively close the HTTP stream on cancellation."""
+        if signal is not None and signal.is_set():
+            raise ModelRequestAborted()
 
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_calls.append(
-                    ToolCall(
-                        id=block.id,
-                        name=block.name,
-                        arguments=_parse_tool_input(block.input),
-                    )
+        kwargs = self._request_kwargs(messages, tools, system)
+        with self.client.messages.stream(**kwargs) as stream:
+            finished = threading.Event()
+            watcher: threading.Thread | None = None
+
+            if signal is not None:
+
+                def close_on_abort() -> None:
+                    while not finished.is_set():
+                        if signal.wait(0.05):
+                            try:
+                                stream.close()
+                            except Exception:
+                                # The consumer maps the resulting read failure to
+                                # ModelRequestAborted when the signal is set.
+                                pass
+                            return
+
+                watcher = threading.Thread(
+                    target=close_on_abort,
+                    name="model-stream-canceller",
+                    daemon=True,
                 )
+                watcher.start()
 
-        return ModelResponse(
-            text="\n".join(text_parts) or None,
-            tool_calls=tool_calls or None,
-            assistant_content=assistant_content,
-            stop_reason=response.stop_reason or "end_turn",
-        )
+            try:
+                for event in stream:
+                    if signal is not None and signal.is_set():
+                        raise ModelRequestAborted()
+
+                    if (
+                        event.type == "content_block_delta"
+                        and event.delta.type == "text_delta"
+                    ):
+                        yield ModelStreamEvent(
+                            type="text_delta",
+                            text=event.delta.text,
+                        )
+
+                if signal is not None and signal.is_set():
+                    raise ModelRequestAborted()
+
+                yield ModelStreamEvent(
+                    type="completed",
+                    response=_to_model_response(stream.get_final_message()),
+                )
+            except ModelRequestAborted:
+                raise
+            except Exception:
+                if signal is not None and signal.is_set():
+                    raise ModelRequestAborted() from None
+                raise
+            finally:
+                finished.set()
+                stream.close()
+                if watcher is not None:
+                    watcher.join(timeout=0.1)
 
 
 def create_provider(

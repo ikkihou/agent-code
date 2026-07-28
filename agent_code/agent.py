@@ -29,7 +29,7 @@ from .fs_safety import (
     resolve_in_cwd,
 )
 from .hooks import run_hooks
-from .model import ModelProvider, ModelResponse, ToolResult
+from .model import ModelProvider, ModelRequestAborted, ModelResponse, ToolResult
 from .permissions import PermissionRequest, decide_permission
 from .project_memory import load_agent_md
 from .prompt_ui import (
@@ -135,38 +135,60 @@ def run_agent(  ## AGENT LOOP
         trace.append(line)
         console.print(line, markup=False, highlight=False)
 
+    def interrupted_result() -> AgentResult:
+        emit("interrupted by user")
+        return AgentResult(final="interrupted", trace=trace, messages=messages)
+
     trace: list[str] = []
     continuation_count = 0
+    response: ModelResponse | None = None
     for step in range(max_steps):
+        # 用户可能在工具执行期间按下 ESC。请求前检查可避免再多发一轮模型请求。
+        if state.abort_event.is_set():
+            return interrupted_result()
+
         ## 1. sending api request
         if len(messages) > 40:
             messages = compact(messages, keep=8)
             console.print(f"[dim]compacted: {len(messages)} messages remaining[/dim]")
-        response = provider.complete(messages, tools.list(), system_prompt)
 
-        ## 2. add LLM response to history
-        messages.append(_assistant_message(response))
+        response = None
+        streamed_text = False
+        try:
+            for event in provider.complete_stream(
+                messages,
+                tools.list(),
+                system_prompt,
+                signal=state.abort_event,
+            ):
+                if event.type == "text_delta" and event.text:
+                    streamed_text = True
+                    console.print(
+                        event.text,
+                        end="",
+                        markup=False,
+                        highlight=False,
+                        soft_wrap=True,
+                    )
+                elif event.type == "completed":
+                    response = event.response
+        except ModelRequestAborted:
+            if streamed_text:
+                console.print()
+            return interrupted_result()
 
-        ## 2.5 turn abort
+        if streamed_text:
+            console.print()
+        if response is None:
+            raise RuntimeError("provider stream ended without a completed response")
+
+        # Cancellation wins the race with stream completion. In that case do not
+        # persist the assistant response or execute any tool calls it contains.
         if state.abort_event.is_set():
-            emit("interrupted by user")
-            if response.tool_calls:
-                blocks = [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": c.id,
-                        "content": "Interrupted by user",
-                        "is_error": True,
-                    }
-                    for c in response.tool_calls
-                ]
-                messages.append({"role": "user", "content": blocks})
-                if session:
-                    session.append_messages(messages[-2:])
-            elif session:
-                session.append_messages([messages[-1]])
+            return interrupted_result()
 
-            return AgentResult(final="interrupted", trace=trace, messages=messages)
+        ## 2. add complete LLM response to history
+        messages.append(_assistant_message(response))
 
         ## 3(1). tool call or end execution
         if not response.tool_calls:
@@ -209,7 +231,10 @@ def run_agent(  ## AGENT LOOP
                 if session:
                     session.append_messages(messages[-2:])
                 continue  # 回到 loop 顶，再跑一轮
-            emit(f"final: {final}")
+            if streamed_text:
+                trace.append(f"final: {final}")
+            else:
+                emit(f"final: {final}")
             if session:
                 session.append_messages([messages[-1]])
             return AgentResult(final=final, trace=trace, messages=messages)
@@ -246,6 +271,11 @@ def run_agent(  ## AGENT LOOP
         messages.append({"role": "user", "content": tool_result_blocks})
         if session:
             session.append_messages(messages[-2:])
+
+    if response is None:
+        final = f"Agent reached max steps ({max_steps}) without making a request."
+        emit(f"final: {final}")
+        return AgentResult(final=final, trace=trace, messages=messages)
 
     final = f"Agent reached max steps ({max_steps}) without finishing. Last response: {response}"
     emit(f"final: {final}")

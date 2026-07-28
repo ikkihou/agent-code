@@ -7,7 +7,7 @@ Author    :   baoyihui
 Contact   :   yihui.bao@apopgeei.com
 
 主线程 = PromptSession（输入、键位、状态栏 + slash 分派）；
-worker 线程 = run_agent（阻塞 provider.complete + 工具执行）。
+worker 线程 = run_agent（消费 provider stream + 工具执行）。
 """
 
 # here put the import lib
@@ -138,7 +138,8 @@ def build_key_bindings(state: RuntimeState) -> KeyBindings:
 
     @kb.add("escape")
     def _(event: Any) -> None:
-        state.abort_event.set()  # 只置标志，真正的中断在 Agent Loop 步间处理（v3）
+        # Provider 会观察该信号并主动关闭正在读取的 HTTP stream。
+        state.abort_event.set()
 
     @kb.add("s-tab")
     def _(event: Any) -> None:

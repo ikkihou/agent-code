@@ -12,6 +12,7 @@
 # here put the import lib
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import typer
@@ -50,6 +51,7 @@ def run_once(
     permission_mode: str,
     session: Session | None = None,
     system_prompt: str | None = None,
+    signal: threading.Event | None = None,
 ) -> None:
     render_header(cwd, provider_name, model, base_url)
     if session:
@@ -57,7 +59,10 @@ def run_once(
         console.print(f"[dim]session: {session.session_id}{suffix}[/dim]")
     provider = create_provider(provider_name, model, base_url)
     state = RuntimeState(
-        permission_mode=permission_mode, model=model, provider=provider_name
+        permission_mode=permission_mode,
+        model=model,
+        provider=provider_name,
+        abort_event=signal if signal is not None else threading.Event(),
     )
     run_agent(
         prompt,
