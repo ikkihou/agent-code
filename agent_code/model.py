@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 ##
 ##       filename: model.py
@@ -288,10 +287,7 @@ class AnthropicProvider:
                     if signal is not None and signal.is_set():
                         raise ModelRequestAborted()
 
-                    if (
-                        event.type == "content_block_delta"
-                        and event.delta.type == "text_delta"
-                    ):
+                    if event.type == "content_block_delta" and event.delta.type == "text_delta":
                         yield ModelStreamEvent(
                             type="text_delta",
                             text=event.delta.text,

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 File      :   scheduler.py
 Date      :   2026-07-21 11:46:44

@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 """
 @File    :   hooks.py
 @Time    :   2026/07/19 23:21:01

@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 """
 @File    :   session.py
 @Time    :   2026/07/18 17:12:29

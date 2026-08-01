@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 File      :   interactive.py
 Date      :   2026-07-22 15:28:36

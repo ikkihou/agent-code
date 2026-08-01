@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 """
 @File    :   project_memory.py
 @Time    :   2026/07/18 19:27:41

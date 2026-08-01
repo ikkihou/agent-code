@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
 """
 @File    :   compact_basic.py
 @Time    :   2026/07/19 10:22:14
