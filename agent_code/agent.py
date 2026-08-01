@@ -14,7 +14,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rich.console import Console
 
@@ -51,6 +51,30 @@ class AgentResult:
     final: str
     trace: list[str]
     messages: list[dict[str, Any]]
+
+
+@dataclass
+class _LineBufferedStreamRenderer:
+    """Render complete lines so prompt-toolkit cannot overwrite partial chunks."""
+
+    write_line: Callable[[str], None]
+    pending: str = ""
+    started: bool = False
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+
+        self.started = True
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            self.write_line(line.removesuffix("\r"))
+
+    def finish(self) -> None:
+        if self.pending:
+            self.write_line(self.pending)
+            self.pending = ""
 
 
 _SYSTEM_CORE = (
@@ -138,6 +162,14 @@ def run_agent(  ## AGENT LOOP
         emit("interrupted by user")
         return AgentResult(final="interrupted", trace=trace, messages=messages)
 
+    def write_stream_line(line: str) -> None:
+        console.print(
+            line,
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
+
     trace: list[str] = []
     continuation_count = 0
     response: ModelResponse | None = None
@@ -152,7 +184,7 @@ def run_agent(  ## AGENT LOOP
             console.print(f"[dim]compacted: {len(messages)} messages remaining[/dim]")
 
         response = None
-        streamed_text = False
+        stream_renderer = _LineBufferedStreamRenderer(write_stream_line)
         try:
             for event in provider.complete_stream(
                 messages,
@@ -161,23 +193,15 @@ def run_agent(  ## AGENT LOOP
                 signal=state.abort_event,
             ):
                 if event.type == "text_delta" and event.text:
-                    streamed_text = True
-                    console.print(
-                        event.text,
-                        end="",
-                        markup=False,
-                        highlight=False,
-                        soft_wrap=True,
-                    )
+                    stream_renderer.feed(event.text)
                 elif event.type == "completed":
                     response = event.response
         except ModelRequestAborted:
-            if streamed_text:
-                console.print()
+            stream_renderer.finish()
             return interrupted_result()
 
-        if streamed_text:
-            console.print()
+        stream_renderer.finish()
+        streamed_text = stream_renderer.started
         if response is None:
             raise RuntimeError("provider stream ended without a completed response")
 
