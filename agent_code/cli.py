@@ -1,5 +1,4 @@
 """
-##
 ##       filename: cli.py
 ##        created: 2026/06/14
 ##         author: Paul_Bao
@@ -88,12 +87,8 @@ def main_command(
         "--permission-mode",
         help="Permission mode: default, acceptEdits, plan",
     ),
-    resume: str | None = typer.Option(
-        None, "--resume", help="按 session id 恢复指定会话"
-    ),
-    continue_: bool = typer.Option(
-        False, "--continue", "-c", help="恢复 cwd 最近一次会话"
-    ),
+    resume: str | None = typer.Option(None, "--resume", help="按 session id 恢复指定会话"),
+    continue_: bool = typer.Option(False, "--continue", "-c", help="恢复 cwd 最近一次会话"),
 ) -> None:
 
     # 启动时只解析一次 cwd，让整次运行共享同一个工作目录。
@@ -179,9 +174,7 @@ def main_command(
     if session is None:
         session = Session.create(resolved_cwd)
 
-    state = RuntimeState(
-        permission_mode=permission_mode, model=model, provider=provider
-    )
+    state = RuntimeState(permission_mode=permission_mode, model=model, provider=provider)
     tools = default_tools()
 
     def run_turn(line: str) -> None:
