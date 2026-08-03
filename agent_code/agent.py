@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +45,8 @@ from .session import Session
 from .tools import ToolContext, ToolRegistry
 
 console = Console()
+OutputWriter = Callable[[str], None]
+PrintFunc = Callable[..., None]
 
 
 @dataclass
@@ -75,6 +78,18 @@ class _LineBufferedStreamRenderer:
         if self.pending:
             self.write_line(self.pending)
             self.pending = ""
+
+
+def _make_printer(output: OutputWriter | None = None) -> PrintFunc:
+    if output is None:
+        return console.print
+
+    def print_to_output(*objects: Any, **kwargs: Any) -> None:
+        buffer = StringIO()
+        Console(file=buffer, no_color=True, width=120).print(*objects, **kwargs)
+        output(buffer.getvalue())
+
+    return print_to_output
 
 
 _SYSTEM_CORE = (
@@ -131,6 +146,7 @@ def run_agent(  ## AGENT LOOP
     cwd: Path | None = None,
     session: Session | None = None,
     system_prompt: str | None = None,
+    output: OutputWriter | None = None,
 ) -> AgentResult:
     ## 解析 cwd
     resolved_cwd = cwd or Path.cwd()
@@ -151,19 +167,21 @@ def run_agent(  ## AGENT LOOP
     if session:
         session.append_messages([messages[-1]])
 
+    print_output = _make_printer(output)
+
     def emit(line: str) -> None:
         # 工具结果可能很长：完整内容只通过 tool_result 回填给模型，终端只看工具调用/最终回答。
         if line.startswith("observation:"):
             return
         trace.append(line)
-        console.print(line, markup=False, highlight=False)
+        print_output(line, markup=False, highlight=False)
 
     def interrupted_result() -> AgentResult:
         emit("interrupted by user")
         return AgentResult(final="interrupted", trace=trace, messages=messages)
 
     def write_stream_line(line: str) -> None:
-        console.print(
+        print_output(
             line,
             markup=False,
             highlight=False,
@@ -181,7 +199,7 @@ def run_agent(  ## AGENT LOOP
         ## 1. sending api request
         if len(messages) > 40:
             messages = compact(messages, keep=8)
-            console.print(f"[dim]compacted: {len(messages)} messages remaining[/dim]")
+            print_output(f"[dim]compacted: {len(messages)} messages remaining[/dim]")
 
         response = None
         stream_renderer = _LineBufferedStreamRenderer(write_stream_line)
@@ -219,9 +237,7 @@ def run_agent(  ## AGENT LOOP
             if state.permission_mode == "plan" and final.strip():
                 if confirm_plan(final):
                     state.permission_mode = "acceptEdits"
-                    messages.append(
-                        {"role": "user", "content": "Plan approved. Implement it now."}
-                    )
+                    messages.append({"role": "user", "content": "Plan approved. Implement it now."})
                 else:
                     messages.append(
                         {
@@ -269,13 +285,14 @@ def run_agent(  ## AGENT LOOP
             state,
             tools,
             emit,
+            print_output,
         )
         if tool_result_blocks is None:
             tool_result_blocks = []
             for batch in partition_tool_calls(response.tool_calls, tools):
                 if len(batch) == 1:
                     tool_result_blocks.append(
-                        execute_one_tool_call(batch[0], ctx, state, tools, emit)
+                        execute_one_tool_call(batch[0], ctx, state, tools, emit, print_output)
                     )
                 else:
                     # 只读组并行。ex.map 按输入顺序返回结果，
@@ -284,7 +301,7 @@ def run_agent(  ## AGENT LOOP
                         results = list(
                             ex.map(
                                 lambda c: execute_one_tool_call(
-                                    c, ctx, state, tools, emit
+                                    c, ctx, state, tools, emit, print_output
                                 ),
                                 batch,
                             )
@@ -317,7 +334,7 @@ def _format_call_args(args: dict[str, Any]) -> str:
     return str(preview)
 
 
-def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
+def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[str, Any]:
     """跑单个工具，返回一个 tool_result block。"""
     emit(f"tool_call: {call.name} {_format_call_args(call.arguments)}")
 
@@ -435,8 +452,8 @@ def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
     if decision.behavior == "ask":
         if call.name in ("file_write", "file_edit") and edit_preview is not None:
             path_str, old_content, new_content = edit_preview
-            console.print(f"\n[bold]Diff for {path_str}:[/bold]")
-            console.print(render_diff(old_content, new_content, path_str))
+            print_output(f"\n[bold]Diff for {path_str}:[/bold]")
+            print_output(render_diff(old_content, new_content, path_str))
             if not confirm_edit(path_str):
                 r = ToolResult(call.id, "error: edit rejected by user", is_error=True)
                 emit(f"observation: {r.content}")
@@ -448,11 +465,9 @@ def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
                 }
         elif call.name == "bash":
             command = call.arguments.get("command", "")
-            console.print(f"\n[bold yellow]Command:[/bold yellow] {command}")
+            print_output(f"\n[bold yellow]Command:[/bold yellow] {command}")
             if not confirm_command(command):
-                r = ToolResult(
-                    call.id, "error: command rejected by user", is_error=True
-                )
+                r = ToolResult(call.id, "error: command rejected by user", is_error=True)
                 emit(f"observation: {r.content}")
                 return {
                     "type": "tool_result",
@@ -461,15 +476,9 @@ def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
                     "is_error": True,
                 }
         elif call.name in ("web_fetch", "web_search"):
-            detail = (
-                call.arguments.get("url")
-                or call.arguments.get("query")
-                or str(call.arguments)
-            )
+            detail = call.arguments.get("url") or call.arguments.get("query") or str(call.arguments)
             if not confirm_tool_use(call.name, detail):
-                r = ToolResult(
-                    call.id, "error: tool use rejected by user", is_error=True
-                )
+                r = ToolResult(call.id, "error: tool use rejected by user", is_error=True)
                 emit(f"observation: {r.content}")
                 return {
                     "type": "tool_result",
@@ -482,9 +491,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
             labels = [str(o) for o in options] if isinstance(options, list) else []
             selected = prompt_single_choice(call.arguments.get("prompt", ""), labels)
             content = (
-                "User skipped the question."
-                if selected is None
-                else f'User selected: "{selected}"'
+                "User skipped the question." if selected is None else f'User selected: "{selected}"'
             )
             emit(f"observation: {content}")
             return {
@@ -506,7 +513,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit) -> dict[str, Any]:
             tool_result=result.content,
         ):
             status = "ok" if h["success"] else f"warning: {h['output']}"
-            console.print(f"[dim]hook: PostToolUse {call.name} {status}[/dim]")
+            print_output(f"[dim]hook: PostToolUse {call.name} {status}[/dim]")
     return {
         "type": "tool_result",
         "tool_use_id": result.tool_call_id,
@@ -540,6 +547,7 @@ def execute_plan_boundary_calls(
     state,
     tools,
     emit,
+    print_output,
 ) -> list[dict[str, Any]] | None:
     """plan 模式下，exit_plan_mode 是 turn boundary：同轮其它工具不执行。"""
     if state.permission_mode != "plan":
@@ -551,7 +559,7 @@ def execute_plan_boundary_calls(
     blocks: list[dict[str, Any]] = []
     for call in calls:
         if call is exit_call:
-            blocks.append(execute_one_tool_call(call, ctx, state, tools, emit))
+            blocks.append(execute_one_tool_call(call, ctx, state, tools, emit, print_output))
             continue
         blocks.append(
             {

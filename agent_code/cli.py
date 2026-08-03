@@ -39,6 +39,17 @@ def render_header(cwd: Path, provider: str, model: str, base_url: str | None) ->
     console.print()
 
 
+def header_text(cwd: Path, provider: str, model: str, base_url: str | None) -> str:
+    lines = [
+        "Agent Code",
+        f"cwd: {cwd}",
+        f"provider: {provider}  model: {model}",
+    ]
+    if base_url:
+        lines.append(f"base_url: {base_url}")
+    return "\n".join(lines) + "\n\n"
+
+
 def run_once(
     prompt: str,
     cwd: Path,
@@ -170,14 +181,13 @@ def main_command(
         return
 
     # (2) REPL 分支——命令后面没跟 prompt，走下面交互循环
-    render_header(resolved_cwd, provider, model, base_url)
     if session is None:
         session = Session.create(resolved_cwd)
 
     state = RuntimeState(permission_mode=permission_mode, model=model, provider=provider)
     tools = default_tools()
 
-    def run_turn(line: str) -> None:
+    def run_turn(line: str, output) -> None:
         turn_provider = create_provider(state.provider, state.model, base_url)
         run_agent(
             line,
@@ -188,6 +198,7 @@ def main_command(
             state=state,
             session=session,
             system_prompt=system_prompt,
+            output=output,
         )
 
     def make_slash_context() -> SlashContext:
@@ -200,8 +211,9 @@ def main_command(
             state=state,
         )
 
-    console.print("输入 /help 查看命令，输入 /exit 退出。")
-    run_interactive_shell(state, run_turn, make_slash_context)
+    initial_output = header_text(resolved_cwd, provider, model, base_url)
+    initial_output += "输入 /help 查看命令，输入 /exit 退出。\n"
+    run_interactive_shell(state, run_turn, make_slash_context, initial_output)
 
 
 def main() -> None:
