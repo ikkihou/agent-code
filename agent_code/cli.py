@@ -142,7 +142,7 @@ def main_command(
         )
         if slash_result.handled:
             if slash_result.message:
-                console.print(slash_result.message)
+                console.print(slash_result.message, markup=slash_result.markup)
             if slash_result.should_query:
                 # 把 slash 展开的 prompt 作为新一轮用户输入跑 Agent Loop
                 if session is None:

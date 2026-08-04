@@ -18,32 +18,57 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.widgets import TextArea
-from rich.console import Console
 
 from . import prompt_ui
+from .output import OutputChunk, OutputWriter, render_console_chunk
 from .runtime import RuntimeState
 from .slash import SlashContext, dispatch_slash
 
-console = Console()
-
-
-OutputWriter = Callable[[str], None]
 PromptRequest = dict[str, Any]
 PendingPrompt = dict[str, Any]
+StyleAndText = tuple[str, str]
 
 
-def append_output_text(output_area: TextArea, text: str) -> None:
-    if not text:
+class OutputTranscript:
+    def __init__(self, initial_text: str = "") -> None:
+        self.fragments: list[StyleAndText] = []
+        self.text = ""
+        self.line_count = 0
+        append_output_text(self, initial_text)
+
+
+def append_output_text(transcript: OutputTranscript, output: str | OutputChunk) -> None:
+    chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
+    if not chunk.text:
         return
-    value = output_area.text + text
-    output_area.buffer.set_document(
-        Document(value, cursor_position=len(value)),
-        bypass_readonly=True,
-    )
+    fragments = _chunk_fragments(chunk)
+    display_text = "".join(text for _, text in fragments)
+    transcript.text += display_text
+    transcript.line_count += display_text.count("\n")
+    _append_fragments(transcript.fragments, fragments)
+
+
+def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
+    if chunk.format == "ansi":
+        return [(style, text) for style, text in ANSI(chunk.text).__pt_formatted_text__()]
+    return [("", chunk.text)]
+
+
+def _append_fragments(target: list[StyleAndText], fragments: list[StyleAndText]) -> None:
+    for style, text in fragments:
+        if not text:
+            continue
+        if target and target[-1][0] == style:
+            last_style, last_text = target[-1]
+            target[-1] = (last_style, last_text + text)
+        else:
+            target.append((style, text))
 
 
 def render_user_prompt(text: str, *, source: str = "user") -> str:
@@ -118,12 +143,12 @@ def run_interactive_shell(
     busy = threading.Event()
 
     ui_writer: OutputWriter | None = None
-    output_area = TextArea(
-        text=initial_output,
-        focusable=False,
-        read_only=True,
-        scrollbar=True,
+    output_transcript = OutputTranscript(initial_output)
+    output_control = FormattedTextControl(lambda: output_transcript.fragments)
+    output_window = Window(
+        content=output_control,
         wrap_lines=True,
+        right_margins=[ScrollbarMargin(display_arrows=True)],
     )
     input_area: TextArea | None = None
 
@@ -151,24 +176,21 @@ def run_interactive_shell(
     async def _run() -> None:
         loop = asyncio.get_running_loop()
 
-        def append_output(text: str) -> None:
-            append_output_text(output_area, text)
+        def append_output(output: str | OutputChunk) -> None:
+            append_output_text(output_transcript, output)
+            output_window.vertical_scroll = max(0, output_transcript.line_count)
             app.invalidate()
 
-        def ui_write(text: str) -> None:
-            loop.call_soon_threadsafe(append_output, text)
+        def ui_write(output: str | OutputChunk) -> None:
+            loop.call_soon_threadsafe(append_output, output)
 
         nonlocal ui_writer
         ui_writer = ui_write
         input_prompt = ["> "]
         pending_prompt: PendingPrompt | None = None
 
-        def render_message(message: str) -> str:
-            from io import StringIO
-
-            buffer = StringIO()
-            Console(file=buffer, no_color=True, width=120).print(message)
-            return buffer.getvalue()
+        def render_message(message: Any, *, styled: bool) -> OutputChunk:
+            return render_console_chunk(message, styled=styled, width=120, markup=styled)
 
         def submit_text(text: str) -> None:
             nonlocal pending_prompt
@@ -226,7 +248,7 @@ def run_interactive_shell(
                 result = dispatch_slash(text, make_slash_context())
                 if result.handled:
                     if result.message:
-                        append_output(render_message(result.message))
+                        append_output(render_message(result.message, styled=result.markup))
                     if result.should_query:
                         append_output(render_user_prompt(result.prompt, source="user /slash"))
                         job_queue.put(result.prompt)
@@ -254,7 +276,7 @@ def run_interactive_shell(
         )
         root = HSplit(
             [
-                output_area,
+                output_window,
                 input_area,
                 Window(
                     FormattedTextControl(lambda: bottom_toolbar(state)),

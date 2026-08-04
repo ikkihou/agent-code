@@ -3,10 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from prompt_toolkit.widgets import TextArea
-
 from agent_code.agent import run_agent
 from agent_code.interactive import (
+    OutputTranscript,
     append_output_text,
     parse_choice_index,
     parse_confirm_answer,
@@ -15,17 +14,30 @@ from agent_code.interactive import (
     render_user_prompt,
 )
 from agent_code.model import ModelResponse, ModelStreamEvent
+from agent_code.output import OutputChunk
 from agent_code.runtime import RuntimeState
+from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
 
 
-def test_append_output_text_keeps_transcript_cursor_at_bottom() -> None:
-    output_area = TextArea(text="first\n", read_only=True)
+def test_append_output_text_keeps_plain_transcript() -> None:
+    transcript = OutputTranscript("first\n")
 
-    append_output_text(output_area, "second\n")
+    append_output_text(transcript, "second\n")
 
-    assert output_area.text == "first\nsecond\n"
-    assert output_area.buffer.cursor_position == len(output_area.text)
+    assert transcript.text == "first\nsecond\n"
+    assert transcript.line_count == 2
+    assert transcript.fragments == [("", "first\nsecond\n")]
+
+
+def test_append_output_text_preserves_ansi_style_fragments() -> None:
+    transcript = OutputTranscript()
+
+    append_output_text(transcript, OutputChunk("\x1b[1mBold\x1b[0m plain\n", format="ansi"))
+
+    assert transcript.text == "Bold plain\n"
+    assert ("bold", "Bold") in transcript.fragments
+    assert ("", " plain\n") in transcript.fragments
 
 
 def test_render_user_prompt_formats_prompt_blocks() -> None:
@@ -35,6 +47,7 @@ def test_render_user_prompt_formats_prompt_blocks() -> None:
         "\n[user /slash]\n> expanded\n\n"
     )
     assert render_user_prompt("") == ""
+
 
 def test_prompt_request_helpers_parse_confirm_answers() -> None:
     assert parse_confirm_answer("", default=False) is False
@@ -70,6 +83,25 @@ def test_prompt_request_helpers_render_bottom_prompt_text() -> None:
     assert prompt_for_request(choice_request) == "Choice [0]: "
 
 
+def test_sessions_slash_returns_renderable_message(tmp_path: Path, capsys: Any) -> None:
+    result = dispatch_slash(
+        "/sessions",
+        SlashContext(
+            cwd=tmp_path,
+            permission_mode="default",
+            model="test-model",
+            provider="test-provider",
+            session_id=None,
+        ),
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert result.handled is True
+    assert result.markup is True
+    assert result.message == "[dim]没有找到会话。[/dim]"
+
+
 class _FragmentedProvider:
     def __init__(self, chunks: list[str], final_text: str) -> None:
         self.chunks = chunks
@@ -97,7 +129,7 @@ def test_run_agent_output_callback_receives_complete_lines(tmp_path: Path) -> No
         ["第一行", "完整内容\n\n- **能", "力**：可以理解、", "生成和处理文本"],
         final_text,
     )
-    output: list[str] = []
+    output: list[str | OutputChunk] = []
 
     result = run_agent(
         "介绍一下自己",
@@ -109,4 +141,8 @@ def test_run_agent_output_callback_receives_complete_lines(tmp_path: Path) -> No
     )
 
     assert result.final == final_text
-    assert "".join(output) == final_text + "\n"
+    assert [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output] == [
+        "第一行完整内容\n",
+        "\n",
+        "- **能力**：可以理解、生成和处理文本\n",
+    ]

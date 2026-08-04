@@ -4,7 +4,7 @@ import shlex
 from dataclasses import dataclass
 from operator import truediv
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .runtime import RuntimeState
 
@@ -33,12 +33,14 @@ class SlashResult:
         handled: bool = True,
         should_query: bool = False,
         prompt: str = "",
-        message: str = "",
+        message: Any = "",
+        markup: bool = False,
     ) -> None:
         self.handled = handled
         self.should_query = should_query
         self.prompt = prompt
         self.message = message
+        self.markup = markup
 
 
 SlashHandler = Callable[[list[str], SlashContext], SlashResult]
@@ -89,7 +91,7 @@ def _cmd_help(_args: list[str], ctx: SlashContext) -> SlashResult:
         desc = _registry[name].description
         lines.append(f"  [bold]/{name}[/bold]  {desc}")
     # 不调用模型——纯本地控制命令
-    return SlashResult(handled=True, message="\n".join(lines))
+    return SlashResult(handled=True, message="\n".join(lines), markup=True)
 
 
 def _cmd_model(args: list[str], ctx: SlashContext) -> SlashResult:
@@ -103,9 +105,7 @@ def _cmd_model(args: list[str], ctx: SlashContext) -> SlashResult:
     target = args[0]
     if ctx.state is not None:
         ctx.state.model = target  # 下一轮 run_turn 按 state.model 重建 provider
-    return SlashResult(
-        handled=True, message=f"model → {target}（下一轮生效，当前轮不变）"
-    )
+    return SlashResult(handled=True, message=f"model → {target}（下一轮生效，当前轮不变）")
 
 
 def _cmd_context(_args: list[str], ctx: SlashContext) -> SlashResult:
@@ -137,9 +137,7 @@ def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
         )
     target = args[0]
     if target not in modes:
-        return SlashResult(
-            handled=True, message=f"Unknown mode: {target}. Use: {', '.join(modes)}"
-        )
+        return SlashResult(handled=True, message=f"Unknown mode: {target}. Use: {', '.join(modes)}")
     assert ctx.state is not None
     ctx.state.permission_mode = target
     return SlashResult(
@@ -160,13 +158,9 @@ def _cmd_plan(args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def _cmd_sessions(args: list[str], ctx: SlashContext) -> SlashResult:
-    from .session import _render_sessions
+    from .session import _sessions_renderable
 
-    _render_sessions(ctx.cwd)
-    return SlashResult(
-        handled=True,
-        message="",
-    )
+    return SlashResult(handled=True, message=_sessions_renderable(ctx.cwd), markup=True)
 
 
 def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
@@ -218,9 +212,7 @@ def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
             message="缺少 --every。用法: /loop add <slash或prompt> --every <60s|5m|2h>",
         )
     tool_ctx = ToolContext(cwd=ctx.cwd)
-    msg = cron_create(
-        {"slash": slash, "every_seconds": every_seconds, "label": label}, tool_ctx
-    )
+    msg = cron_create({"slash": slash, "every_seconds": every_seconds, "label": label}, tool_ctx)
     return SlashResult(handled=True, message=msg)
 
 
@@ -265,10 +257,7 @@ def _cmd_loop(args: list[str], ctx: SlashContext) -> SlashResult:
 def _cmd_todo(_args: list[str], ctx: SlashContext) -> SlashResult:
     items = ctx.state.todo_store if ctx.state else []
     icon = {"pending": "○", "in_progress": "◉", "completed": "✓"}
-    body = (
-        "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items)
-        or "(no todos)"
-    )
+    body = "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items) or "(no todos)"
     return SlashResult(handled=True, message=body)
 
 

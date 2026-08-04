@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,6 +29,7 @@ from .fs_safety import (
 )
 from .hooks import run_hooks
 from .model import ModelProvider, ModelRequestAborted, ModelResponse, ToolResult
+from .output import OutputWriter, render_console_chunk
 from .permissions import PermissionRequest, decide_permission
 from .project_memory import load_agent_md
 from .prompt_ui import (
@@ -45,7 +45,6 @@ from .session import Session
 from .tools import ToolContext, ToolRegistry
 
 console = Console()
-OutputWriter = Callable[[str], None]
 PrintFunc = Callable[..., None]
 
 
@@ -85,9 +84,12 @@ def _make_printer(output: OutputWriter | None = None) -> PrintFunc:
         return console.print
 
     def print_to_output(*objects: Any, **kwargs: Any) -> None:
-        buffer = StringIO()
-        Console(file=buffer, no_color=True, width=120).print(*objects, **kwargs)
-        output(buffer.getvalue())
+        styled = (
+            kwargs.get("markup", True) is not False
+            or kwargs.get("style") is not None
+            or any(not isinstance(obj, str) for obj in objects)
+        )
+        output(render_console_chunk(*objects, styled=styled, **kwargs))
 
     return print_to_output
 

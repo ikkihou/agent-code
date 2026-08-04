@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.table import Table
 
 console = Console()
+SessionRenderable = str | Table
 
 
 def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
@@ -56,11 +57,10 @@ def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
     return sorted(summaries, key=lambda item: item[2], reverse=True)
 
 
-def _render_sessions(cwd: Path) -> None:
+def _sessions_renderable(cwd: Path) -> SessionRenderable:
     summaries = _session_summaries(cwd)
     if not summaries:
-        console.print("[dim]没有找到会话。[/dim]")
-        return
+        return "[dim]没有找到会话。[/dim]"
 
     table = Table(title="Sessions")
     table.add_column("session_id")
@@ -73,7 +73,11 @@ def _render_sessions(cwd: Path) -> None:
             .isoformat(timespec="seconds")
         )
         table.add_row(session_id, str(message_count), updated)
-    console.print(table)
+    return table
+
+
+def _render_sessions(cwd: Path) -> None:
+    console.print(_sessions_renderable(cwd))
 
 
 def _sanitize_cwd(cwd: Path) -> str:
