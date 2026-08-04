@@ -12,6 +12,7 @@ from agent_code.interactive import (
     parse_confirm_answer,
     prompt_for_request,
     render_prompt_request,
+    render_user_prompt,
 )
 from agent_code.model import ModelResponse, ModelStreamEvent
 from agent_code.runtime import RuntimeState
@@ -26,6 +27,14 @@ def test_append_output_text_keeps_transcript_cursor_at_bottom() -> None:
     assert output_area.text == "first\nsecond\n"
     assert output_area.buffer.cursor_position == len(output_area.text)
 
+
+def test_render_user_prompt_formats_prompt_blocks() -> None:
+    assert render_user_prompt("hello") == "\n[user]\n> hello\n\n"
+    assert render_user_prompt("first\nsecond") == "\n[user]\n> first\n> second\n\n"
+    assert render_user_prompt("expanded", source="user /slash") == (
+        "\n[user /slash]\n> expanded\n\n"
+    )
+    assert render_user_prompt("") == ""
 
 def test_prompt_request_helpers_parse_confirm_answers() -> None:
     assert parse_confirm_answer("", default=False) is False

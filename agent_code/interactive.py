@@ -46,6 +46,14 @@ def append_output_text(output_area: TextArea, text: str) -> None:
     )
 
 
+def render_user_prompt(text: str, *, source: str = "user") -> str:
+    normalized = text.rstrip()
+    if not normalized.strip():
+        return ""
+    body = "\n".join(f"> {line}" for line in normalized.splitlines())
+    return f"\n[{source}]\n{body}\n\n"
+
+
 def parse_confirm_answer(text: str, default: bool = False) -> bool | None:
     normalized = text.strip().lower()
     if not normalized:
@@ -220,9 +228,11 @@ def run_interactive_shell(
                     if result.message:
                         append_output(render_message(result.message))
                     if result.should_query:
+                        append_output(render_user_prompt(result.prompt, source="user /slash"))
                         job_queue.put(result.prompt)
                     return
 
+            append_output(render_user_prompt(text))
             if busy.is_set():
                 state.input_queue.put(text)
                 append_output("[queued] turn 结束后处理\n")
