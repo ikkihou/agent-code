@@ -212,7 +212,7 @@ def main_command(
         )
 
     initial_output = header_text(resolved_cwd, provider, model, base_url)
-    initial_output += "输入 /help 查看命令，输入 /exit 退出。\n"
+    # initial_output += "输入 /help 查看命令，输入 /exit 退出。\n"
     run_interactive_shell(state, run_turn, make_slash_context, initial_output)
 
 

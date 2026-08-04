@@ -166,7 +166,17 @@ def run_interactive_shell(
     busy = threading.Event()
 
     ui_writer: OutputWriter | None = None
-    output_transcript = OutputTranscript(initial_output)
+
+    initial_transcript = OutputTranscript(initial_output)
+    initial_control = FormattedTextControl(lambda: initial_transcript.fragments)
+    initial_window = Window(
+        content=initial_control,
+        wrap_lines=True,
+        height=3,
+    )
+    initial_frame = Frame(initial_window)
+
+    output_transcript = OutputTranscript()
     output_control = FormattedTextControl(lambda: output_transcript.fragments)
     output_window = Window(
         content=output_control,
@@ -174,6 +184,7 @@ def run_interactive_shell(
         right_margins=[ScrollbarMargin(display_arrows=True)],
     )
     output_frame = Frame(output_window)
+
     input_area: TextArea | None = None
 
     def work_loop() -> None:
@@ -309,6 +320,7 @@ def run_interactive_shell(
         root = FloatContainer(
             content=HSplit(
                 [
+                    initial_frame,
                     output_frame,
                     input_frame,
                     Window(
