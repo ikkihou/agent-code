@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.cursor_shapes import CursorShape, SimpleCursorShapeConfig
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
@@ -25,7 +26,8 @@ from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import Frame, TextArea
 
 from . import prompt_ui
 from .output import OutputChunk, OutputWriter, render_console_chunk
@@ -171,6 +173,7 @@ def run_interactive_shell(
         wrap_lines=True,
         right_margins=[ScrollbarMargin(display_arrows=True)],
     )
+    output_frame = Frame(output_window)
     input_area: TextArea | None = None
 
     def work_loop() -> None:
@@ -296,12 +299,18 @@ def run_interactive_shell(
             completer=SlashCompleter(),
             complete_while_typing=True,
             accept_handler=accept_input,
+            style="class:input-area",
+        )
+        input_frame = Frame(
+            input_area,
+            title=" INPUT ",
+            style="class:input-frame",
         )
         root = FloatContainer(
             content=HSplit(
                 [
-                    output_window,
-                    input_area,
+                    output_frame,
+                    input_frame,
                     Window(
                         FormattedTextControl(lambda: bottom_toolbar(state)),
                         height=1,
@@ -320,6 +329,7 @@ def run_interactive_shell(
         app = Application(
             layout=Layout(root, focused_element=input_area),
             key_bindings=build_key_bindings(state),
+            cursor=SimpleCursorShapeConfig(CursorShape.BLINKING_BLOCK),
             full_screen=True,
         )
 
