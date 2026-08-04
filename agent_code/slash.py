@@ -60,6 +60,10 @@ def register(name: str, description: str, handler: SlashHandler) -> None:
     _registry[name] = SlashCommand(name, description, handler)
 
 
+def slash_commands() -> list[SlashCommand]:
+    return [_registry[name] for name in sorted(_registry)]
+
+
 def dispatch_slash(line: str, ctx: SlashContext) -> SlashResult:
     if not line.startswith("/"):
         return SlashResult(handled=False)

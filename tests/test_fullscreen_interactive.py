@@ -3,9 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.document import Document
+
 from agent_code.agent import run_agent
 from agent_code.interactive import (
     OutputTranscript,
+    SlashCompleter,
     append_output_text,
     parse_choice_index,
     parse_confirm_answer,
@@ -100,6 +104,23 @@ def test_sessions_slash_returns_renderable_message(tmp_path: Path, capsys: Any) 
     assert result.handled is True
     assert result.markup is True
     assert result.message == "[dim]没有找到会话。[/dim]"
+
+
+def test_slash_completer_suggests_command_prefixes() -> None:
+    completions = list(
+        SlashCompleter().get_completions(Document("/he"), CompleteEvent())
+    )
+
+    assert [completion.text for completion in completions] == ["/help"]
+    assert completions[0].start_position == -3
+    assert str(completions[0].display_meta_text) == "显示所有可用 slash command"
+
+
+def test_slash_completer_ignores_non_command_input() -> None:
+    completer = SlashCompleter()
+
+    assert list(completer.get_completions(Document("hello"), CompleteEvent())) == []
+    assert list(completer.get_completions(Document("/loop "), CompleteEvent())) == []
 
 
 class _FragmentedProvider:

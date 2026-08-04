@@ -17,22 +17,43 @@ import threading
 from typing import Any, Callable
 
 from prompt_toolkit.application import Application, run_in_terminal
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 
 from . import prompt_ui
 from .output import OutputChunk, OutputWriter, render_console_chunk
 from .runtime import RuntimeState
-from .slash import SlashContext, dispatch_slash
+from .slash import SlashContext, dispatch_slash, slash_commands
 
 PromptRequest = dict[str, Any]
 PendingPrompt = dict[str, Any]
 StyleAndText = tuple[str, str]
+
+
+class SlashCompleter(Completer):
+    def get_completions(self, document: Document, complete_event: Any) -> Any:
+        text_before_cursor = document.text_before_cursor
+        if not text_before_cursor.startswith("/") or any(
+            char.isspace() for char in text_before_cursor
+        ):
+            return
+
+        prefix = text_before_cursor[1:]
+        for command in slash_commands():
+            if command.name.startswith(prefix):
+                yield Completion(
+                    f"/{command.name}",
+                    start_position=-len(text_before_cursor),
+                    display=f"/{command.name}",
+                    display_meta=command.description,
+                )
 
 
 class OutputTranscript:
@@ -272,18 +293,29 @@ def run_interactive_shell(
             multiline=False,
             prompt=lambda: input_prompt[0],
             wrap_lines=False,
+            completer=SlashCompleter(),
+            complete_while_typing=True,
             accept_handler=accept_input,
         )
-        root = HSplit(
-            [
-                output_window,
-                input_area,
-                Window(
-                    FormattedTextControl(lambda: bottom_toolbar(state)),
-                    height=1,
-                    style="reverse",
+        root = FloatContainer(
+            content=HSplit(
+                [
+                    output_window,
+                    input_area,
+                    Window(
+                        FormattedTextControl(lambda: bottom_toolbar(state)),
+                        height=1,
+                        style="reverse",
+                    ),
+                ]
+            ),
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(max_height=8, scroll_offset=1),
                 ),
-            ]
+            ],
         )
         app = Application(
             layout=Layout(root, focused_element=input_area),
