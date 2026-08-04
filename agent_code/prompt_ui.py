@@ -12,27 +12,39 @@
 from __future__ import annotations
 
 import difflib
-import sys
 from io import StringIO
+from typing import Any, Callable
 
 import typer
 
 from .runtime import TodoItem
 
-_terminal_asker = None  # 交互 shell 启动时由 interactive.py 注入；one-shot 保持 None
+PromptRequest = dict[str, Any]
+PromptFallback = Callable[[], Any]
+PromptAsker = Callable[[PromptRequest | PromptFallback], Any]
+
+_terminal_asker: PromptAsker | None = (
+    None  # 交互 shell 启动时由 interactive.py 注入；one-shot 保持 None
+)
 
 
-def set_terminal_asker(asker) -> None:
+def set_terminal_asker(asker: PromptAsker | None) -> None:
     global _terminal_asker
     _terminal_asker = asker
 
 
-def _ask(func):
+def _ask(func: PromptFallback) -> Any:
     """worker 要问用户时走这里。交互 shell 注入了 asker → 丢回主线程事件循环问；
     one-shot 没注入（_terminal_asker is None）→ 直接问。"""
     if _terminal_asker is not None:
         return _terminal_asker(func)
     return func()
+
+
+def _ask_request(request: PromptRequest, fallback: PromptFallback) -> Any:
+    if _terminal_asker is not None:
+        return _terminal_asker(request)
+    return fallback()
 
 
 def render_diff(old: str, new: str, path: str) -> str:
@@ -63,39 +75,82 @@ def render_diff(old: str, new: str, path: str) -> str:
 
 def confirm_edit(path: str) -> bool:
     """让用户确认是否应用这次编辑，默认不应用。"""
-    return _ask(lambda: typer.confirm(f"Apply this edit to {path}?", default=False))
+    return bool(
+        _ask_request(
+            {
+                "type": "confirm",
+                "message": f"Apply this edit to {path}?",
+                "default": False,
+            },
+            lambda: typer.confirm(f"Apply this edit to {path}?", default=False),
+        )
+    )
 
 
 def confirm_command(command: str) -> bool:
     """让用户确认是否执行这条 bash 命令，默认不执行。"""
-    return _ask(lambda: typer.confirm("Run this command?", default=False))
+    return bool(
+        _ask_request(
+            {
+                "type": "confirm",
+                "message": "Run this command?",
+                "default": False,
+                "detail": command,
+            },
+            lambda: typer.confirm("Run this command?", default=False),
+        )
+    )
 
 
 def confirm_tool_use(tool_name: str, detail: str) -> bool:
     """让用户确认非 bash 的 ask 类工具，例如访问外部网络。"""
-    return _ask(lambda: typer.confirm(f"Allow {tool_name}: {detail}?", default=False))
+    return bool(
+        _ask_request(
+            {
+                "type": "confirm",
+                "message": f"Allow {tool_name}: {detail}?",
+                "default": False,
+                "detail": detail,
+            },
+            lambda: typer.confirm(f"Allow {tool_name}: {detail}?", default=False),
+        )
+    )
+
+
+def _render_plan_panel(plan_summary: str) -> str:
+    from rich.console import Console
+    from rich.panel import Panel
+
+    buffer = StringIO()
+    Console(file=buffer, no_color=True).print(
+        Panel(
+            plan_summary or "(empty plan_summary)",
+            title="Plan",
+            border_style="blue",
+        )
+    )
+    return buffer.getvalue()
 
 
 def confirm_plan(plan_summary: str) -> bool:
+    panel = _render_plan_panel(plan_summary)
+
     def _do() -> bool:
-        from rich.console import Console
-        from rich.panel import Panel
-
-        buffer = StringIO()
-        Console(file=buffer, no_color=True).print(
-            Panel(
-                plan_summary or "(empty plan_summary)",
-                title="Plan",
-                border_style="blue",
-            )
-        )
-        panel = buffer.getvalue()
-
         typer.echo(panel, nl=False)
 
         return typer.confirm("Approve this plan and exit plan mode?", default=False)
 
-    return _ask(_do)
+    return bool(
+        _ask_request(
+            {
+                "type": "confirm",
+                "message": "Approve this plan and exit plan mode?",
+                "default": False,
+                "body": panel,
+            },
+            _do,
+        )
+    )
 
 
 def prompt_single_choice(question: str, labels: list[str]) -> str | None:
@@ -111,7 +166,15 @@ def prompt_single_choice(question: str, labels: list[str]) -> str | None:
         return typer.prompt("Choice", default="0")
 
     try:
-        choice = _ask(ask_choice)
+        choice = _ask_request(
+            {
+                "type": "choice",
+                "question": question,
+                "labels": labels,
+                "default": 0,
+            },
+            ask_choice,
+        )
         idx = int(choice)
         if 1 <= idx <= len(labels):
             return labels[idx - 1]

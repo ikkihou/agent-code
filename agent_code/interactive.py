@@ -32,6 +32,8 @@ console = Console()
 
 
 OutputWriter = Callable[[str], None]
+PromptRequest = dict[str, Any]
+PendingPrompt = dict[str, Any]
 
 
 def append_output_text(output_area: TextArea, text: str) -> None:
@@ -44,6 +46,60 @@ def append_output_text(output_area: TextArea, text: str) -> None:
     )
 
 
+def parse_confirm_answer(text: str, default: bool = False) -> bool | None:
+    normalized = text.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"y", "yes"}:
+        return True
+    if normalized in {"n", "no"}:
+        return False
+    return None
+
+
+def parse_choice_index(text: str, option_count: int, default: int = 0) -> int | None:
+    normalized = text.strip()
+    if not normalized:
+        return default
+    try:
+        idx = int(normalized)
+    except ValueError:
+        return None
+    if 0 <= idx <= option_count:
+        return idx
+    return None
+
+
+def render_prompt_request(request: PromptRequest) -> str:
+    request_type = request.get("type")
+    body = str(request.get("body") or "")
+    parts: list[str] = []
+    if body:
+        parts.append(body.rstrip())
+
+    if request_type == "choice":
+        question = str(request.get("question") or "")
+        labels = request.get("labels") or []
+        parts.append(f"? {question}")
+        parts.extend(f"  {i}. {label}" for i, label in enumerate(labels, 1))
+        parts.append("  0. Skip / Other")
+    else:
+        message = str(request.get("message") or "Confirm?")
+        default = bool(request.get("default", False))
+        suffix = "[Y/n]" if default else "[y/N]"
+        parts.append(f"? {message} {suffix}")
+
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def prompt_for_request(request: PromptRequest) -> str:
+    if request.get("type") == "choice":
+        default = int(request.get("default", 0))
+        return f"Choice [{default}]: "
+    default = bool(request.get("default", False))
+    return "Confirm [Y/n]: " if default else "Confirm [y/N]: "
+
+
 def run_interactive_shell(
     state: RuntimeState,
     run_turn: Callable[[str, OutputWriter], None],
@@ -52,6 +108,7 @@ def run_interactive_shell(
 ) -> None:
     job_queue: queue.Queue[str] = queue.Queue()
     busy = threading.Event()
+
     ui_writer: OutputWriter | None = None
     output_area = TextArea(
         text=initial_output,
@@ -95,6 +152,8 @@ def run_interactive_shell(
 
         nonlocal ui_writer
         ui_writer = ui_write
+        input_prompt = ["> "]
+        pending_prompt: PendingPrompt | None = None
 
         def render_message(message: str) -> str:
             from io import StringIO
@@ -104,7 +163,50 @@ def run_interactive_shell(
             return buffer.getvalue()
 
         def submit_text(text: str) -> None:
+            nonlocal pending_prompt
             text = text.strip()
+            if pending_prompt is not None:
+                request = pending_prompt["request"]
+                future = pending_prompt["future"]
+                request_type = request.get("type")
+
+                if request_type == "choice":
+                    labels = request.get("labels") or []
+                    idx = parse_choice_index(
+                        text,
+                        len(labels),
+                        int(request.get("default", 0)),
+                    )
+                    if idx is None:
+                        append_output("Invalid choice. Enter a listed number.\n")
+                        return
+                    result = str(idx)
+                    if not future.done():
+                        future.set_result(result)
+                    pending_prompt = None
+                    input_prompt[0] = "> "
+                    if idx == 0:
+                        append_output("Choice: skip\n")
+                    else:
+                        append_output(f"Choice: {labels[idx - 1]}\n")
+                    app.invalidate()
+                    return
+
+                answer = parse_confirm_answer(
+                    text,
+                    bool(request.get("default", False)),
+                )
+                if answer is None:
+                    append_output("Invalid answer. Enter y or n.\n")
+                    return
+                if not future.done():
+                    future.set_result(answer)
+                pending_prompt = None
+                input_prompt[0] = "> "
+                append_output(f"Answer: {'yes' if answer else 'no'}\n")
+                app.invalidate()
+                return
+
             if not text:
                 return
 
@@ -136,7 +238,7 @@ def run_interactive_shell(
         nonlocal input_area
         input_area = TextArea(
             multiline=False,
-            prompt="> ",
+            prompt=lambda: input_prompt[0],
             wrap_lines=False,
             accept_handler=accept_input,
         )
@@ -157,7 +259,22 @@ def run_interactive_shell(
             full_screen=True,
         )
 
-        def terminal_asker(func: Callable[[], Any]) -> Any:
+        async def ask_in_app(request: PromptRequest) -> Any:
+            nonlocal pending_prompt
+            future: asyncio.Future[Any] = loop.create_future()
+            pending_prompt = {"request": request, "future": future}
+            append_output(render_prompt_request(request))
+            input_prompt[0] = prompt_for_request(request)
+            if input_area is not None:
+                input_area.buffer.set_document(Document("", cursor_position=0))
+                app.layout.focus(input_area)
+            app.invalidate()
+            return await future
+
+        def terminal_asker(func: Callable[[], Any] | PromptRequest) -> Any:
+            if isinstance(func, dict):
+                return asyncio.run_coroutine_threadsafe(ask_in_app(func), loop).result()
+
             async def _run_in_terminal() -> Any:
                 return await run_in_terminal(func)
 
