@@ -10,11 +10,26 @@
 from __future__ import annotations
 
 import json
+import locale
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 HOOKS_FILE = "hooks.json"
+
+
+def _decode_hook_output(data: bytes | None) -> str:
+    if not data:
+        return ""
+
+    encodings = ["utf-8", locale.getpreferredencoding(False)]
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def load_hooks(cwd: Path) -> dict[str, list[dict[str, Any]]]:
@@ -50,17 +65,22 @@ def _run_hook_command(
     command: str, input_data: dict[str, Any], cwd: Path, timeout: int = 30
 ) -> tuple[bool, str]:
     try:
+        env = os.environ.copy()
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         result = subprocess.run(
             command,
             shell=True,
             cwd=str(cwd),
-            input=json.dumps(input_data, ensure_ascii=False),
-            capture_output=True,
-            text=True,
+            input=json.dumps(input_data, ensure_ascii=False).encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             timeout=timeout,
+            env=env,
         )
 
-        output = result.stdout.strip() or result.stderr.strip()
+        output = _decode_hook_output(result.stdout).strip() or _decode_hook_output(
+            result.stderr
+        ).strip()
         return result.returncode == 0, output
     except subprocess.TimeoutExpired:
         return False, "hook time out"
