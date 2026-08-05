@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
-from typing import Any, Callable, Hashable
+from typing import Any, Callable, Hashable, cast
 
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.application.current import get_app
@@ -24,7 +24,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import CursorShape, SimpleCursorShapeConfig
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -32,6 +32,7 @@ from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 
 from . import prompt_ui
@@ -76,7 +77,7 @@ def _append_fragments(target: list[StyleAndText], fragments: list[StyleAndText])
 
 def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
     if chunk.format == "ansi":
-        return [(style, text) for style, text in ANSI(chunk.text).__pt_formatted_text__()]
+        return [(style, text) for style, text, *_ in ANSI(chunk.text).__pt_formatted_text__()]
     return [("", chunk.text)]
 
 
@@ -146,26 +147,67 @@ def split_fragments_by_lines(
 
 
 class TranscriptLexer(Lexer):
-    """把 OutputTranscript 的 ANSI 片段按行喂给 BufferControl，保留原有样式。"""
+    """把 OutputTranscript 的 ANSI 片段按行喂给 BufferControl，保留原有样式。
 
-    def __init__(self, transcript: OutputTranscript) -> None:
+    额外职责：prompt_toolkit 只给片段实际覆盖的字符上背景色，所以对带灰色背景的
+    user_prompt 行在渲染时补尾随空格，把背景铺满整行（不污染 transcript.text）。
+    """
+
+    # render_user_prompt 用的背景样式 token（256 色灰 #444444），命中该背景的行才补位。
+    _PROMPT_BG = "bg:#444444"
+
+    def __init__(self, transcript: OutputTranscript, output_window: Window | None = None) -> None:
         self._transcript = transcript
+        self.output_window = output_window
 
-    def lex_document(self, document: Document) -> Callable[[int], list[StyleAndText]]:
+    def lex_document(self, document: Document) -> Callable[[int], StyleAndTextTuples]:
         lines = split_fragments_by_lines(self._transcript.fragments)
-        return lambda lineno: lines[lineno] if 0 <= lineno < len(lines) else []
+
+        def get_line(lineno: int) -> StyleAndTextTuples:
+            if not (0 <= lineno < len(lines)):
+                return []
+            fragments = cast(StyleAndTextTuples, lines[lineno])
+            width = self._pane_width()
+            if width <= 0:
+                return fragments
+            if not any(self._PROMPT_BG in style for style, *_ in fragments):
+                return fragments
+            used = sum(get_cwidth(text) for _, text, *_ in fragments)
+            pad = width - 1 - used  # 留 1 格给 BufferControl 自动追加的尾随空格
+            if pad <= 0:
+                return fragments
+            return [*fragments, (self._PROMPT_BG, " " * pad)]
+
+        return get_line
+
+    def _pane_width(self) -> int:
+        """输出面板内容宽度：取输出窗口上一帧的精确 window_width。
+
+        渲染信息尚不存在（首帧）时返回 0 即不补位：真实 app 首帧 transcript 为空，
+        首个 user_prompt 到用户提交后才出现，那时 render_info 一定已可用。
+        不退回终端列数——依赖 get_app() 在测试/未运行时会拿到 dummy 的 80 列，危险。
+        """
+        window = self.output_window
+        if window is None or window.render_info is None:
+            return 0
+        return max(0, window.render_info.window_width)
 
     def invalidation_hash(self) -> Hashable:
         # 内容变化由 document.text 的 cache key 覆盖，这里只需返回稳定值。
         return "transcript-lexer"
 
 
-def render_user_prompt(text: str, *, source: str = "user") -> str:
+def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
     normalized = text.rstrip()
     if not normalized.strip():
-        return ""
+        return OutputChunk("")
     body = "\n".join(f"> {line}" for line in normalized.splitlines())
-    return f"\n[{source}]\n{body}\n\n"
+    # 白字深灰底反白高亮，source 头加粗；灰底用 256 色 #444444（47/ansigray 太浅，
+    # 白字看不清）。背景只覆盖文本本身，整行铺满由 TranscriptLexer 在渲染时补位实现。
+    return OutputChunk(
+        f"\n\x1b[1;97;48;5;238m[{source}]\x1b[0m\n\x1b[97;48;5;238m{body}\x1b[0m\n\n",
+        format="ansi",
+    )
 
 
 def parse_confirm_answer(text: str, default: bool = False) -> bool | None:
@@ -244,9 +286,10 @@ def run_interactive_shell(
 
     output_transcript = OutputTranscript()
     output_buffer = Buffer(read_only=True)
+    output_lexer = TranscriptLexer(output_transcript)
     output_control = BufferControl(
         buffer=output_buffer,
-        lexer=TranscriptLexer(output_transcript),
+        lexer=output_lexer,
         focusable=False,
         # 点击 output 区域时把焦点移过来，配合鼠标拖拽做选区，方便复制文本。
         focus_on_click=True,
@@ -256,6 +299,8 @@ def run_interactive_shell(
         wrap_lines=True,
         right_margins=[ScrollbarMargin(display_arrows=True)],
     )
+    # 渲染时 Lexer 需要按面板宽度给 user_prompt 行补位，回填窗口引用。
+    output_lexer.output_window = output_window
     output_frame = Frame(output_window)
 
     input_area: TextArea | None = None

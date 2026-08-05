@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
+
+_ANSI_ESC = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESC.sub("", text)
 
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.clipboard import InMemoryClipboard
@@ -75,13 +82,44 @@ def test_transcript_lexer_returns_styled_lines_and_empty_fallback() -> None:
     assert get_line(999) == []
 
 
+def test_transcript_lexer_pads_user_prompt_lines_across_pane_width() -> None:
+    transcript = OutputTranscript()
+    append_output_text(transcript, render_user_prompt("hi"))
+
+    class FakeWindow:
+        class FakeRenderInfo:
+            window_width = 12
+
+        render_info = FakeRenderInfo()
+
+    get_line = TranscriptLexer(  # type: ignore[arg-type]
+        transcript, output_window=FakeWindow()
+    ).lex_document(Document(transcript.text))
+
+    # transcript.text == "\n[user]\n> hi\n\n"
+    assert get_line(0) == []
+    header = get_line(1)  # "[user]" 占 6 列
+    body = get_line(2)  # "> hi" 占 4 列
+    # 各补到 window_width - 1(留 1 格给 BufferControl 自动追加的尾随空格)
+    assert header[-1] == ("bg:#444444", " " * (12 - 1 - 6))
+    assert body[-1] == ("bg:#444444", " " * (12 - 1 - 4))
+    assert get_line(3) == []
+    assert get_line(4) == []
+
+
 def test_render_user_prompt_formats_prompt_blocks() -> None:
-    assert render_user_prompt("hello") == "\n[user]\n> hello\n\n"
-    assert render_user_prompt("first\nsecond") == "\n[user]\n> first\n> second\n\n"
-    assert render_user_prompt("expanded", source="user /slash") == (
+    chunk = render_user_prompt("hello")
+    assert chunk.format == "ansi"
+    assert _strip_ansi(chunk.text) == "\n[user]\n> hello\n\n"
+    assert _strip_ansi(render_user_prompt("first\nsecond").text) == (
+        "\n[user]\n> first\n> second\n\n"
+    )
+    assert _strip_ansi(render_user_prompt("expanded", source="user /slash").text) == (
         "\n[user /slash]\n> expanded\n\n"
     )
-    assert render_user_prompt("") == ""
+    empty = render_user_prompt("")
+    assert empty.format == "plain"
+    assert empty.text == ""
 
 
 def test_prompt_request_helpers_parse_confirm_answers() -> None:
