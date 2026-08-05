@@ -15,3 +15,4 @@
 ## Feature to be implemented
 
 1. add "/clear" command for clearing all messages in the current session
+2. hot reload session history feature ("/resume" command + specified session_id)

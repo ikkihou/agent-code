@@ -255,6 +255,26 @@ def run_agent(  ## AGENT LOOP
                     session.append_messages(messages[-2:])
                 continue
 
+            # max_tokens 截断续写：上游在 token 预算内没把话说完（stop_reason ==
+            # "max_tokens"，回答断在句中），是"final 不完整"的主要来源。追加一条
+            # continue 让模型接着写，避免长回答被硬截断。
+            if response.stop_reason == "max_tokens" and continuation_count < 2:
+                continuation_count += 1
+                emit("continue: max_tokens reached — asking the model to continue")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous message was cut off (max_tokens reached). "
+                            "Continue from where you left off exactly; do not repeat "
+                            "anything you already wrote."
+                        ),
+                    }
+                )
+                if session:
+                    session.append_messages(messages[-2:])
+                continue
+
             # 空完成重试：既没文本也没工具调用，多半是上游偶发空响应。
             # 别就这样收尾（会看到 "final:" 后面什么都没有），给一次续写机会。
             if not final.strip() and continuation_count < 2:

@@ -190,7 +190,7 @@ class AnthropicProvider:
     def __init__(
         self,
         model: str = "deepseek-v4-flash",
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         base_url: str | None = None,
     ) -> None:
         # 优先从 ~/.claude/settings.json 的 env 字段读取，其次回退到 os.environ。

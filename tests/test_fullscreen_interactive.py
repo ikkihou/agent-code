@@ -22,6 +22,7 @@ from agent_code.interactive import (
     SlashCompleter,
     TranscriptLexer,
     _copy_output,
+    _make_system_clipboard,
     append_output_text,
     output_follow_position,
     parse_choice_index,
@@ -327,6 +328,30 @@ def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> 
     assert any("final: (empty response)" in text for text in texts)
 
 
+def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None:
+    """stop_reason == "max_tokens" 时，不应把截断的回复当完整回答收尾，应续写一次。"""
+    provider = _SequenceProvider(
+        [
+            ModelResponse(text="回复被截断", stop_reason="max_tokens"),
+            ModelResponse(text="补充的结尾"),
+        ]
+    )
+    output: list[str | OutputChunk] = []
+
+    result = run_agent(
+        "hi",
+        provider,
+        ToolRegistry(),
+        RuntimeState(),
+        cwd=tmp_path,
+        output=output.append,
+    )
+
+    assert result.final == "补充的结尾"
+    texts = [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output]
+    assert any("continue: max_tokens" in text for text in texts)
+
+
 def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
     """final message 缺 text block 时，用实际流过的文本兜底重建 final。"""
 
@@ -361,7 +386,7 @@ def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
     ]
 
 
-def _fake_event(clipboard: InMemoryClipboard) -> Any:
+def _fake_event(clipboard: Any) -> Any:
     class _FakeApp:
         def __init__(self) -> None:
             self.clipboard = clipboard
@@ -405,3 +430,37 @@ def test_copy_output_copies_selection_when_present() -> None:
 
     assert ok is True
     assert clipboard.get_data().text == "world"
+
+
+def test_make_system_clipboard_prefers_pyperclip_when_available() -> None:
+    # pyperclip 是硬依赖，装了之后必须走系统剪贴板而不是内存剪贴板，
+    # 否则 Ctrl+C 复制后外部粘贴是空的。
+    clipboard = _make_system_clipboard()
+
+    assert not isinstance(clipboard, InMemoryClipboard)
+
+
+def test_copy_output_falls_back_when_system_clipboard_fails() -> None:
+    transcript = OutputTranscript("fallback text\n")
+    output_buffer = Buffer(read_only=True)
+    output_buffer.set_document(
+        Document(transcript.text, cursor_position=len(transcript.text)),
+        bypass_readonly=True,
+    )
+
+    class _BrokenClipboard:
+        """模拟无图形环境：set_data 抛错，不应炸掉按键处理。"""
+
+        def set_data(self, data: Any) -> None:
+            raise RuntimeError("no pbcopy / no display")
+
+        def get_data(self) -> Any:
+            raise RuntimeError("no pbcopy / no display")
+
+    event = _fake_event(_BrokenClipboard())
+
+    ok = _copy_output(event, output_buffer, transcript)
+
+    assert ok is True
+    assert isinstance(event.app.clipboard, InMemoryClipboard)
+    assert event.app.clipboard.get_data().text == "fallback text\n"

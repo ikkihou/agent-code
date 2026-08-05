@@ -19,7 +19,8 @@ from typing import Any, Callable, Hashable, cast
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.clipboard.base import ClipboardData
+from prompt_toolkit.clipboard import InMemoryClipboard
+from prompt_toolkit.clipboard.base import Clipboard, ClipboardData
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import CursorShape, SimpleCursorShapeConfig
 from prompt_toolkit.document import Document
@@ -501,6 +502,9 @@ def run_interactive_shell(
             full_screen=True,
             # 开启鼠标支持，滚轮即可滚动输出面板（上滚暂停自动跟随，滚回底部恢复）。
             mouse_support=True,
+            # Ctrl+C 选中复制要写进系统剪贴板（macOS pbcopy），而不是 prompt_toolkit
+            # 默认的应用内内存剪贴板——否则外部粘贴是空的。
+            clipboard=_make_system_clipboard(),
         )
 
         async def ask_in_app(request: PromptRequest) -> Any:
@@ -538,25 +542,46 @@ def run_interactive_shell(
     job_queue.put("__EXIT__")
 
 
+def _make_system_clipboard() -> Clipboard:
+    """优先使用系统剪贴板（macOS pbcopy / Linux xclip / Windows ctypes）。
+
+    通过 prompt_toolkit 的 ``PyperclipClipboard``（底层 pyperclip）实现，让 Ctrl+C
+    真的写进系统剪贴板、可被外部粘贴。pyperclip 未安装（如还没 ``uv sync``）时
+    退回应用内 ``InMemoryClipboard``，行为退回旧版、但不至于崩。
+    """
+    try:
+        from prompt_toolkit.clipboard.pyperclip import PyperclipClipboard
+    except Exception:
+        return InMemoryClipboard()
+    return PyperclipClipboard()
+
+
 def _copy_output(
     event: Any,
     output_buffer: Buffer | None,
     output_transcript: OutputTranscript | None,
     on_copy: Callable[[int], None] | None = None,
 ) -> bool:
-    """把 output 的选区（若有）或全部文本复制到系统剪贴板。返回是否复制了内容。"""
+    """把 output 的选区（若有）或全部文本复制到剪贴板。返回是否复制了内容。"""
     if output_buffer is None or output_transcript is None:
         return False
     if output_buffer.selection_state is not None:
         data = output_buffer.copy_selection()
     else:
         data = ClipboardData(output_transcript.text)
-    if data.text:
+    if not data.text:
+        return False
+    try:
         event.app.clipboard.set_data(data)
-        if on_copy is not None:
-            on_copy(len(data.text))
-        return True
-    return False
+    except Exception:
+        # 系统剪贴板进程不可用（无图形环境 / 缺 pbcopy 等）时退回内存剪贴板，
+        # 至少保证应用内粘贴可用，不把按键处理炸掉。
+        fallback = InMemoryClipboard()
+        fallback.set_data(data)
+        event.app.clipboard = fallback
+    if on_copy is not None:
+        on_copy(len(data.text))
+    return True
 
 
 def build_key_bindings(
