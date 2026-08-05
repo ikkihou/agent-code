@@ -205,6 +205,7 @@ def run_agent(  ## AGENT LOOP
 
         response = None
         stream_renderer = _LineBufferedStreamRenderer(write_stream_line)
+        streamed_parts: list[str] = []
         try:
             for event in provider.complete_stream(
                 messages,
@@ -213,6 +214,7 @@ def run_agent(  ## AGENT LOOP
                 signal=state.abort_event,
             ):
                 if event.type == "text_delta" and event.text:
+                    streamed_parts.append(event.text)
                     stream_renderer.feed(event.text)
                 elif event.type == "completed":
                     response = event.response
@@ -235,7 +237,9 @@ def run_agent(  ## AGENT LOOP
 
         ## 3(1). tool call or end execution
         if not response.tool_calls:
-            final = response.text or ""
+            # 上游 final message 偶尔会缺 text block（但流式时明明有输出）。
+            # 用实际流过的文本兜底，避免 final 变成空字符串。
+            final = response.text or "".join(streamed_parts) or ""
             if state.permission_mode == "plan" and final.strip():
                 if confirm_plan(final):
                     state.permission_mode = "acceptEdits"
@@ -247,6 +251,24 @@ def run_agent(  ## AGENT LOOP
                             "content": "Plan not approved. Revise the plan and present it again.",
                         }
                     )
+                if session:
+                    session.append_messages(messages[-2:])
+                continue
+
+            # 空完成重试：既没文本也没工具调用，多半是上游偶发空响应。
+            # 别就这样收尾（会看到 "final:" 后面什么都没有），给一次续写机会。
+            if not final.strip() and continuation_count < 2:
+                continuation_count += 1
+                emit("continue: empty response — asking the model to retry")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous message was empty (no text and no tool calls). "
+                            "Reply with your actual answer or the next tool call."
+                        ),
+                    }
+                )
                 if session:
                     session.append_messages(messages[-2:])
                 continue
@@ -275,7 +297,7 @@ def run_agent(  ## AGENT LOOP
             if streamed_text:
                 trace.append(f"final: {final}")
             else:
-                emit(f"final: {final}")
+                emit(f"final: {final}" if final.strip() else "final: (empty response)")
             if session:
                 session.append_messages([messages[-1]])
             return AgentResult(final=final, trace=trace, messages=messages)
