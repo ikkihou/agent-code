@@ -23,6 +23,8 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
+from .output import OutputChunk
+
 console = Console()
 SessionRenderable = str | Table
 
@@ -156,3 +158,44 @@ class Session:
                 f.write(
                     json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
                 )
+
+    @property
+    def transcript_path(self) -> Path:
+        """渲染转录边车文件：与 session 文件同目录的 <sid>.transcript.jsonl。
+
+        用 with_name 而非 with_suffix——多段后缀在 Python 3.12 的 with_suffix
+        下会抛 ValueError。
+        """
+        return self.file_path.with_name(self.file_path.stem + ".transcript.jsonl")
+
+    def append_transcript(self, chunk: OutputChunk) -> None:
+        """把一条已渲染到输出面板的 OutputChunk 追加进转录文件。
+
+        保留原始 ANSI 文本，resume 重放时才能还原当时的样式（灰色 prompt 块等）。
+        """
+        if not chunk.text:
+            return
+        record = {"text": chunk.text, "format": chunk.format}
+        with open(self.transcript_path, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+
+    @property
+    def transcript_chunks(self) -> list[OutputChunk]:
+        """读回历史渲染转录，用于 resume 时重建输出面板。文件缺失返回空列表。"""
+        chunks: list[OutputChunk] = []
+        if not self.transcript_path.exists():
+            return chunks
+        for line in self.transcript_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            chunks.append(
+                OutputChunk(data.get("text", ""), format=data.get("format", "plain"))
+            )
+        return chunks

@@ -41,11 +41,22 @@ from agent_code.tools import ToolRegistry
 def test_append_output_text_keeps_plain_transcript() -> None:
     transcript = OutputTranscript("first\n")
 
-    append_output_text(transcript, "second\n")
+    display = append_output_text(transcript, "second\n")
 
+    assert display == "second\n"
     assert transcript.text == "first\nsecond\n"
     assert transcript.line_count == 2
     assert transcript.fragments == [("", "first\nsecond\n")]
+
+
+def test_append_output_text_returns_plain_text_of_ansi_chunk() -> None:
+    transcript = OutputTranscript()
+
+    display = append_output_text(
+        transcript, OutputChunk("\x1b[1mBold\x1b[0m plain\n", format="ansi")
+    )
+
+    assert display == "Bold plain\n"
 
 
 def test_append_output_text_preserves_ansi_style_fragments() -> None:
@@ -96,12 +107,11 @@ def test_transcript_lexer_pads_user_prompt_lines_across_pane_width() -> None:
         transcript, output_window=FakeWindow()
     ).lex_document(Document(transcript.text))
 
-    # transcript.text == "\n[user]\n> hi\n\n"
+    # transcript.text == "\n\n> hi\n\n"（当前渲染不再带 [user] 头）
     assert get_line(0) == []
-    header = get_line(1)  # "[user]" 占 6 列
+    assert get_line(1) == []
     body = get_line(2)  # "> hi" 占 4 列
-    # 各补到 window_width - 1(留 1 格给 BufferControl 自动追加的尾随空格)
-    assert header[-1] == ("bg:#444444", " " * (12 - 1 - 6))
+    # 补到 window_width - 1(留 1 格给 BufferControl 自动追加的尾随空格)
     assert body[-1] == ("bg:#444444", " " * (12 - 1 - 4))
     assert get_line(3) == []
     assert get_line(4) == []
@@ -110,12 +120,13 @@ def test_transcript_lexer_pads_user_prompt_lines_across_pane_width() -> None:
 def test_render_user_prompt_formats_prompt_blocks() -> None:
     chunk = render_user_prompt("hello")
     assert chunk.format == "ansi"
-    assert _strip_ansi(chunk.text) == "\n[user]\n> hello\n\n"
+    assert _strip_ansi(chunk.text) == "\n\n> hello\n\n"
     assert _strip_ansi(render_user_prompt("first\nsecond").text) == (
-        "\n[user]\n> first\n> second\n\n"
+        "\n\n> first\n> second\n\n"
     )
+    # source 头当前不再渲染，参数仅作兼容保留。
     assert _strip_ansi(render_user_prompt("expanded", source="user /slash").text) == (
-        "\n[user /slash]\n> expanded\n\n"
+        "\n\n> expanded\n\n"
     )
     empty = render_user_prompt("")
     assert empty.format == "plain"

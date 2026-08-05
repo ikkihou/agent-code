@@ -81,15 +81,20 @@ def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
     return [("", chunk.text)]
 
 
-def append_output_text(transcript: OutputTranscript, output: str | OutputChunk) -> None:
+def append_output_text(transcript: OutputTranscript, output: str | OutputChunk) -> str:
+    """把 output 追加进 transcript，返回其纯文本（无 ANSI）部分。
+
+    返回的 display_text 供调用方做展示同步（如持久化到 session transcript）。
+    """
     chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
     if not chunk.text:
-        return
+        return ""
     fragments = _chunk_fragments(chunk)
     display_text = "".join(text for _, text in fragments)
     transcript.text += display_text
     transcript.line_count += display_text.count("\n")
     _append_fragments(transcript.fragments, fragments)
+    return display_text
 
 
 class OutputTranscript:
@@ -205,7 +210,8 @@ def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
     # 白字深灰底反白高亮，source 头加粗；灰底用 256 色 #444444（47/ansigray 太浅，
     # 白字看不清）。背景只覆盖文本本身，整行铺满由 TranscriptLexer 在渲染时补位实现。
     return OutputChunk(
-        f"\n\x1b[1;97;48;5;238m[{source}]\x1b[0m\n\x1b[97;48;5;238m{body}\x1b[0m\n\n",
+        # f"\n\x1b[1;97;48;5;238m[{source}]\x1b[0m\n\x1b[97;48;5;238m{body}\x1b[0m\n\n",
+        f"\n\x1b[0m\n\x1b[97;48;5;238m{body}\x1b[0m\n\n",
         format="ansi",
     )
 
@@ -269,23 +275,32 @@ def run_interactive_shell(
     run_turn: Callable[[str, OutputWriter], None],
     make_slash_context: Callable[[], SlashContext],
     initial_output: str = "",
+    initial_transcript: list[OutputChunk] | None = None,
+    on_transcript: Callable[[OutputChunk], None] | None = None,
 ) -> None:
     job_queue: queue.Queue[str] = queue.Queue()
     busy = threading.Event()
 
     ui_writer: OutputWriter | None = None
 
-    initial_transcript = OutputTranscript(initial_output)
-    initial_control = FormattedTextControl(lambda: initial_transcript.fragments)
-    initial_window = Window(
-        content=initial_control,
+    header_transcript = OutputTranscript(initial_output)
+    header_control = FormattedTextControl(lambda: header_transcript.fragments)
+    header_window = Window(
+        content=header_control,
         wrap_lines=True,
         height=3,
     )
-    initial_frame = Frame(initial_window)
+    initial_frame = Frame(header_window)
 
     output_transcript = OutputTranscript()
     output_buffer = Buffer(read_only=True)
+    # resume 时预填充历史转录：启动第一帧就能看到上一会话的画面，而非等第一次 append。
+    for chunk in initial_transcript or []:
+        append_output_text(output_transcript, chunk)
+    output_buffer.set_document(
+        Document(output_transcript.text, cursor_position=len(output_transcript.text)),
+        bypass_readonly=True,
+    )
     output_lexer = TranscriptLexer(output_transcript)
     output_control = BufferControl(
         buffer=output_buffer,
@@ -330,7 +345,13 @@ def run_interactive_shell(
         loop = asyncio.get_running_loop()
 
         def append_output(output: str | OutputChunk) -> None:
-            append_output_text(output_transcript, output)
+            chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
+            if not chunk.text:
+                return
+            append_output_text(output_transcript, chunk)
+            # 唯一显示漏斗：把渲染出的 chunk 同步给 session 转录边车，resume 时重放。
+            if on_transcript is not None:
+                on_transcript(chunk)
             doc = output_buffer.document
             # 自动跟随：视口当前停在底部（以 render_info 的 bottom_visible 为准）
             # 才把光标推到文本末尾；用户上滚阅读历史时 bottom_visible 为 False，
