@@ -92,7 +92,7 @@ def main_command(
     provider: str = typer.Option("anthropic", "--provider"),
     model: str = typer.Option("deepseek-v4-flash", "--model"),
     base_url: str | None = typer.Option(None, "--base-url"),
-    max_steps: int = typer.Option(8, "--max-steps"),
+    max_steps: int = typer.Option(20, "--max-steps"),
     permission_mode: str = typer.Option(
         "default",
         "--permission-mode",
