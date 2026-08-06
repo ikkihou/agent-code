@@ -16,7 +16,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+
 HOOKS_FILE = "hooks.json"
+console = Console()
 
 
 def _decode_hook_output(data: bytes | None) -> str:
@@ -42,7 +45,7 @@ def load_hooks(cwd: Path) -> dict[str, list[dict[str, Any]]]:
             data = json.load(f)
             return data.get("hooks", data)
     except (json.JSONDecodeError, OSError) as exc:
-        print(f"[hook warning] failed to load {file_path}: {exc}")
+        console.print(f"[yellow][hook warning] failed to load {file_path}: {exc}[/yellow]")
         return {}
 
 

@@ -79,7 +79,7 @@ The REPL is a full-screen prompt_toolkit `Application` (output transcript pane +
 - All tool paths go through `resolve_in_cwd()`, which confines them to the cwd subtree (traversal → `ValueError`).
 - File reads: text-only (suffix whitelist or NUL-byte sniff), ≤ 256 KiB. Tool observations truncated to 8000 chars; bash output to 12000.
 - `should_skip()` filters skip-dirs + `.gitignore`; git-ignored files are invisible to the agent.
-- `bash_runner.py` / `bg_manager.py` run commands with a minimal env (`_MININAL_ENV`) and a fresh shell per call; `background=True` streams to `.bg/<id>.out/.err`.
+- `bash_runner.py` / `bg_manager.py` run commands with a shared minimal env (`MINIMAL_ENV`, defined in `bash_runner.py`) and a fresh shell per call; `background=True` streams to `.bg/<id>.out/.err`.
 
 ## Testing & style
 

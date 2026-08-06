@@ -17,12 +17,17 @@ from pathlib import Path
 
 from .fs_safety import truncate_output
 
-_MININAL_ENV = {
+# 最小环境：子进程不继承完整用户环境，只给 shell 必需的四项。
+# bg_manager.py 也复用这一份，改这里即可同时影响同步/后台两条路径。
+MINIMAL_ENV = {
     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     "HOME": os.environ.get("HOME", ""),
     "USER": os.environ.get("USER", ""),
-    "SHELL": os.environ.get("SHELL", ""),
+    "SHELL": os.environ.get("SHELL", "/bin/bash"),
 }
+
+# bash 输出上限：命令回显常比文件内容长，给得比普通 observation（8000）宽一些。
+_BASH_OUTPUT_MAX_CHARS = 12000
 
 
 def run_sync(command: str, cwd: Path, timeout: int = 30) -> str:
@@ -34,7 +39,7 @@ def run_sync(command: str, cwd: Path, timeout: int = 30) -> str:
             command,
             shell=True,
             cwd=str(cwd),
-            env=_MININAL_ENV,
+            env=MINIMAL_ENV,
             capture_output=True,
             timeout=timeout,
         )
@@ -47,7 +52,7 @@ def run_sync(command: str, cwd: Path, timeout: int = 30) -> str:
         if stderr_text.strip():
             output += "\n[stderr]\n" + stderr_text
 
-    truncated = truncate_output(output.strip(), max_chars=12000)
+    truncated = truncate_output(output.strip(), max_chars=_BASH_OUTPUT_MAX_CHARS)
 
     if proc.returncode != 0:
         return f"exit code {proc.returncode}\n{truncated}"

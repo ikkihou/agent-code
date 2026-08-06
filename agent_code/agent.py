@@ -28,7 +28,7 @@ from .fs_safety import (
     resolve_in_cwd,
 )
 from .hooks import run_hooks
-from .model import ModelProvider, ModelRequestAborted, ModelResponse, ToolResult
+from .model import ModelProvider, ModelRequestAborted, ModelResponse, ToolCall, ToolResult
 from .output import OutputWriter, render_console_chunk
 from .permissions import PermissionRequest, decide_permission
 from .project_memory import load_agent_md
@@ -46,6 +46,9 @@ from .tools import ToolContext, ToolRegistry
 
 console = Console()
 PrintFunc = Callable[..., None]
+
+# 只读工具并行批的 worker 数。只读调用并发安全；写工具自成串行组，不受此限。
+_PARALLEL_READONLY_WORKERS = 4
 
 
 @dataclass
@@ -341,7 +344,7 @@ def run_agent(  ## AGENT LOOP
                 else:
                     # 只读组并行。ex.map 按输入顺序返回结果，
                     # 所以 tool_result 顺序天然对齐 tool_use 顺序——这是必须守的协议约束。
-                    with ThreadPoolExecutor(max_workers=4) as ex:
+                    with ThreadPoolExecutor(max_workers=_PARALLEL_READONLY_WORKERS) as ex:
                         results = list(
                             ex.map(
                                 lambda c: execute_one_tool_call(
@@ -378,7 +381,14 @@ def _format_call_args(args: dict[str, Any]) -> str:
     return str(preview)
 
 
-def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[str, Any]:
+def execute_one_tool_call(
+    call: ToolCall,
+    ctx: ToolContext,
+    state: RuntimeState,
+    tools: ToolRegistry,
+    emit: Callable[[str], None],
+    print_output: PrintFunc,
+) -> dict[str, Any]:
     """跑单个工具，返回一个 tool_result block。"""
     emit(f"tool_call: {call.name} {_format_call_args(call.arguments)}")
 
@@ -568,7 +578,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[s
     }
 
 
-def partition_tool_calls(calls, tools) -> list[list]:
+def partition_tool_calls(calls: list[ToolCall], tools: ToolRegistry) -> list[list[ToolCall]]:
     """连续只读工具合成并行组；写工具截断、自成串行组。
     例：[Read, Read, Write, Read] → [[Read, Read], [Write], [Read]]"""
     batches: list[list] = []
@@ -588,12 +598,12 @@ def partition_tool_calls(calls, tools) -> list[list]:
 
 
 def execute_plan_boundary_calls(
-    calls,
-    ctx,
-    state,
-    tools,
-    emit,
-    print_output,
+    calls: list[ToolCall],
+    ctx: ToolContext,
+    state: RuntimeState,
+    tools: ToolRegistry,
+    emit: Callable[[str], None],
+    print_output: PrintFunc,
 ) -> list[dict[str, Any]] | None:
     """plan 模式下，exit_plan_mode 是 turn boundary：同轮其它工具不执行。"""
     if state.permission_mode != "plan":

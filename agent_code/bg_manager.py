@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import os
 import subprocess
 import threading
 import uuid
 from pathlib import Path
 
-_MINIMAL_ENV = {
-    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-    "HOME": os.environ.get("HOME", ""),
-    "USER": os.environ.get("USER", ""),
-    "SHELL": os.environ.get("SHELL", "/bin/bash"),
-}
+from .bash_runner import MINIMAL_ENV
 
 
 def start_background(command: str, cwd: Path) -> dict:
@@ -30,7 +24,7 @@ def start_background(command: str, cwd: Path) -> dict:
         command,
         shell=True,
         cwd=str(cwd),
-        env=_MINIMAL_ENV,
+        env=MINIMAL_ENV,
         stdin=subprocess.DEVNULL,
         stdout=out_f,
         stderr=err_f,
