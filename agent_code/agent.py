@@ -23,10 +23,10 @@ from .fs_safety import SkipPolicy, load_gitignore
 from .model import ModelProvider, ModelRequestAborted, ModelResponse
 from .output import OutputWriter, render_console_chunk
 from .project_memory import load_agent_md
-from .prompt_ui import confirm_plan
 from .runtime import RuntimeState
 from .session import Session
 from .tool_execution import (
+    approve_plan,
     execute_one_tool_call,
     execute_plan_boundary_calls,
     partition_tool_calls,
@@ -185,6 +185,16 @@ def run_agent(  ## AGENT LOOP
     trace: list[str] = []
     continuation_count = 0
     response: ModelResponse | None = None
+
+    def continue_with(reason: str, prompt: str) -> None:
+        """追加一条 continue 用户消息；调用点紧跟一个裸 continue 回到 loop 顶。"""
+        nonlocal continuation_count
+        continuation_count += 1
+        emit(f"continue: {reason}")
+        messages.append({"role": "user", "content": prompt})
+        if session:
+            session.append_messages(messages[-2:])
+
     for step in range(max_steps):
         # 用户可能在工具执行期间按下 ESC。请求前检查可避免再多发一轮模型请求。
         if state.abort_event.is_set():
@@ -233,8 +243,7 @@ def run_agent(  ## AGENT LOOP
             # 用实际流过的文本兜底，避免 final 变成空字符串。
             final = response.text or "".join(streamed_parts) or ""
             if state.permission_mode == "plan" and final.strip():
-                if confirm_plan(state, final):
-                    state.permission_mode = "acceptEdits"
+                if approve_plan(state, final):
                     messages.append({"role": "user", "content": "Plan approved. Implement it now."})
                 else:
                     messages.append(
@@ -251,38 +260,26 @@ def run_agent(  ## AGENT LOOP
             # "max_tokens"，回答断在句中），是"final 不完整"的主要来源。追加一条
             # continue 让模型接着写，避免长回答被硬截断。
             if response.stop_reason == "max_tokens" and continuation_count < 2:
-                continuation_count += 1
-                emit("continue: max_tokens reached — asking the model to continue")
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous message was cut off (max_tokens reached). "
-                            "Continue from where you left off exactly; do not repeat "
-                            "anything you already wrote."
-                        ),
-                    }
+                continue_with(
+                    "max_tokens reached — asking the model to continue",
+                    (
+                        "Your previous message was cut off (max_tokens reached). "
+                        "Continue from where you left off exactly; do not repeat "
+                        "anything you already wrote."
+                    ),
                 )
-                if session:
-                    session.append_messages(messages[-2:])
                 continue
 
             # 空完成重试：既没文本也没工具调用，多半是上游偶发空响应。
             # 别就这样收尾（会看到 "final:" 后面什么都没有），给一次续写机会。
             if not final.strip() and continuation_count < 2:
-                continuation_count += 1
-                emit("continue: empty response — asking the model to retry")
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous message was empty (no text and no tool calls). "
-                            "Reply with your actual answer or the next tool call."
-                        ),
-                    }
+                continue_with(
+                    "empty response — asking the model to retry",
+                    (
+                        "Your previous message was empty (no text and no tool calls). "
+                        "Reply with your actual answer or the next tool call."
+                    ),
                 )
-                if session:
-                    session.append_messages(messages[-2:])
                 continue
 
             from .hooks import run_hooks_raw
@@ -300,11 +297,7 @@ def run_agent(  ## AGENT LOOP
                         forced = h["output"].strip()
                         break
             if forced is not None:
-                continuation_count += 1
-                emit(f"continue: {forced}")
-                messages.append({"role": "user", "content": f"continue: {forced}"})
-                if session:
-                    session.append_messages(messages[-2:])
+                continue_with(forced, f"continue: {forced}")
                 continue  # 回到 loop 顶，再跑一轮
             if streamed_text:
                 trace.append(f"final: {final}")
