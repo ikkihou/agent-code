@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`agent_code/` contains the Python package and CLI implementation. `cli.py` defines the Typer interface, `agent.py` coordinates model/tool turns, `model.py` provides model backends, and `tools.py`, `fs_safety.py`, and `permissions.py` enforce tool and filesystem behavior. Session, memory, and background-process support live in focused modules such as `session.py`, `memdir/`, and `bg_manager.py`. Add automated tests under `tests/`, mirroring package names (for example, `tests/test_fs_safety.py`). Keep generated caches, virtual environments, and session history out of version control.
+`agent_code/` contains the Python package and CLI implementation. `cli.py` defines the Typer interface, `agent.py` coordinates model/tool turns, `model.py` provides model backends, and the `tools/` package, `fs_safety.py`, and `permissions.py` enforce tool and filesystem behavior. Session, memory, and background-process support live in focused modules such as `session.py`, `memdir/`, and `bg_manager.py`. Add automated tests under `tests/`, mirroring package names (for example, `tests/test_fs_safety.py`). Keep generated caches, virtual environments, and session history out of version control.
 
 ## Build, Test, and Development Commands
 

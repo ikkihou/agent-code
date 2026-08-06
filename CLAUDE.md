@@ -43,9 +43,10 @@ Protocol constraints that are easy to break:
 
 Streaming text is buffered into whole lines by `_LineBufferedStreamRenderer` before reaching the printer — `run_agent`'s `output` callback must only ever receive complete lines, because prompt_toolkit overwrites partial chunks. The `OutputWriter` / `OutputChunk` types in `output.py` carry either plain text or Rich-rendered ANSI.
 
-### Tools (`tools.py`)
+### Tools (`tools/` package)
 
-A `Tool` is `(name, description, run fn, JSON-schema parameters, is_read_only)`. `ToolRegistry` maps name → Tool; `default_tools()` registers everything (read_file, list_files, glob, grep, file_write, file_edit, bash, git_status, git_diff, ask_user_question, memory_*, cron_*, todo_*, plan-mode, echo, system_date). New tools must be added to `default_tools()` and usually to the permission tables in `permissions.py`.
+Tools live in a package: `tools/core.py` defines the `Tool` dataclass `(name, description, run fn, JSON-schema parameters, is_read_only)`, plus `ToolContext` and `ToolRegistry` (maps name → Tool). Implementation and registration metadata are co-located in per-domain sub-modules, each exposing `tools() -> list[Tool]`:
+`read.py` (read_file, list_files, glob, grep), `edit.py` (file_write, file_edit), `shell.py` (bash, git_status, git_diff), `memory.py` (memory_write, memory_recall), `todo.py` (todo_write, todo_read), `plan.py` (enter_plan_mode, exit_plan_mode), `misc.py` (echo, system_date, ask_user_question). `tools/registry.py`'s `default_tools()` aggregates them plus the cron tools (from `cron_tools.py`, imported lazily inside the function to break the `cron_tools → tools` cycle). New tools go into the matching sub-module (or a new one) and usually to the permission tables in `permissions.py`.
 
 Two tools are special-cased and never actually executed by their registered `run`:
 - `ask_user_question` is intercepted in `agent.py`'s permission block, which calls `prompt_single_choice` and feeds the result back as the observation.
