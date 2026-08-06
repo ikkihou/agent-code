@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from pytest import param
+
 from ..fs_safety import (
     ensure_text_file,
     ensure_within_size,
@@ -119,9 +121,7 @@ def _grep_ripgrep(
     # ripgrep 没匹配会返回 exit code 1，这不是错；真错才看 stderr。
     if proc.returncode not in (0, 1):
         return f"error: rg: {proc.stderr.strip() or proc.returncode}"
-    return truncate_output(
-        _relativize_rg_output(proc.stdout, ctx.cwd) or "(no matches)"
-    )
+    return truncate_output(_relativize_rg_output(proc.stdout, ctx.cwd) or "(no matches)")
 
 
 def _relativize_rg_output(stdout: str, cwd: Path) -> str:
@@ -178,6 +178,40 @@ def _grep_python(
             if regex.search(line):
                 hits.append(f"{rel}:{lineno}:{line}")
     return truncate_output("\n".join(hits) or "(no matches)")
+
+
+def project_tree(args: dict[str, Any], ctx: ToolContext) -> str:
+    max_depth = int(args.get("max_depth", 3))
+    max_nodes = 200
+    lines: list[str] = [f"{ctx.cwd.name}/"]
+    nodes = 0
+
+    def walk(directory: Path, depth: int) -> None:
+        nonlocal nodes
+        if depth > max_depth:
+            return
+        children = sorted(
+            (
+                c
+                for c in directory.iterdir()
+                if not should_skip(c.relative_to(ctx.cwd), ctx.skip_policy)
+            ),
+            key=lambda p: (not p.is_dir(), p.name),
+        )
+        for child in children:
+            if nodes >= max_nodes:
+                if nodes == max_nodes:
+                    lines.append("  " * depth + "...[truncated]")
+                    nodes += 1
+                return
+            suffix = "/" if child.is_dir() else ""
+            lines.append("  " * depth + child.name + suffix)
+            nodes += 1
+            if child.is_dir():
+                walk(child, depth + 1)
+
+    walk(ctx.cwd, 1)
+    return truncate_output("\n".join(lines))
 
 
 def tools() -> list[Tool]:
@@ -245,6 +279,22 @@ def tools() -> list[Tool]:
                     },
                 },
                 "required": ["pattern"],
+            },
+        ),
+        Tool(
+            name="project_tree",
+            description="show the project directory tree from cwd.",
+            run=project_tree,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum recursion depth.",
+                        "default": 3,
+                    },
+                },
+                "required": [],
             },
         ),
     ]

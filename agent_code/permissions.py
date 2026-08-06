@@ -55,6 +55,7 @@ _READONLY_TOOLS = frozenset(
         "list_files",
         "glob",
         "grep",
+        "project_tree",
         "git_status",
         "git_diff",
         "system_date",
@@ -122,9 +123,7 @@ def decide_permission(request: PermissionRequest) -> PermissionDecision:
         command = args.get("command", "")
         danger_reason = _is_dangerous(command)
         if danger_reason:
-            return PermissionDecision(
-                "deny", f"Dangerous command blocked: {danger_reason}"
-            )
+            return PermissionDecision("deny", f"Dangerous command blocked: {danger_reason}")
 
     # acceptEdits 模式：文件编辑跳过确认 UI，但安全校验仍在 agent.py 做
     if mode == "acceptEdits":
