@@ -13,7 +13,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 
 
 class CronJob:
@@ -140,13 +140,39 @@ class CronScheduler:
 
     def drain_pending(self) -> list[str]:
         items: list[str] = []
-        while not self._pending.empty:
+        while not self._pending.empty():
             try:
                 items.append(self._pending.get_nowait())
-            except Exception:
+            except Empty:
                 break
 
         return items
+
+    def _check_due(self) -> None:
+        """扫描一次全部 job，把到点 job 的 prompt 放进 pending 队列并更新 last_run_at。"""
+        now_ts = datetime.now(timezone.utc).timestamp()
+        dirty = False
+        with self._lock:
+            for job in self._jobs:
+                baseline = job.last_run_at or job.created_at
+                last_ts = 0.0
+
+                if baseline:
+                    try:
+                        last_dt = datetime.fromisoformat(baseline)
+                        if last_dt.tzinfo is None:
+                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        last_ts = last_dt.timestamp()
+                    except ValueError:
+                        pass
+
+                if now_ts - last_ts > job.every_seconds:
+                    self._pending.put(job.slash)
+                    job.last_run_at = datetime.now(timezone.utc).isoformat()
+                    dirty = True
+
+            if dirty:
+                _save_jobs(self.cwd, self._jobs)
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
@@ -154,29 +180,7 @@ class CronScheduler:
             if self._stop_event.is_set():
                 break
 
-            now_ts = datetime.now(timezone.utc).timestamp()
-            dirty = False
-            with self._lock:
-                for job in self._jobs:
-                    baseline = job.last_run_at or job.created_at
-                    last_ts = 0.0
-
-                    if baseline:
-                        try:
-                            last_dt = datetime.fromisoformat(baseline)
-                            if last_dt.tzinfo is None:
-                                last_dt = last_dt.replace(tzinfo=timezone.utc)
-                            last_ts = last_dt.timestamp()
-                        except ValueError:
-                            pass
-
-                    if now_ts - last_ts > job.every_seconds:
-                        self._pending.put(job.slash)
-                        job.last_run_at = datetime.now(timezone.utc).isoformat()
-                        dirty = True
-
-                    if dirty:
-                        _save_jobs(self.cwd, self._jobs)
+            self._check_due()
 
     def start(self) -> None:
         """启动后台调度线程（daemon，随主进程退出自动回收）。"""

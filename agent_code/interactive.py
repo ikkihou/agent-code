@@ -278,11 +278,38 @@ def run_interactive_shell(
     initial_output: str = "",
     initial_transcript: list[OutputChunk] | None = None,
     on_transcript: Callable[[OutputChunk], None] | None = None,
+    drain_pending: Callable[[], list[str]] | None = None,
 ) -> None:
     job_queue: queue.Queue[str] = queue.Queue()
     busy = threading.Event()
 
     ui_writer: OutputWriter | None = None
+
+    def render_message(message: Any, *, styled: bool) -> OutputChunk:
+        return render_console_chunk(message, styled=styled, width=120, markup=styled)
+
+    def route_slash_command(text: str, render: Callable[[str | OutputChunk], None]) -> bool:
+        """slash 分发：命中则就地渲染结果，should_query 的展开 prompt 入队。返回是否已处理。"""
+        result = dispatch_slash(text, make_slash_context())
+        if not result.handled:
+            return False
+        if result.message:
+            render(render_message(result.message, styled=result.markup))
+        if result.should_query:
+            render(render_user_prompt(result.prompt, source="user /slash"))
+            job_queue.put(result.prompt)
+        return True
+
+    def handle_cron_prompt(text: str, writer: OutputWriter) -> None:
+        """worker 线程处理 cron 到点 prompt：slash 就地分发，普通 prompt 作为新一轮 turn 入队。"""
+        text = text.strip()
+        if not text or text == "/exit":
+            return  # cron 到点 prompt 不触发应用退出
+        if text.startswith("/"):
+            route_slash_command(text, render=writer)
+            return
+        writer(render_user_prompt(text, source="cron"))
+        job_queue.put(text)
 
     header_transcript = OutputTranscript(initial_output)
     header_control = FormattedTextControl(lambda: header_transcript.fragments)
@@ -323,24 +350,43 @@ def run_interactive_shell(
 
     def work_loop() -> None:
         while True:
-            text = job_queue.get()
+            if drain_pending is None:
+                text = job_queue.get()
+            else:
+                try:
+                    text = job_queue.get(timeout=1.0)
+                except queue.Empty:
+                    text = None
+
             if text == "__EXIT__":
                 break
-            state.abort_event.clear()
-            busy.set()
 
-            try:
-                if ui_writer is None:
-                    continue
-                run_turn(text, ui_writer)
-            except Exception as e:  # provider/工具异常别让 worker 静默死掉
-                if ui_writer is not None:
-                    ui_writer(f"[error] {e}\n")
-            finally:
-                busy.clear()
+            if text is not None:
+                state.abort_event.clear()
+                busy.set()
+
+                try:
+                    if ui_writer is None:
+                        continue
+                    run_turn(text, ui_writer)
+                except Exception as e:  # provider/工具异常别让 worker 静默死掉
+                    if ui_writer is not None:
+                        ui_writer(f"[error] {e}\n")
+                finally:
+                    busy.clear()
+
+            if ui_writer is None:
+                continue
 
             while not state.input_queue.empty():
                 job_queue.put(state.input_queue.get())
+
+            # cron 到点 prompt：与用户输入一样走 slash 分发或作为新一轮 turn，
+            # 但渲染走线程安全的 ui_writer。worker 在 get(timeout=1.0) 上空闲轮询，
+            # 因此 cron 不依赖用户输入也能触发。
+            if drain_pending is not None:
+                for prompt in drain_pending():
+                    handle_cron_prompt(prompt, ui_writer)
 
     async def _run() -> None:
         loop = asyncio.get_running_loop()
@@ -373,9 +419,6 @@ def run_interactive_shell(
         ui_writer = ui_write
         input_prompt = ["> "]
         pending_prompt: PendingPrompt | None = None
-
-        def render_message(message: Any, *, styled: bool) -> OutputChunk:
-            return render_console_chunk(message, styled=styled, width=120, markup=styled)
 
         def submit_text(text: str) -> None:
             nonlocal pending_prompt
@@ -430,14 +473,8 @@ def run_interactive_shell(
                 return
 
             if text.startswith("/"):
-                result = dispatch_slash(text, make_slash_context())
-                if result.handled:
-                    if result.message:
-                        append_output(render_message(result.message, styled=result.markup))
-                    if result.should_query:
-                        append_output(render_user_prompt(result.prompt, source="user /slash"))
-                        job_queue.put(result.prompt)
-                    return
+                route_slash_command(text, render=append_output)
+                return
 
             append_output(render_user_prompt(text))
             if busy.is_set():

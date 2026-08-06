@@ -220,6 +220,7 @@ def main_command(
         initial_output,
         initial_transcript=session.transcript_chunks,
         on_transcript=session.append_transcript,
+        drain_pending=scheduler.drain_pending,
     )
 
 

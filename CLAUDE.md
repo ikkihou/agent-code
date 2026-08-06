@@ -72,7 +72,7 @@ The REPL is a full-screen prompt_toolkit `Application` (output transcript pane +
 ### Hooks & cron
 
 - **Hooks** (`hooks.py`): driven by `hooks.json` in the cwd. Events: `PreToolUse` (can block a tool), `PostToolUse`, `Stop`. Matchers: `*`, exact, or `a|b`. Each hook command gets a JSON payload on stdin. `run_hooks_raw` runs `Stop` hooks; a failing Stop hook's non-empty output forces an extra loop iteration.
-- **Cron** (`scheduler.py`, `cron_tools.py`): `CronScheduler` is a background thread that pushes due prompts into a queue; the REPL drains it after each turn. Jobs persist to `.agent/cron.json`. Only active in REPL mode.
+- **Cron** (`scheduler.py`, `cron_tools.py`): `CronScheduler` is a background thread that pushes due prompts into a pending queue; the REPL's `work_loop` drains it after each turn and polls every second while idle, so cron fires without user input. Jobs persist to `.agent/cron.json`. Only active in REPL mode.
 
 ## Safety invariants
 
