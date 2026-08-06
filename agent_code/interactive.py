@@ -36,17 +36,18 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 
-from . import prompt_ui
 from .output import OutputChunk, OutputWriter, render_console_chunk
-from .runtime import RuntimeState
-from .slash import SlashContext, dispatch_slash, slash_commands
+from .runtime import PromptFallback, PromptRequest, RuntimeState
+from .slash import SlashContext, SlashRegistry, default_slash_registry, dispatch_slash
 
-PromptRequest = dict[str, Any]
 PendingPrompt = dict[str, Any]
 StyleAndText = tuple[str, str]
 
 
 class SlashCompleter(Completer):
+    def __init__(self, registry: SlashRegistry | None = None) -> None:
+        self._registry = registry or default_slash_registry()
+
     def get_completions(self, document: Document, complete_event: Any) -> Any:
         text_before_cursor = document.text_before_cursor
         if not text_before_cursor.startswith("/") or any(
@@ -55,7 +56,7 @@ class SlashCompleter(Completer):
             return
 
         prefix = text_before_cursor[1:]
-        for command in slash_commands():
+        for command in self._registry.commands():
             if command.name.startswith(prefix):
                 yield Completion(
                     f"/{command.name}",
@@ -279,6 +280,7 @@ def run_interactive_shell(
     initial_transcript: list[OutputChunk] | None = None,
     on_transcript: Callable[[OutputChunk], None] | None = None,
     drain_pending: Callable[[], list[str]] | None = None,
+    slash_registry: SlashRegistry | None = None,
 ) -> None:
     job_queue: queue.Queue[str] = queue.Queue()
     busy = threading.Event()
@@ -494,7 +496,7 @@ def run_interactive_shell(
             multiline=False,
             prompt=lambda: input_prompt[0],
             wrap_lines=False,
-            completer=SlashCompleter(),
+            completer=SlashCompleter(slash_registry),
             complete_while_typing=True,
             accept_handler=accept_input,
             style="class:input-area",
@@ -556,7 +558,7 @@ def run_interactive_shell(
             app.invalidate()
             return await future
 
-        def terminal_asker(func: Callable[[], Any] | PromptRequest) -> Any:
+        def terminal_asker(func: PromptFallback | PromptRequest) -> Any:
             if isinstance(func, dict):
                 return asyncio.run_coroutine_threadsafe(ask_in_app(func), loop).result()
 
@@ -568,12 +570,12 @@ def run_interactive_shell(
         worker = threading.Thread(target=work_loop, daemon=True)
         worker.start()
 
-        prompt_ui.set_terminal_asker(terminal_asker)
+        state.asker = terminal_asker
         try:
             await app.run_async()
         finally:
             ui_writer = None
-            prompt_ui.set_terminal_asker(None)
+            state.asker = None
 
     asyncio.run(_run())
     job_queue.put("__EXIT__")

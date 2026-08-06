@@ -17,13 +17,12 @@ import typer
 from rich.console import Console
 
 from .agent import build_system_prompt, run_agent
-from .cron_tools import set_scheduler
 from .interactive import run_interactive_shell
 from .model import create_provider
 from .runtime import RuntimeState
 from .scheduler import CronScheduler
 from .session import Session
-from .slash import SlashContext, dispatch_slash
+from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
 
 console = Console()
@@ -61,6 +60,7 @@ def run_once(
     session: Session | None = None,
     system_prompt: str | None = None,
     signal: threading.Event | None = None,
+    scheduler: CronScheduler | None = None,
 ) -> None:
     render_header(cwd, provider_name, model, base_url)
     if session:
@@ -72,6 +72,7 @@ def run_once(
         model=model,
         provider=provider_name,
         abort_event=signal if signal is not None else threading.Event(),
+        scheduler=scheduler,
     )
     run_agent(
         prompt,
@@ -120,8 +121,8 @@ def main_command(
 
     ## Create and start cron scheduler
     scheduler = CronScheduler(resolved_cwd)
-    set_scheduler(scheduler)
     scheduler.start()
+    slash_registry = default_slash_registry()
 
     # 构造系统提示词
     system_prompt = build_system_prompt(cwd)
@@ -138,6 +139,7 @@ def main_command(
                 model=model,
                 provider=provider,
                 session_id=session.session_id if session else None,
+                registry=slash_registry,
             ),
         )
         if slash_result.handled:
@@ -157,6 +159,7 @@ def main_command(
                     permission_mode,
                     session=session,
                     system_prompt=system_prompt,
+                    scheduler=scheduler,
                 )
             return
 
@@ -172,6 +175,7 @@ def main_command(
             permission_mode,
             session=session,
             system_prompt=system_prompt,
+            scheduler=scheduler,
         )
 
     # (1) 一次性调用分支
@@ -184,7 +188,9 @@ def main_command(
     if session is None:
         session = Session.create(resolved_cwd)
 
-    state = RuntimeState(permission_mode=permission_mode, model=model, provider=provider)
+    state = RuntimeState(
+        permission_mode=permission_mode, model=model, provider=provider, scheduler=scheduler
+    )
     tools = default_tools()
 
     def run_turn(line: str, output) -> None:
@@ -209,10 +215,10 @@ def main_command(
             provider=state.provider,
             session_id=session.session_id if session else None,
             state=state,
+            registry=slash_registry,
         )
 
     initial_output = header_text(resolved_cwd, provider, model, base_url)
-    # initial_output += "输入 /help 查看命令，输入 /exit 退出。\n"
     run_interactive_shell(
         state,
         run_turn,
@@ -221,6 +227,7 @@ def main_command(
         initial_transcript=session.transcript_chunks,
         on_transcript=session.append_transcript,
         drain_pending=scheduler.drain_pending,
+        slash_registry=slash_registry,
     )
 
 

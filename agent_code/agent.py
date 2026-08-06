@@ -241,7 +241,7 @@ def run_agent(  ## AGENT LOOP
             # 用实际流过的文本兜底，避免 final 变成空字符串。
             final = response.text or "".join(streamed_parts) or ""
             if state.permission_mode == "plan" and final.strip():
-                if confirm_plan(final):
+                if confirm_plan(state, final):
                     state.permission_mode = "acceptEdits"
                     messages.append({"role": "user", "content": "Plan approved. Implement it now."})
                 else:
@@ -406,7 +406,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[s
 
         if call.name == "exit_plan_mode":
             plan_summary = call.arguments.get("plan_summary", "")
-            if not confirm_plan(plan_summary):
+            if not confirm_plan(state, plan_summary):
                 obs = "Plan not approved. Revise the plan and call exit_plan_mode again"
                 emit(f"Observation: {obs}")
                 return {
@@ -498,7 +498,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[s
             path_str, old_content, new_content = edit_preview
             print_output(f"\n[bold]Diff for {path_str}:[/bold]")
             print_output(render_diff(old_content, new_content, path_str))
-            if not confirm_edit(path_str):
+            if not confirm_edit(state, path_str):
                 r = ToolResult(call.id, "error: edit rejected by user", is_error=True)
                 emit(f"observation: {r.content}")
                 return {
@@ -510,7 +510,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[s
         elif call.name == "bash":
             command = call.arguments.get("command", "")
             print_output(f"\n[bold yellow]Command:[/bold yellow] {command}")
-            if not confirm_command(command):
+            if not confirm_command(state, command):
                 r = ToolResult(call.id, "error: command rejected by user", is_error=True)
                 emit(f"observation: {r.content}")
                 return {
@@ -521,7 +521,7 @@ def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[s
                 }
         elif call.name in ("web_fetch", "web_search"):
             detail = call.arguments.get("url") or call.arguments.get("query") or str(call.arguments)
-            if not confirm_tool_use(call.name, detail):
+            if not confirm_tool_use(state, call.name, detail):
                 r = ToolResult(call.id, "error: tool use rejected by user", is_error=True)
                 emit(f"observation: {r.content}")
                 return {
@@ -533,7 +533,9 @@ def execute_one_tool_call(call, ctx, state, tools, emit, print_output) -> dict[s
         elif call.name == "ask_user_question":
             options = call.arguments.get("options", [])
             labels = [str(o) for o in options] if isinstance(options, list) else []
-            selected = prompt_single_choice(call.arguments.get("prompt", ""), labels)
+            selected = prompt_single_choice(
+                state, call.arguments.get("prompt", ""), labels
+            )
             content = (
                 "User skipped the question." if selected is None else f'User selected: "{selected}"'
             )

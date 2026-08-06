@@ -20,12 +20,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
 from rich.table import Table
 
 from .output import OutputChunk
 
-console = Console()
 SessionRenderable = str | Table
 
 
@@ -76,10 +74,6 @@ def _sessions_renderable(cwd: Path) -> SessionRenderable:
         )
         table.add_row(session_id, str(message_count), updated)
     return table
-
-
-def _render_sessions(cwd: Path) -> None:
-    console.print(_sessions_renderable(cwd))
 
 
 def _sanitize_cwd(cwd: Path) -> str:

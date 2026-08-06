@@ -10,6 +10,13 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from queue import Queue
+from typing import Any, Callable
+
+from .scheduler import CronScheduler
+
+PromptRequest = dict[str, Any]
+PromptFallback = Callable[[], Any]
+PromptAsker = Callable[[PromptRequest | PromptFallback], Any]
 
 
 @dataclass
@@ -27,6 +34,8 @@ class RuntimeState:
     abort_event: threading.Event = field(default_factory=threading.Event)
     input_queue: Queue[str] = field(default_factory=Queue)
     todo_store: list[TodoItem] = field(default_factory=list)
+    asker: PromptAsker | None = None
+    scheduler: CronScheduler | None = None
 
     def cycle_permission_mode(self) -> str:
         order = ["default", "acceptEdits", "plan"]

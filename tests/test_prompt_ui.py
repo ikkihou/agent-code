@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from agent_code import prompt_ui
+from agent_code.runtime import RuntimeState
 
 
 def test_confirm_command_uses_structured_request_for_interactive_asker() -> None:
@@ -12,11 +13,8 @@ def test_confirm_command_uses_structured_request_for_interactive_asker() -> None
         requests.append(request)
         return True
 
-    prompt_ui.set_terminal_asker(asker)
-    try:
-        assert prompt_ui.confirm_command("echo hi") is True
-    finally:
-        prompt_ui.set_terminal_asker(None)
+    state = RuntimeState(asker=asker)
+    assert prompt_ui.confirm_command(state, "echo hi") is True
 
     assert requests == [
         {
@@ -35,11 +33,8 @@ def test_prompt_single_choice_uses_structured_request_for_interactive_asker() ->
         requests.append(request)
         return "2"
 
-    prompt_ui.set_terminal_asker(asker)
-    try:
-        assert prompt_ui.prompt_single_choice("Pick one", ["A", "B"]) == "B"
-    finally:
-        prompt_ui.set_terminal_asker(None)
+    state = RuntimeState(asker=asker)
+    assert prompt_ui.prompt_single_choice(state, "Pick one", ["A", "B"]) == "B"
 
     assert requests == [
         {

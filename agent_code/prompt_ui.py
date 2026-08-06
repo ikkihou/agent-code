@@ -13,37 +13,20 @@ from __future__ import annotations
 
 import difflib
 from io import StringIO
-from typing import Any, Callable
+from typing import Any
 
 import typer
 
-from .runtime import TodoItem
-
-PromptRequest = dict[str, Any]
-PromptFallback = Callable[[], Any]
-PromptAsker = Callable[[PromptRequest | PromptFallback], Any]
-
-_terminal_asker: PromptAsker | None = (
-    None  # 交互 shell 启动时由 interactive.py 注入；one-shot 保持 None
-)
+from .runtime import PromptAsker, PromptFallback, PromptRequest, RuntimeState
 
 
-def set_terminal_asker(asker: PromptAsker | None) -> None:
-    global _terminal_asker
-    _terminal_asker = asker
-
-
-def _ask(func: PromptFallback) -> Any:
+def _ask_request(
+    state: RuntimeState, request: PromptRequest, fallback: PromptFallback
+) -> Any:
     """worker 要问用户时走这里。交互 shell 注入了 asker → 丢回主线程事件循环问；
-    one-shot 没注入（_terminal_asker is None）→ 直接问。"""
-    if _terminal_asker is not None:
-        return _terminal_asker(func)
-    return func()
-
-
-def _ask_request(request: PromptRequest, fallback: PromptFallback) -> Any:
-    if _terminal_asker is not None:
-        return _terminal_asker(request)
+    one-shot 没注入（state.asker is None）→ 走 typer fallback 直接问。"""
+    if state.asker is not None:
+        return state.asker(request)
     return fallback()
 
 
@@ -73,10 +56,11 @@ def render_diff(old: str, new: str, path: str) -> str:
     return "\n".join(colored)
 
 
-def confirm_edit(path: str) -> bool:
+def confirm_edit(state: RuntimeState, path: str) -> bool:
     """让用户确认是否应用这次编辑，默认不应用。"""
     return bool(
         _ask_request(
+            state,
             {
                 "type": "confirm",
                 "message": f"Apply this edit to {path}?",
@@ -87,10 +71,11 @@ def confirm_edit(path: str) -> bool:
     )
 
 
-def confirm_command(command: str) -> bool:
+def confirm_command(state: RuntimeState, command: str) -> bool:
     """让用户确认是否执行这条 bash 命令，默认不执行。"""
     return bool(
         _ask_request(
+            state,
             {
                 "type": "confirm",
                 "message": "Run this command?",
@@ -102,10 +87,11 @@ def confirm_command(command: str) -> bool:
     )
 
 
-def confirm_tool_use(tool_name: str, detail: str) -> bool:
+def confirm_tool_use(state: RuntimeState, tool_name: str, detail: str) -> bool:
     """让用户确认非 bash 的 ask 类工具，例如访问外部网络。"""
     return bool(
         _ask_request(
+            state,
             {
                 "type": "confirm",
                 "message": f"Allow {tool_name}: {detail}?",
@@ -132,7 +118,7 @@ def _render_plan_panel(plan_summary: str) -> str:
     return buffer.getvalue()
 
 
-def confirm_plan(plan_summary: str) -> bool:
+def confirm_plan(state: RuntimeState, plan_summary: str) -> bool:
     panel = _render_plan_panel(plan_summary)
 
     def _do() -> bool:
@@ -142,6 +128,7 @@ def confirm_plan(plan_summary: str) -> bool:
 
     return bool(
         _ask_request(
+            state,
             {
                 "type": "confirm",
                 "message": "Approve this plan and exit plan mode?",
@@ -153,7 +140,9 @@ def confirm_plan(plan_summary: str) -> bool:
     )
 
 
-def prompt_single_choice(question: str, labels: list[str]) -> str | None:
+def prompt_single_choice(
+    state: RuntimeState, question: str, labels: list[str]
+) -> str | None:
     def ask_choice() -> str:
         from rich.console import Console
 
@@ -167,6 +156,7 @@ def prompt_single_choice(question: str, labels: list[str]) -> str | None:
 
     try:
         choice = _ask_request(
+            state,
             {
                 "type": "choice",
                 "question": question,

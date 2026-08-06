@@ -2,23 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from .scheduler import CronScheduler
 from .tools import ToolContext
 
-_scheduler: Any = None
 
-
-def set_scheduler(scheduler: Any) -> None:
-    """cli.py 在创建 CronScheduler 后调用这个函数，让工具函数能访问同一个实例。"""
-    global _scheduler
-    _scheduler = scheduler
-
-
-def _get_scheduler(ctx: ToolContext) -> Any:
-    """REPL 里复用正在运行的 scheduler；一次性模式临时读写 cron.json。"""
-    if _scheduler is not None:
-        return _scheduler
-    from .scheduler import CronScheduler
-
+def _get_scheduler(ctx: ToolContext) -> CronScheduler:
+    """REPL 里复用运行中的 scheduler（挂 RuntimeState 上）；one-shot 临时读写 cron.json。"""
+    if ctx.state is not None and ctx.state.scheduler is not None:
+        return ctx.state.scheduler
     return CronScheduler(ctx.cwd)
 
 

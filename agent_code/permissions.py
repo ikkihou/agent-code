@@ -55,7 +55,6 @@ _READONLY_TOOLS = frozenset(
         "list_files",
         "glob",
         "grep",
-        "project_tree",
         "git_status",
         "git_diff",
         "system_date",
