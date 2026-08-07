@@ -15,6 +15,8 @@ class OutputChunk:
     format: OutputFormat = "plain"
 
 
+# agent 输出的统一出口：接收纯文本或渲染好的 ANSI chunk，由调用方决定如何显示
+# （一次性模式直接打终端，REPL 模式跨线程喂给 prompt_toolkit UI 面板）。
 OutputWriter = Callable[[str | OutputChunk], None]
 
 
