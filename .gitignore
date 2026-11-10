@@ -13,3 +13,6 @@ wheels/
 # Project run generated files
 .agent/*
 hooks.json
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/

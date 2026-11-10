@@ -165,11 +165,14 @@ class Session:
     def append_transcript(self, chunk: OutputChunk) -> None:
         """把一条已渲染到输出面板的 OutputChunk 追加进转录文件。
 
-        保留原始 ANSI 文本，resume 重放时才能还原当时的样式（灰色 prompt 块等）。
+        片段（fragments）非空时一并持久化，resume 重放时才能还原当时的样式
+        （灰色 prompt 块等）；"rich" 格式存 markup 原文，"ansi" 为旧版记录。
         """
         if not chunk.text:
             return
-        record = {"text": chunk.text, "format": chunk.format}
+        record: dict[str, Any] = {"text": chunk.text, "format": chunk.format}
+        if chunk.fragments:
+            record["fragments"] = [[style, text] for style, text in chunk.fragments]
         with open(self.transcript_path, "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -189,7 +192,16 @@ class Session:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            fragments = data.get("fragments")
             chunks.append(
-                OutputChunk(data.get("text", ""), format=data.get("format", "plain"))
+                OutputChunk(
+                    data.get("text", ""),
+                    format=data.get("format", "plain"),
+                    fragments=(
+                        tuple((str(style), str(text)) for style, text in fragments)
+                        if fragments
+                        else ()
+                    ),
+                )
             )
         return chunks

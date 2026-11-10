@@ -25,7 +25,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.cursor_shapes import CursorShape, SimpleCursorShapeConfig
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples
+from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -36,7 +36,7 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 
-from .output import OutputChunk, OutputWriter, render_console_chunk
+from .output import OutputChunk, OutputWriter, chunk_fragments
 from .runtime import PromptFallback, PromptRequest, RuntimeState
 from .slash import SlashContext, SlashRegistry, default_slash_registry, dispatch_slash
 
@@ -77,21 +77,17 @@ def _append_fragments(target: list[StyleAndText], fragments: list[StyleAndText])
             target.append((style, text))
 
 
-def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
-    if chunk.format == "ansi":
-        return [(style, text) for style, text, *_ in ANSI(chunk.text).__pt_formatted_text__()]
-    return [("", chunk.text)]
-
-
 def append_output_text(transcript: OutputTranscript, output: str | OutputChunk) -> str:
-    """把 output 追加进 transcript，返回其纯文本（无 ANSI）部分。
+    """把 output 追加进 transcript，返回其纯文本部分。
 
     返回的 display_text 供调用方做展示同步（如持久化到 session transcript）。
+    片段转换统一走 output.chunk_fragments——plain/fragments 直用，rich/ansi
+    在那边归一化，这里不再持有 ANSI 解析逻辑。
     """
     chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
     if not chunk.text:
         return ""
-    fragments = _chunk_fragments(chunk)
+    fragments = chunk_fragments(chunk)
     display_text = "".join(text for _, text in fragments)
     transcript.text += display_text
     transcript.line_count += display_text.count("\n")
@@ -204,18 +200,22 @@ class TranscriptLexer(Lexer):
         return "transcript-lexer"
 
 
+## 渲染用户prompt行
 def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
     normalized = text.rstrip()
     if not normalized.strip():
         return OutputChunk("")
     body = "\n".join(f"> {line}" for line in normalized.splitlines())
-    # 白字深灰底反白高亮，source 头加粗；灰底用 256 色 #444444（47/ansigray 太浅，
-    # 白字看不清）。背景只覆盖文本本身，整行铺满由 TranscriptLexer 在渲染时补位实现。
-    return OutputChunk(
-        # f"\n\x1b[1;97;48;5;238m[{source}]\x1b[0m\n\x1b[97;48;5;238m{body}\x1b[0m\n\n",
-        f"\n\x1b[0m\n\x1b[97;48;5;238m{body}\x1b[0m\n\n",
-        format="ansi",
+    # 白字深灰底反白高亮（source 头当前不再渲染，参数仅作兼容保留）。
+    # 样式用 pt 内联样式串直接构造，不再经过 ANSI 往返。
+    # 背景只覆盖文本本身，整行铺满由 TranscriptLexer 在渲染时补位实现。
+    style = "ansiwhite bg:#444444"
+    fragments: tuple[StyleAndText, ...] = (
+        ("", "\n\n"),
+        (style, body),
+        ("", "\n\n"),
     )
+    return OutputChunk("\n\n" + body + "\n\n", fragments=fragments)
 
 
 def parse_confirm_answer(text: str, default: bool = False) -> bool | None:
@@ -272,91 +272,85 @@ def prompt_for_request(request: PromptRequest) -> str:
     return "Confirm [Y/n]: " if default else "Confirm [y/N]: "
 
 
-def run_interactive_shell(
-    state: RuntimeState,
-    run_turn: Callable[[str, OutputWriter], None],
-    make_slash_context: Callable[[], SlashContext],
-    initial_output: str = "",
-    initial_transcript: list[OutputChunk] | None = None,
-    on_transcript: Callable[[OutputChunk], None] | None = None,
-    drain_pending: Callable[[], list[str]] | None = None,
-    slash_registry: SlashRegistry | None = None,
-) -> None:
-    job_queue: queue.Queue[str] = queue.Queue()
-    busy = threading.Event()
+class InteractiveShell:
+    """REPL 交互壳：prompt_toolkit Application 构建 + 事件回调 + worker 线程管线。
 
-    ui_writer: OutputWriter | None = None
+    原 run_interactive_shell 是一个 ~300 行、11 个嵌套闭包（最深 3 层）的函数；
+    拆成类后闭包变方法、闭包捕获的局部状态变实例属性，嵌套深度降到 1。
+    事件回调（submit_text / accept_input 等）用到的可变状态全部显式挂在实例上，
+    不再靠词法闭包隐式共享，也让它可以被单元测试单独驱动。
+    """
 
-    def render_message(message: Any, *, styled: bool) -> OutputChunk:
-        return render_console_chunk(message, styled=styled, width=120, markup=styled)
+    def __init__(
+        self,
+        state: RuntimeState,
+        run_turn: Callable[[str, OutputWriter], None],
+        make_slash_context: Callable[[], SlashContext],
+        initial_output: str = "",
+        initial_transcript: list[OutputChunk] | None = None,
+        on_transcript: Callable[[OutputChunk], None] | None = None,
+        drain_pending: Callable[[], list[str]] | None = None,
+        slash_registry: SlashRegistry | None = None,
+    ) -> None:
+        self._state = state
+        self._run_turn = run_turn
+        self._make_slash_context = make_slash_context
+        self._initial_output = initial_output
+        self._initial_transcript = initial_transcript
+        self._on_transcript = on_transcript
+        self._drain_pending = drain_pending
+        self._slash_registry = slash_registry
 
-    def route_slash_command(text: str, render: Callable[[str | OutputChunk], None]) -> bool:
+        self._job_queue: queue.Queue[str] = queue.Queue()
+        self._busy = threading.Event()
+        self._ui_writer: OutputWriter | None = None
+        self._input_prompt: list[str] = ["> "]
+        self._pending_prompt: PendingPrompt | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._app: Application[Any] | None = None
+        self._input_area: TextArea | None = None
+        # 输出面板构建期填充（见 _build_layout）。
+        self._output_transcript = OutputTranscript()
+        self._output_buffer = Buffer(read_only=True)
+        self._output_window: Window | None = None
+
+    def _render_message(self, message: Any, *, styled: bool) -> OutputChunk:
+        """slash 结果消息 → chunk：styled 时把 Rich markup 转成即用片段。"""
+        text = str(message)
+        if not styled:
+            return OutputChunk(text)
+        return OutputChunk(text, format="rich")
+
+    def _route_slash_command(self, text: str, render: Callable[[str | OutputChunk], None]) -> bool:
         """slash 分发：命中则就地渲染结果，should_query 的展开 prompt 入队。返回是否已处理。"""
-        result = dispatch_slash(text, make_slash_context())
+        result = dispatch_slash(text, self._make_slash_context())
         if not result.handled:
             return False
         if result.message:
-            render(render_message(result.message, styled=result.markup))
+            render(self._render_message(result.message, styled=result.markup))
         if result.should_query:
             render(render_user_prompt(result.prompt, source="user /slash"))
-            job_queue.put(result.prompt)
+            self._job_queue.put(result.prompt)
         return True
 
-    def handle_cron_prompt(text: str, writer: OutputWriter) -> None:
+    def _handle_cron_prompt(self, text: str, writer: OutputWriter) -> None:
         """worker 线程处理 cron 到点 prompt：slash 就地分发，普通 prompt 作为新一轮 turn 入队。"""
         text = text.strip()
         if not text or text == "/exit":
             return  # cron 到点 prompt 不触发应用退出
         if text.startswith("/"):
-            route_slash_command(text, render=writer)
+            self._route_slash_command(text, render=writer)
             return
         writer(render_user_prompt(text, source="cron"))
-        job_queue.put(text)
+        self._job_queue.put(text)
 
-    header_transcript = OutputTranscript(initial_output)
-    header_control = FormattedTextControl(lambda: header_transcript.fragments)
-    header_window = Window(
-        content=header_control,
-        wrap_lines=True,
-        height=3,
-    )
-    initial_frame = Frame(header_window)
-
-    output_transcript = OutputTranscript()
-    output_buffer = Buffer(read_only=True)
-    # resume 时预填充历史转录：启动第一帧就能看到上一会话的画面，而非等第一次 append。
-    for chunk in initial_transcript or []:
-        append_output_text(output_transcript, chunk)
-    output_buffer.set_document(
-        Document(output_transcript.text, cursor_position=len(output_transcript.text)),
-        bypass_readonly=True,
-    )
-    output_lexer = TranscriptLexer(output_transcript)
-    output_control = BufferControl(
-        buffer=output_buffer,
-        lexer=output_lexer,
-        focusable=False,
-        # 点击 output 区域时把焦点移过来，配合鼠标拖拽做选区，方便复制文本。
-        focus_on_click=True,
-    )
-    output_window = Window(
-        content=output_control,
-        wrap_lines=True,
-        right_margins=[ScrollbarMargin(display_arrows=True)],
-    )
-    # 渲染时 Lexer 需要按面板宽度给 user_prompt 行补位，回填窗口引用。
-    output_lexer.output_window = output_window
-    output_frame = Frame(output_window)
-
-    input_area: TextArea | None = None
-
-    def work_loop() -> None:
+    def _work_loop(self) -> None:
         while True:
-            if drain_pending is None:
-                text = job_queue.get()
+            if self._drain_pending is None:
+                text = self._job_queue.get()
             else:
                 try:
-                    text = job_queue.get(timeout=1.0)
+                    text = self._job_queue.get(timeout=1.0)
                 except queue.Empty:
                     text = None
 
@@ -364,145 +358,174 @@ def run_interactive_shell(
                 break
 
             if text is not None:
-                state.abort_event.clear()
-                busy.set()
+                self._state.abort_event.clear()
+                self._busy.set()
 
                 try:
-                    if ui_writer is None:
+                    if self._ui_writer is None:
                         continue
-                    run_turn(text, ui_writer)
+                    self._run_turn(text, self._ui_writer)
                 except Exception as e:  # provider/工具异常别让 worker 静默死掉
-                    if ui_writer is not None:
-                        ui_writer(f"[error] {e}\n")
+                    if self._ui_writer is not None:
+                        self._ui_writer(f"[error] {e}\n")
                 finally:
-                    busy.clear()
+                    self._busy.clear()
 
-            if ui_writer is None:
+            if self._ui_writer is None:
                 continue
 
-            while not state.input_queue.empty():
-                job_queue.put(state.input_queue.get())
+            while not self._state.input_queue.empty():
+                self._job_queue.put(self._state.input_queue.get())
 
             # cron 到点 prompt：与用户输入一样走 slash 分发或作为新一轮 turn，
             # 但渲染走线程安全的 ui_writer。worker 在 get(timeout=1.0) 上空闲轮询，
             # 因此 cron 不依赖用户输入也能触发。
-            if drain_pending is not None:
-                for prompt in drain_pending():
-                    handle_cron_prompt(prompt, ui_writer)
+            if self._drain_pending is not None:
+                for prompt in self._drain_pending():
+                    self._handle_cron_prompt(prompt, self._ui_writer)
 
-    async def _run() -> None:
-        loop = asyncio.get_running_loop()
+    def _append_output(self, output: str | OutputChunk) -> None:
+        chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
+        if not chunk.text:
+            return
+        append_output_text(self._output_transcript, chunk)
+        # 唯一显示漏斗：把渲染出的 chunk 同步给 session 转录边车，resume 时重放。
+        if self._on_transcript is not None:
+            self._on_transcript(chunk)
+        doc = self._output_buffer.document
+        # 自动跟随：视口当前停在底部（以 render_info 的 bottom_visible 为准）
+        # 才把光标推到文本末尾；用户上滚阅读历史时 bottom_visible 为 False，
+        # 光标保持不动、视口不被新输出拽走。滚回底部后下一次 append 自动恢复跟随。
+        at_bottom = output_at_bottom(self._output_window)
+        new_text = self._output_transcript.text
+        new_cursor = output_follow_position(at_bottom, doc.cursor_position, len(new_text))
+        self._output_buffer.set_document(
+            Document(new_text, cursor_position=new_cursor),
+            bypass_readonly=True,
+        )
+        self._app.invalidate()
 
-        def append_output(output: str | OutputChunk) -> None:
-            chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
-            if not chunk.text:
-                return
-            append_output_text(output_transcript, chunk)
-            # 唯一显示漏斗：把渲染出的 chunk 同步给 session 转录边车，resume 时重放。
-            if on_transcript is not None:
-                on_transcript(chunk)
-            doc = output_buffer.document
-            # 自动跟随：视口当前停在底部（以 render_info 的 bottom_visible 为准）
-            # 才把光标推到文本末尾；用户上滚阅读历史时 bottom_visible 为 False，
-            # 光标保持不动、视口不被新输出拽走。滚回底部后下一次 append 自动恢复跟随。
-            at_bottom = output_at_bottom(output_window)
-            new_text = output_transcript.text
-            new_cursor = output_follow_position(at_bottom, doc.cursor_position, len(new_text))
-            output_buffer.set_document(
-                Document(new_text, cursor_position=new_cursor),
-                bypass_readonly=True,
-            )
-            app.invalidate()
+    def _ui_write(self, output: str | OutputChunk) -> None:
+        self._loop.call_soon_threadsafe(self._append_output, output)
 
-        def ui_write(output: str | OutputChunk) -> None:
-            loop.call_soon_threadsafe(append_output, output)
+    def _submit_text(self, text: str) -> None:
+        """统一输入入口：有 pending 提问时先喂给提问状态机，否则作为新输入提交。"""
+        text = text.strip()
+        if self._pending_prompt is not None:
+            request = self._pending_prompt["request"]
+            future = self._pending_prompt["future"]
+            request_type = request.get("type")
 
-        nonlocal ui_writer
-        ui_writer = ui_write
-        input_prompt = ["> "]
-        pending_prompt: PendingPrompt | None = None
-
-        def submit_text(text: str) -> None:
-            nonlocal pending_prompt
-            text = text.strip()
-            if pending_prompt is not None:
-                request = pending_prompt["request"]
-                future = pending_prompt["future"]
-                request_type = request.get("type")
-
-                if request_type == "choice":
-                    labels = request.get("labels") or []
-                    idx = parse_choice_index(
-                        text,
-                        len(labels),
-                        int(request.get("default", 0)),
-                    )
-                    if idx is None:
-                        append_output("Invalid choice. Enter a listed number.\n")
-                        return
-                    result = str(idx)
-                    if not future.done():
-                        future.set_result(result)
-                    pending_prompt = None
-                    input_prompt[0] = "> "
-                    if idx == 0:
-                        append_output("Choice: skip\n")
-                    else:
-                        append_output(f"Choice: {labels[idx - 1]}\n")
-                    app.invalidate()
-                    return
-
-                answer = parse_confirm_answer(
+            if request_type == "choice":
+                labels = request.get("labels") or []
+                idx = parse_choice_index(
                     text,
-                    bool(request.get("default", False)),
+                    len(labels),
+                    int(request.get("default", 0)),
                 )
-                if answer is None:
-                    append_output("Invalid answer. Enter y or n.\n")
+                if idx is None:
+                    self._append_output("Invalid choice. Enter a listed number.\n")
                     return
+                result = str(idx)
                 if not future.done():
-                    future.set_result(answer)
-                pending_prompt = None
-                input_prompt[0] = "> "
-                append_output(f"Answer: {'yes' if answer else 'no'}\n")
-                app.invalidate()
+                    future.set_result(result)
+                self._pending_prompt = None
+                self._input_prompt[0] = "> "
+                if idx == 0:
+                    self._append_output("Choice: skip\n")
+                else:
+                    self._append_output(f"Choice: {labels[idx - 1]}\n")
+                self._app.invalidate()
                 return
 
-            if not text:
+            answer = parse_confirm_answer(
+                text,
+                bool(request.get("default", False)),
+            )
+            if answer is None:
+                self._append_output("Invalid answer. Enter y or n.\n")
                 return
+            if not future.done():
+                future.set_result(answer)
+            self._pending_prompt = None
+            self._input_prompt[0] = "> "
+            self._append_output(f"Answer: {'yes' if answer else 'no'}\n")
+            self._app.invalidate()
+            return
 
-            if text == "/exit":
-                app.exit()
-                return
+        if not text:
+            return
 
-            if text.startswith("/"):
-                route_slash_command(text, render=append_output)
-                return
+        if text == "/exit":
+            self._app.exit()
+            return
 
-            append_output(render_user_prompt(text))
-            if busy.is_set():
-                state.input_queue.put(text)
-                append_output("[queued] turn 结束后处理\n")
-            else:
-                job_queue.put(text)
+        if text.startswith("/"):
+            self._route_slash_command(text, render=self._append_output)
+            return
 
-        def accept_input(buffer: Any) -> bool:
-            text = buffer.text
-            buffer.set_document(Document("", cursor_position=0))
-            submit_text(text)
-            return True
+        self._append_output(render_user_prompt(text))
+        if self._busy.is_set():
+            self._state.input_queue.put(text)
+            self._append_output("[queued] turn 结束后处理\n")
+        else:
+            self._job_queue.put(text)
 
-        nonlocal input_area
-        input_area = TextArea(
+    def _accept_input(self, buffer: Any) -> bool:
+        text = buffer.text
+        buffer.set_document(Document("", cursor_position=0))
+        self._submit_text(text)
+        return True
+
+    def _build_layout(self) -> Application[Any]:
+        """构建 prompt_toolkit 视图：header + 输出面板 + 输入行 + 状态栏 + 浮层。"""
+        header_transcript = OutputTranscript(self._initial_output)
+        header_control = FormattedTextControl(lambda: header_transcript.fragments)
+        header_window = Window(
+            content=header_control,
+            wrap_lines=True,
+            height=3,
+        )
+        initial_frame = Frame(header_window)
+
+        # resume 时预填充历史转录：启动第一帧就能看到上一会话的画面，而非等第一次 append。
+        for chunk in self._initial_transcript or []:
+            append_output_text(self._output_transcript, chunk)
+        self._output_buffer.set_document(
+            Document(
+                self._output_transcript.text,
+                cursor_position=len(self._output_transcript.text),
+            ),
+            bypass_readonly=True,
+        )
+        output_lexer = TranscriptLexer(self._output_transcript)
+        output_control = BufferControl(
+            buffer=self._output_buffer,
+            lexer=output_lexer,
+            focusable=False,
+            # 点击 output 区域时把焦点移过来，配合鼠标拖拽做选区，方便复制文本。
+            focus_on_click=True,
+        )
+        self._output_window = Window(
+            content=output_control,
+            wrap_lines=True,
+            right_margins=[ScrollbarMargin(display_arrows=True)],
+        )
+        # 渲染时 Lexer 需要按面板宽度给 user_prompt 行补位，回填窗口引用。
+        output_lexer.output_window = self._output_window
+        output_frame = Frame(self._output_window)
+
+        self._input_area = TextArea(
             multiline=False,
-            prompt=lambda: input_prompt[0],
+            prompt=lambda: self._input_prompt[0],
             wrap_lines=False,
-            completer=SlashCompleter(slash_registry),
+            completer=SlashCompleter(self._slash_registry),
             complete_while_typing=True,
-            accept_handler=accept_input,
+            accept_handler=self._accept_input,
             style="class:input-area",
         )
         input_frame = Frame(
-            input_area,
+            self._input_area,
             title=" INPUT ",
             style="class:input-frame",
         )
@@ -513,7 +536,7 @@ def run_interactive_shell(
                     output_frame,
                     input_frame,
                     Window(
-                        FormattedTextControl(lambda: bottom_toolbar(state)),
+                        FormattedTextControl(lambda: bottom_toolbar(self._state)),
                         height=1,
                         style="reverse",
                     ),
@@ -527,15 +550,15 @@ def run_interactive_shell(
                 ),
             ],
         )
-        app = Application(
-            layout=Layout(root, focused_element=input_area),
+        return Application(
+            layout=Layout(root, focused_element=self._input_area),
             key_bindings=build_key_bindings(
-                state,
-                output_window,
-                output_buffer,
-                output_transcript=output_transcript,
-                input_area=input_area,
-                on_copy=lambda n: append_output(f"[copied {n} chars to clipboard]\n"),
+                self._state,
+                self._output_window,
+                self._output_buffer,
+                output_transcript=self._output_transcript,
+                input_area=self._input_area,
+                on_copy=lambda n: self._append_output(f"[copied {n} chars to clipboard]\n"),
             ),
             cursor=SimpleCursorShapeConfig(CursorShape.BLINKING_BLOCK),
             full_screen=True,
@@ -546,41 +569,68 @@ def run_interactive_shell(
             clipboard=_make_system_clipboard(),
         )
 
-        async def ask_in_app(request: PromptRequest) -> Any:
-            nonlocal pending_prompt
-            future: asyncio.Future[Any] = loop.create_future()
-            pending_prompt = {"request": request, "future": future}
-            append_output(render_prompt_request(request))
-            input_prompt[0] = prompt_for_request(request)
-            if input_area is not None:
-                input_area.buffer.set_document(Document("", cursor_position=0))
-                app.layout.focus(input_area)
-            app.invalidate()
-            return await future
+    async def _ask_in_app(self, request: PromptRequest) -> Any:
+        """在 app 事件循环内发起提问，把结果通过 future 交还给调用线程。"""
+        future: asyncio.Future[Any] = self._loop.create_future()
+        self._pending_prompt = {"request": request, "future": future}
+        self._append_output(render_prompt_request(request))
+        self._input_prompt[0] = prompt_for_request(request)
+        if self._input_area is not None:
+            self._input_area.buffer.set_document(Document("", cursor_position=0))
+            self._app.layout.focus(self._input_area)
+        self._app.invalidate()
+        return await future
 
-        def terminal_asker(func: PromptFallback | PromptRequest) -> Any:
-            if isinstance(func, dict):
-                return asyncio.run_coroutine_threadsafe(ask_in_app(func), loop).result()
+    def _terminal_asker(self, func: PromptFallback | PromptRequest) -> Any:
+        """worker 线程里的提问入口：结构化请求走 app 内提问，否则退回 run_in_terminal。"""
+        if isinstance(func, dict):
+            return asyncio.run_coroutine_threadsafe(self._ask_in_app(func), self._loop).result()
+        # run_in_terminal 本身返回 coroutine，无需再包一层 async 函数。
+        return asyncio.run_coroutine_threadsafe(run_in_terminal(func), self._loop).result()
 
-            async def _run_in_terminal() -> Any:
-                return await run_in_terminal(func)
+    async def _run_async(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._app = self._build_layout()
 
-            return asyncio.run_coroutine_threadsafe(_run_in_terminal(), loop).result()
-
-        worker = threading.Thread(target=work_loop, daemon=True)
+        self._ui_writer = self._ui_write
+        worker = threading.Thread(target=self._work_loop, daemon=True)
         worker.start()
 
-        state.asker = terminal_asker
+        self._state.asker = self._terminal_asker
         try:
-            await app.run_async()
+            await self._app.run_async()
         finally:
-            ui_writer = None
-            state.asker = None
+            self._ui_writer = None
+            self._state.asker = None
 
-    asyncio.run(_run())
-    job_queue.put("__EXIT__")
+    def run(self) -> None:
+        asyncio.run(self._run_async())
+        self._job_queue.put("__EXIT__")
 
 
+def run_interactive_shell(
+    state: RuntimeState,
+    run_turn: Callable[[str, OutputWriter], None],
+    make_slash_context: Callable[[], SlashContext],
+    initial_output: str = "",
+    initial_transcript: list[OutputChunk] | None = None,
+    on_transcript: Callable[[OutputChunk], None] | None = None,
+    drain_pending: Callable[[], list[str]] | None = None,
+    slash_registry: SlashRegistry | None = None,
+) -> None:
+    InteractiveShell(
+        state,
+        run_turn,
+        make_slash_context,
+        initial_output,
+        initial_transcript,
+        on_transcript,
+        drain_pending,
+        slash_registry,
+    ).run()
+
+
+## ----------- clipboard ---------------
 def _make_system_clipboard() -> Clipboard:
     """优先使用系统剪贴板（macOS pbcopy / Linux xclip / Windows ctypes）。
 
@@ -623,6 +673,7 @@ def _copy_output(
     return True
 
 
+## ----------- keybindings & statusline ---------------
 def build_key_bindings(
     state: RuntimeState,
     output_window: Window | None = None,
@@ -700,18 +751,18 @@ def build_key_bindings(
             scroll_output_lines(output_page_lines())
             event.app.invalidate()
 
-        if output_transcript is not None:
-
-            @kb.add("end", filter=output_focused)
-            def _(event: Any) -> None:
+        @kb.add("end", filter=output_focused)
+        def _(event: Any) -> None:
+            if output_transcript is not None:
                 # 跳到输出末尾并恢复自动跟随。
                 output_buffer.cursor_position = len(output_transcript.text)
                 if input_area is not None:
                     event.app.layout.focus(input_area)
                 event.app.invalidate()
 
-            @kb.add("home", filter=output_focused)
-            def _(event: Any) -> None:
+        @kb.add("home", filter=output_focused)
+        def _(event: Any) -> None:
+            if output_transcript is not None:
                 output_buffer.cursor_position = 0
                 if input_area is not None:
                     event.app.layout.focus(input_area)

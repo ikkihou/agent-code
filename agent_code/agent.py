@@ -21,7 +21,7 @@ from rich.console import Console
 from .compact_basic import compact
 from .fs_safety import SkipPolicy, load_gitignore
 from .model import ModelProvider, ModelRequestAborted, ModelResponse
-from .output import OutputWriter, render_console_chunk
+from .output import OutputChunk, OutputWriter
 from .project_memory import load_agent_md
 from .runtime import RuntimeState
 from .session import Session
@@ -34,7 +34,6 @@ from .tool_execution import (
 from .tools import ToolContext, ToolRegistry
 
 console = Console()
-PrintFunc = Callable[..., None]
 
 # 只读工具并行批的 worker 数。只读调用并发安全；写工具自成串行组，不受此限。
 _PARALLEL_READONLY_WORKERS = 4
@@ -69,21 +68,6 @@ class _LineBufferedStreamRenderer:
         if self.pending:
             self.write_line(self.pending)
             self.pending = ""
-
-
-def _make_printer(output: OutputWriter | None = None) -> PrintFunc:
-    if output is None:
-        return console.print
-
-    def print_to_output(*objects: Any, **kwargs: Any) -> None:
-        styled = (
-            kwargs.get("markup", True) is not False
-            or kwargs.get("style") is not None
-            or any(not isinstance(obj, str) for obj in objects)
-        )
-        output(render_console_chunk(*objects, styled=styled, **kwargs))
-
-    return print_to_output
 
 
 _SYSTEM_CORE = (
@@ -161,26 +145,30 @@ def run_agent(  ## AGENT LOOP
     if session:
         session.append_messages([messages[-1]])
 
-    print_output = _make_printer(output)
+    def emit(text: str, *, markup: bool = False) -> None:
+        """唯一输出/trace 双写通道：一行完整文本（不带行尾换行）。
 
-    def emit(line: str) -> None:
-        # 工具结果可能很长：完整内容只通过 tool_result 回填给模型，终端只看工具调用/最终回答。
-        if line.startswith("observation:"):
-            return
-        trace.append(line)
-        print_output(line, markup=False, highlight=False)
+        markup=True 表示 text 是 Rich markup，由前端各自渲染（one-shot 交给
+        Rich，REPL 转样式片段）；trace 恒记传入原文。
+        """
+        trace.append(text)
+        if output is not None:
+            output(OutputChunk(text + "\n", format="rich" if markup else "plain"))
+        elif markup:
+            console.print(text, markup=True, highlight=False)
+        else:
+            console.print(text, markup=False, highlight=False)
 
     def interrupted_result() -> AgentResult:
         emit("interrupted by user")
         return AgentResult(final="interrupted", trace=trace, messages=messages)
 
     def write_stream_line(line: str) -> None:
-        print_output(
-            line,
-            markup=False,
-            highlight=False,
-            soft_wrap=True,
-        )
+        """流式模型文本：只上终端，不进 trace（trace 只在 final 收尾时记一行）。"""
+        if output is not None:
+            output(OutputChunk(line + "\n"))
+        else:
+            console.print(line, markup=False, highlight=False, soft_wrap=True)
 
     trace: list[str] = []
     continuation_count = 0
@@ -203,7 +191,7 @@ def run_agent(  ## AGENT LOOP
         ## 1. sending api request
         if len(messages) > 40:
             messages = compact(messages, keep=8)
-            print_output(f"[dim]compacted: {len(messages)} messages remaining[/dim]")
+            emit(f"compacted: {len(messages)} messages remaining", markup=True)
 
         response = None
         stream_renderer = _LineBufferedStreamRenderer(write_stream_line)
@@ -314,14 +302,13 @@ def run_agent(  ## AGENT LOOP
             state,
             tools,
             emit,
-            print_output,
         )
         if tool_result_blocks is None:
             tool_result_blocks = []
             for batch in partition_tool_calls(response.tool_calls, tools):
                 if len(batch) == 1:
                     tool_result_blocks.append(
-                        execute_one_tool_call(batch[0], ctx, state, tools, emit, print_output)
+                        execute_one_tool_call(batch[0], ctx, state, tools, emit)
                     )
                 else:
                     # 只读组并行。ex.map 按输入顺序返回结果，
@@ -329,9 +316,7 @@ def run_agent(  ## AGENT LOOP
                     with ThreadPoolExecutor(max_workers=_PARALLEL_READONLY_WORKERS) as ex:
                         results = list(
                             ex.map(
-                                lambda c: execute_one_tool_call(
-                                    c, ctx, state, tools, emit, print_output
-                                ),
+                                lambda c: execute_one_tool_call(c, ctx, state, tools, emit),
                                 batch,
                             )
                         )

@@ -31,13 +31,16 @@ def _call(name: str, **arguments) -> ToolCall:
     return ToolCall(id=f"call-{name}", name=name, arguments=arguments)
 
 
-def _noop_print(*objects, **kwargs) -> None:
-    return None
+def _make_emit(emitted: list[str]):
+    def emit(text: str, *, markup: bool = False) -> None:
+        emitted.append(text)
+
+    return emit
 
 
 def _run(call: ToolCall, ctx: ToolContext, state: RuntimeState, reg: ToolRegistry):
     emitted: list[str] = []
-    block = execute_one_tool_call(call, ctx, state, reg, emitted.append, _noop_print)
+    block = execute_one_tool_call(call, ctx, state, reg, _make_emit(emitted))
     return block, emitted
 
 
@@ -173,9 +176,7 @@ def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):
     state = RuntimeState(permission_mode="plan", asker=lambda request: True)
     emitted: list[str] = []
     calls = [_call("read_file"), _call("exit_plan_mode", plan_summary="my plan")]
-    blocks = execute_plan_boundary_calls(
-        calls, ToolContext(cwd=tmp_path), state, reg, emitted.append, _noop_print
-    )
+    blocks = execute_plan_boundary_calls(calls, ToolContext(cwd=tmp_path), state, reg, _make_emit(emitted))
     assert blocks is not None
     # 非 exit_plan_mode 的同轮工具被跳过，返回 error block
     assert blocks[0]["is_error"] is True

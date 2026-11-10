@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import re
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-
-_ANSI_ESC = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def _strip_ansi(text: str) -> str:
-    return _ANSI_ESC.sub("", text)
 
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.clipboard import InMemoryClipboard
@@ -18,6 +13,7 @@ from prompt_toolkit.selection import SelectionState
 
 from agent_code.agent import run_agent
 from agent_code.interactive import (
+    InteractiveShell,
     OutputTranscript,
     SlashCompleter,
     TranscriptLexer,
@@ -97,7 +93,6 @@ def test_transcript_lexer_returns_styled_lines_and_empty_fallback() -> None:
 def test_transcript_lexer_pads_user_prompt_lines_across_pane_width() -> None:
     transcript = OutputTranscript()
     append_output_text(transcript, render_user_prompt("hi"))
-
     class FakeWindow:
         class FakeRenderInfo:
             window_width = 12
@@ -120,18 +115,16 @@ def test_transcript_lexer_pads_user_prompt_lines_across_pane_width() -> None:
 
 def test_render_user_prompt_formats_prompt_blocks() -> None:
     chunk = render_user_prompt("hello")
-    assert chunk.format == "ansi"
-    assert _strip_ansi(chunk.text) == "\n\n> hello\n\n"
-    assert _strip_ansi(render_user_prompt("first\nsecond").text) == (
-        "\n\n> first\n> second\n\n"
-    )
+    assert chunk.format == "plain"
+    assert chunk.text == "\n\n> hello\n\n"
+    assert render_user_prompt("first\nsecond").text == "\n\n> first\n> second\n\n"
     # source 头当前不再渲染，参数仅作兼容保留。
-    assert _strip_ansi(render_user_prompt("expanded", source="user /slash").text) == (
-        "\n\n> expanded\n\n"
-    )
+    assert render_user_prompt("expanded", source="user /slash").text == "\n\n> expanded\n\n"
     empty = render_user_prompt("")
     assert empty.format == "plain"
     assert empty.text == ""
+    # 样式直接以片段形式给出（不再内嵌 ANSI），深灰底样式串命中补位逻辑。
+    assert ("ansiwhite bg:#444444", "> hello") in chunk.fragments
 
 
 def test_prompt_request_helpers_parse_confirm_answers() -> None:
@@ -464,3 +457,41 @@ def test_copy_output_falls_back_when_system_clipboard_fails() -> None:
     assert ok is True
     assert isinstance(event.app.clipboard, InMemoryClipboard)
     assert event.app.clipboard.get_data().text == "fallback text\n"
+
+
+def test_submit_text_routes_pending_answer_and_clears_state() -> None:
+    """submit_text 的 pending 状态机：choice 回答直接喂给提问 future，并清空状态。
+
+    用 fake app 注入，把输入状态机从真实 Application 里解耦出来单独验证。
+    """
+    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+    def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    shell = InteractiveShell(
+        state=state,
+        run_turn=noop,
+        make_slash_context=noop,
+    )
+    shell._app = SimpleNamespace(
+        invalidate=noop,
+        exit=noop,
+        layout=SimpleNamespace(focus=noop),
+    )
+
+    loop = asyncio.new_event_loop()
+    try:
+        future = loop.create_future()
+        shell._pending_prompt = {
+            "request": {"type": "choice", "labels": ["a", "b", "c"]},
+            "future": future,
+        }
+
+        shell._submit_text("2")
+
+        assert future.done() and future.result() == "2"
+        assert shell._pending_prompt is None
+        assert shell._input_prompt == ["> "]
+    finally:
+        loop.close()

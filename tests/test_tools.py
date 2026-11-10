@@ -14,6 +14,7 @@ EXPECTED_TOOLS = {
     "list_files",
     "glob",
     "grep",
+    "project_tree",
     "file_write",
     "file_edit",
     "git_status",
