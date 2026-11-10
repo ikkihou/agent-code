@@ -17,8 +17,10 @@ def start_background(command: str, cwd: Path) -> dict:
     out_path = bg_dir / f"{bg_id}.out"
     err_path = bg_dir / f"{bg_id}.err"
 
-    out_f = open(str(out_path), "w")
-    err_f = open(str(err_path), "w")
+    # 显式 UTF-8：默认编码在 Windows 上是 GBK，子进程输出的 UTF-8 字节会被
+    # 写坏（或直接抛 UnicodeEncodeError），后续 cat 读出来也是乱的。
+    out_f = open(str(out_path), "w", encoding="utf-8", errors="replace")
+    err_f = open(str(err_path), "w", encoding="utf-8", errors="replace")
 
     proc = subprocess.Popen(
         command,

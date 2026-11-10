@@ -15,7 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from .fs_safety import truncate_output
+from .fs_safety import decode_subprocess_output, truncate_output
 
 # 最小环境：子进程不继承完整用户环境，只给 shell 必需的四项。
 # bg_manager.py 也复用这一份，改这里即可同时影响同步/后台两条路径。
@@ -46,9 +46,9 @@ def run_sync(command: str, cwd: Path, timeout: int = 30) -> str:
     except subprocess.TimeoutExpired:
         return f"error: command timed out after {timeout}s"
 
-    output = proc.stdout.decode(encoding="utf-8", errors="replace")
+    output = decode_subprocess_output(proc.stdout)
     if proc.stderr:
-        stderr_text = proc.stderr.decode(encoding="utf-8", errors="replace")
+        stderr_text = decode_subprocess_output(proc.stderr)
         if stderr_text.strip():
             output += "\n[stderr]\n" + stderr_text
 

@@ -8,9 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from pytest import param
-
 from ..fs_safety import (
+    decode_subprocess_output,
     ensure_text_file,
     ensure_within_size,
     resolve_in_cwd,
@@ -114,14 +113,18 @@ def _grep_ripgrep(
     # 但输出给模型前要把每行的绝对前缀切回相对路径，省 token、和 _grep_python 保持一致。
     args.append(str(base))
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        # 不用 text=True：那会按系统默认编码（Windows 上是 GBK）解码，
+        # 遇到 UTF-8 内容直接抛 UnicodeDecodeError。统一按 UTF-8 读字节后自行解码。
+        proc = subprocess.run(args, capture_output=True, timeout=30)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return f"error: {exc}"
 
     # ripgrep 没匹配会返回 exit code 1，这不是错；真错才看 stderr。
     if proc.returncode not in (0, 1):
-        return f"error: rg: {proc.stderr.strip() or proc.returncode}"
-    return truncate_output(_relativize_rg_output(proc.stdout, ctx.cwd) or "(no matches)")
+        stderr_text = decode_subprocess_output(proc.stderr)
+        return f"error: rg: {stderr_text.strip() or proc.returncode}"
+    stdout = decode_subprocess_output(proc.stdout)
+    return truncate_output(_relativize_rg_output(stdout, ctx.cwd) or "(no matches)")
 
 
 def _relativize_rg_output(stdout: str, cwd: Path) -> str:

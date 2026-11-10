@@ -10,6 +10,8 @@
 # here put the import lib
 from __future__ import annotations
 
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -231,7 +233,29 @@ def main_command(
     )
 
 
+def _ensure_utf8_stdio() -> None:
+    """把标准流切到 UTF-8，避免中文 Windows 下按 GBK 编码写出时崩溃。
+
+    真正控制台由 Python 的 WindowsConsoleIO 走宽字符，一般不出问题；出问题的是
+    重定向/管道到文件时 Python 用 locale 编码（GBK）写出，或子进程按 GBK 产出后
+    被我方按 UTF-8 解码——后者在 ``decode_subprocess_output`` 里已按
+    UTF-8 → 系统编码兜底。这里统一上游，连同 PYTHONIOENCODING 一起让整条
+    链路（含 bash/hooks/rg 子进程）说同一种编码。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+    # 让子进程（bash / hooks / rg）也按 UTF-8 产出，和上面的解码约定一致。
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
+
 def main() -> None:
+    _ensure_utf8_stdio()
     app()
 
 

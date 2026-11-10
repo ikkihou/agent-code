@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +37,25 @@ TEXT_SUFFIXES = {
 
 # 单文件大小上限：超过就拒绝读取整文件。教学版先用 256 KiB，后面再做 offset/limit。
 MAX_READ_BYTES = 256 * 1024
+
+
+def decode_subprocess_output(data: bytes | None, *, encodings: list[str] | None = None) -> str:
+    """子进程字节输出 → 文本。
+
+    顺序：UTF-8 → 系统首选编码（中文 Windows 上是 GBK，系统命令常吐这个）
+    → UTF-8 替换兜底。不要用 subprocess 的 text=True：它直接拿系统编码解码，
+    遇到 UTF-8 内容会抛 UnicodeDecodeError（"gbk codec can't decode byte ..."）。
+    """
+    if not data:
+        return ""
+    candidates = encodings or ["utf-8", locale.getpreferredencoding(False)]
+    for encoding in dict.fromkeys(candidates):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
 
 # 单次工具 observation 上限。模型上下文有限，过长直接截尾。
 DEFAULT_MAX_CHARS = 8000

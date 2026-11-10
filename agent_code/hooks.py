@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import locale
 import os
 import subprocess
 from pathlib import Path
@@ -18,21 +17,14 @@ from typing import Any
 
 from rich.console import Console
 
+from .fs_safety import decode_subprocess_output
+
 HOOKS_FILE = "hooks.json"
 console = Console()
 
 
 def _decode_hook_output(data: bytes | None) -> str:
-    if not data:
-        return ""
-
-    encodings = ["utf-8", locale.getpreferredencoding(False)]
-    for encoding in dict.fromkeys(encodings):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+    return decode_subprocess_output(data)
 
 
 def load_hooks(cwd: Path) -> dict[str, list[dict[str, Any]]]:

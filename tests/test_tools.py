@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_code.fs_safety import decode_subprocess_output
 from agent_code.model import ToolCall
 from agent_code.tools import ToolContext, ToolRegistry, default_tools
 
@@ -84,3 +85,30 @@ def test_imports_have_no_circular_dependency() -> None:
     assert agent_code.cli is not None
     assert agent_code.cron_tools.cron_list is not None
     assert agent_code.slash is not None
+
+
+# ---- 子进程输出解码（Windows GBK 回归）--------------------------------------
+
+
+def test_decode_subprocess_output_prefers_utf8() -> None:
+    # UTF-8 中文必须原样还原，不能按系统编码（GBK）解。
+    assert decode_subprocess_output("中文输出".encode("utf-8")) == "中文输出"
+
+
+def test_decode_subprocess_output_falls_back_to_system_encoding(monkeypatch) -> None:
+    # 中文 Windows 上系统命令（dir 等）吐 GBK：UTF-8 解不开时应回退而不是崩。
+    import agent_code.fs_safety as fs
+
+    monkeypatch.setattr(fs.locale, "getpreferredencoding", lambda *a: "gbk")
+    assert decode_subprocess_output("中文".encode("gbk")) == "中文"
+
+
+def test_decode_subprocess_output_replaces_indecodable_bytes() -> None:
+    # 两种编码都解不开时用替换字符兜底，绝不抛 UnicodeDecodeError。
+    out = decode_subprocess_output(b"\x94\x94\xff")
+    assert isinstance(out, str)
+
+
+def test_decode_subprocess_output_handles_empty() -> None:
+    assert decode_subprocess_output(None) == ""
+    assert decode_subprocess_output(b"") == ""
