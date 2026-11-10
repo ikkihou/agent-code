@@ -15,6 +15,7 @@ from .fs_safety import (
     apply_single_replace,
     check_mtime_conflict,
     ensure_read_before_edit,
+    read_text_file,
     resolve_in_cwd,
 )
 from .hooks import run_hooks
@@ -70,7 +71,7 @@ def _edit_preflight(
     except (ValueError, OSError) as exc:
         return None, f"error: {exc}"
 
-    old_content = path.read_text(encoding="utf-8") if path.exists() else ""
+    old_content = read_text_file(path)[0] if path.exists() else ""
     validation_error: str | None = None
     if call.name == "file_write":
         if path.exists():

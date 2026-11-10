@@ -85,9 +85,11 @@ def _load_claude_settings() -> dict[str, str]:
     """从 ~/.claude/settings.json 的 env 字段加载环境变量。"""
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
-        data = json.loads(settings_path.read_text())
+        # 显式 UTF-8：默认编码在中文 Windows 上是 GBK，setting 文件里若有中文注释
+        # 会抛 UnicodeDecodeError。errors="replace" 保证读坏也不至于整个启动失败。
+        data = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
         return data.get("env", {})
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError, UnicodeError):
         return {}
 
 

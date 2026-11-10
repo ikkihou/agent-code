@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+import traceback
 from typing import Any, Callable, Hashable, cast
 
 from prompt_toolkit.application import Application, run_in_terminal
@@ -367,7 +368,12 @@ class InteractiveShell:
                     self._run_turn(text, self._ui_writer)
                 except Exception as e:  # provider/工具异常别让 worker 静默死掉
                     if self._ui_writer is not None:
-                        self._ui_writer(f"[error] {e}\n")
+                        # 带上 traceback：只有 str(e) 时无法定位是哪条路径抛的
+                        # （编码类错误尤其明显——报错文案里看不出调用栈）。
+                        detail = "".join(
+                            traceback.format_exception(type(e), e, e.__traceback__)
+                        )
+                        self._ui_writer(f"[error] {e}\n{detail}\n")
                 finally:
                     self._busy.clear()
 

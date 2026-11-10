@@ -12,6 +12,7 @@ from ..fs_safety import (
     decode_subprocess_output,
     ensure_text_file,
     ensure_within_size,
+    read_text_file,
     resolve_in_cwd,
     should_skip,
     truncate_output,
@@ -27,7 +28,9 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
         path = resolve_in_cwd(ctx.cwd, path_str)
         ensure_text_file(path)
         ensure_within_size(path)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # 源文件可能是 GBK（中文 Windows 常见）：按候选编码容错读，避免
+        # 严格 UTF-8 抛 UnicodeDecodeError，也避免 errors="replace" 把中文变乱码。
+        text, _ = read_text_file(path)
     except (FileNotFoundError, IsADirectoryError, ValueError) as exc:
         return f"error: {exc}"
     # 记录"模型看到的版本"，给 Day 4 read-before-edit 留底。

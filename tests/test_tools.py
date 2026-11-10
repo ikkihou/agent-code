@@ -112,3 +112,50 @@ def test_decode_subprocess_output_replaces_indecodable_bytes() -> None:
 def test_decode_subprocess_output_handles_empty() -> None:
     assert decode_subprocess_output(None) == ""
     assert decode_subprocess_output(b"") == ""
+
+
+# ---- GBK 源文件的读/改（中文 Windows 常见）---------------------------------
+
+
+def test_read_text_file_decodes_gbk_source(tmp_path) -> None:
+    from agent_code.fs_safety import read_text_file
+
+    p = tmp_path / "src.py"
+    # newline="" 阻止 Windows 把 \n 转成 \r\n，断言才稳定。
+    p.write_text("# 中文注释\n", encoding="gbk", newline="")
+
+    text, encoding = read_text_file(p)
+
+    assert text == "# 中文注释\n"
+    assert encoding == "gb18030"
+
+
+def test_file_edit_preserves_gbk_encoding(tmp_path) -> None:
+    """编辑 GBK 源文件后必须仍是 GBK，不能被静默改写成 UTF-8。"""
+    from agent_code.fs_safety import read_text_file
+    from agent_code.tools.edit import file_edit
+
+    p = tmp_path / "src.py"
+    p.write_text("# 中文注释\nprint(1)\n", encoding="gbk", newline="")
+    ctx = ToolContext(cwd=tmp_path)
+    ctx.read_state.record(p, read_text_file(p)[0])
+
+    out = file_edit(
+        {"file_path": "src.py", "old_string": "print(1)", "new_string": "print(2)"},
+        ctx,
+    )
+
+    assert "Edited" in out
+    # 中文原样保留、且能用 GBK 严格解码回来（说明写回没改成 UTF-8）。
+    assert p.read_bytes().decode("gbk") == "# 中文注释\nprint(2)\n"
+
+
+def test_read_file_tool_reads_gbk_without_mojibake(tmp_path) -> None:
+    from agent_code.fs_safety import SkipPolicy
+    from agent_code.tools.read import read_file
+
+    p = tmp_path / "notes.md"
+    p.write_text("中文内容\n", encoding="gbk", newline="")
+    ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
+
+    assert read_file({"path": "notes.md"}, ctx) == "中文内容\n"

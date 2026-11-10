@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..file_history import backup
-from ..fs_safety import apply_single_replace, resolve_in_cwd
+from ..fs_safety import apply_single_replace, read_text_file, resolve_in_cwd, write_text_file
 from .core import Tool, ToolContext
 
 
@@ -23,13 +23,14 @@ def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
         return f"error: {e}"
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    # 内容由模型给出（str），统一按 UTF-8 落盘；老文件按容错读法做备份。
     if path.exists():
         try:
-            old = path.read_text(encoding="utf-8")
+            old, _ = read_text_file(path)
             backup(ctx.cwd, path, old)
         except Exception:
             pass
-    path.write_text(content, encoding="utf-8")
+    write_text_file(path, content, "utf-8")
     ctx.read_state.record(path, content)
 
     return f"Wrote {len(content)} chars to {path_str}"
@@ -49,7 +50,9 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
         return f"error: {exc}"
 
     try:
-        content = path.read_text(encoding="utf-8")
+        # 按候选编码容错读（源文件可能是 GBK），并记住实际编码以便原样写回——
+        # 否则一次编辑就会把 GBK 文件静默改写成 UTF-8。
+        content, encoding = read_text_file(path)
         backup(ctx.cwd, path, content)
     except (FileNotFoundError, IsADirectoryError) as exc:
         return f"error: {exc}"
@@ -63,7 +66,7 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
         return err
     assert new_content is not None
 
-    path.write_text(new_content, encoding="utf-8")
+    write_text_file(path, new_content, encoding)
     ctx.read_state.record(path, new_content)
     return f"Edited {path_str}: replaced {len(old_string)} chars with {len(new_string)} chars"
 

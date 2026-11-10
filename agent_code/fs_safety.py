@@ -57,6 +57,38 @@ def decode_subprocess_output(data: bytes | None, *, encodings: list[str] | None 
     return data.decode("utf-8", errors="replace")
 
 
+# 读取源文件时的候选编码：UTF-8 优先，其次中文 Windows 上常见的 GBK/GB18030。
+# 用 GB18030 而非 GBK：它是 GBK 的超集，能多解一批生僻字，且不会漏掉 GBK 能解的。
+SOURCE_FILE_ENCODINGS = ("utf-8", "gb18030", "cp936")
+
+
+def read_text_file(
+    path: Path, *, encodings: tuple[str, ...] | None = None
+) -> tuple[str, str]:
+    """读取源文件，返回 ``(text, encoding)``。
+
+    中文 Windows 上的源文件常是 GBK 编码；用严格 UTF-8 读会抛
+    ``'utf-8' codec can't decode byte ...``，进而冒到 REPL 输出面板的行
+    ``[error]``。这里按候选编码依次尝试（UTF-8 → GB18030/GBK），都失败才
+    用替换字符兜底，保证工具调用不会因编码问题整体失败。
+
+    返回实际使用的编码，供写回时保持原编码、避免把 GBK 文件改写成 UTF-8。
+    """
+    raw = path.read_bytes()
+    for encoding in encodings or SOURCE_FILE_ENCODINGS:
+        try:
+            return raw.decode(encoding), encoding
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace"), "utf-8"
+
+
+def write_text_file(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """按指定编码写回源文件（保持读入时的编码）。"""
+    path.write_text(content, encoding=encoding, newline="")
+
+
+
 # 单次工具 observation 上限。模型上下文有限，过长直接截尾。
 DEFAULT_MAX_CHARS = 8000
 
