@@ -26,6 +26,15 @@ from .scheduler import CronScheduler
 from .session import Session
 from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
+from .wire import (
+    CommandPreview,
+    DiffPreview,
+    Line,
+    PromptEcho,
+    TextDelta,
+    ToolCallStarted,
+    Wire,
+)
 
 console = Console()
 app = typer.Typer(add_completion=False)
@@ -85,7 +94,39 @@ def run_once(
         state=state,
         session=session,
         system_prompt=system_prompt,
+        wire=_console_wire(),
     )
+
+
+class _ConsoleWireSink:
+    """one-shot 前端：wire 事件的同步消费者，直接渲染到终端。
+
+    run_agent 在同线程调用 send → notify 为空 → sink 立刻收到事件批。
+    """
+
+    def send(self, events: list[object]) -> None:
+        for event in events:
+            if isinstance(event, TextDelta):
+                console.print(event.text, markup=False, highlight=False, end="")
+            elif isinstance(event, Line):
+                console.print(event.text, markup=event.markup, highlight=False)
+            elif isinstance(event, PromptEcho):
+                console.print(f"> {event.text}")
+            elif isinstance(event, ToolCallStarted):
+                console.print(f"tool_call: {event.name} {event.args_preview}")
+            elif isinstance(event, DiffPreview):
+                console.print(f"\nDiff for {event.path}:", markup=True)
+                from .prompt_ui import render_diff
+
+                console.print(render_diff(event.old, event.new, event.path), markup=True)
+            elif isinstance(event, CommandPreview):
+                console.print(f"\nCommand: {event.command}", markup=True)
+
+
+def _console_wire() -> Wire:
+    wire = Wire()
+    wire.sink = _ConsoleWireSink().send
+    return wire
 
 
 @app.callback(invoke_without_command=True)
@@ -93,7 +134,7 @@ def main_command(
     prompt: str = typer.Argument("", help="Prompt to send to the agent."),
     cwd: Path = typer.Option(Path.cwd(), "--cwd", "-C"),
     provider: str = typer.Option("anthropic", "--provider"),
-    model: str = typer.Option("deepseek-v4-flash", "--model"),
+    model: str = typer.Option("workbuddy/auto", "--model"),
     base_url: str | None = typer.Option(None, "--base-url"),
     max_steps: int = typer.Option(20, "--max-steps"),
     permission_mode: str = typer.Option(
@@ -195,7 +236,7 @@ def main_command(
     )
     tools = default_tools()
 
-    def run_turn(line: str, output) -> None:
+    def run_turn(line: str, wire: Wire) -> None:
         turn_provider = create_provider(state.provider, state.model, base_url)
         run_agent(
             line,
@@ -206,7 +247,7 @@ def main_command(
             state=state,
             session=session,
             system_prompt=system_prompt,
-            output=output,
+            wire=wire,
         )
 
     def make_slash_context() -> SlashContext:

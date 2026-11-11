@@ -14,6 +14,7 @@ from agent_code.tool_execution import (
     partition_tool_calls,
 )
 from agent_code.tools import Tool, ToolContext, ToolRegistry
+from agent_code.wire import CommandPreview, DiffPreview, ToolCallStarted, Wire
 
 
 def _tool(name: str, *, read_only: bool = False, output: str = "ok") -> Tool:
@@ -31,17 +32,17 @@ def _call(name: str, **arguments) -> ToolCall:
     return ToolCall(id=f"call-{name}", name=name, arguments=arguments)
 
 
-def _make_emit(emitted: list[str]):
-    def emit(text: str, *, markup: bool = False) -> None:
-        emitted.append(text)
-
-    return emit
+def _collecting_wire() -> tuple[Wire, list]:
+    events: list = []
+    wire = Wire()
+    wire.sink = events.extend
+    return wire, events
 
 
 def _run(call: ToolCall, ctx: ToolContext, state: RuntimeState, reg: ToolRegistry):
-    emitted: list[str] = []
-    block = execute_one_tool_call(call, ctx, state, reg, _make_emit(emitted))
-    return block, emitted
+    wire, events = _collecting_wire()
+    block = execute_one_tool_call(call, ctx, state, reg, wire)
+    return block, events
 
 
 # ---- partition_tool_calls -------------------------------------------------
@@ -75,10 +76,48 @@ def test_partition_tool_calls_unknown_tool_serial():
 
 def test_execute_one_tool_call_allow_success(tmp_path):
     reg = _registry(_tool("echo", output="ok"))
-    block, _ = _run(_call("echo"), ToolContext(cwd=tmp_path), RuntimeState(), reg)
+    block, events = _run(_call("echo"), ToolContext(cwd=tmp_path), RuntimeState(), reg)
     assert block["is_error"] is False
     assert block["content"] == "ok"
     assert block["tool_use_id"] == "call-echo"
+    # 工具层必须发 ToolCallStarted 展示事件（前端渲染 tool_call 行的依据）
+    assert any(isinstance(e, ToolCallStarted) and e.name == "echo" for e in events)
+
+
+def test_execute_one_tool_call_bash_confirmation_sends_command_preview(tmp_path):
+    """ask 模式 bash：确认前必须发 CommandPreview（前端渲染命令行的依据）。"""
+    reg = _registry(_tool("bash"))
+    state = RuntimeState(asker=lambda request: True)
+    wire, events = _collecting_wire()
+    block = execute_one_tool_call(
+        _call("bash", command="echo hi"), ToolContext(cwd=tmp_path), state, reg, wire
+    )
+    assert block["is_error"] is False
+    assert any(
+        isinstance(e, CommandPreview) and e.command == "echo hi" for e in events
+    )
+
+
+def test_execute_one_tool_call_edit_confirmation_sends_diff_preview(tmp_path):
+    """ask 模式 file_edit：确认前必须发 DiffPreview（前端渲染 diff 的依据）。"""
+    p = tmp_path / "a.txt"
+    p.write_text("hello\n", encoding="utf-8")
+    ctx = ToolContext(cwd=tmp_path)
+    ctx.read_state.record(p, "hello\n")
+    reg = _registry(_tool("file_edit"))
+    state = RuntimeState(asker=lambda request: True)
+    wire, events = _collecting_wire()
+    block = execute_one_tool_call(
+        _call("file_edit", file_path="a.txt", old_string="hello", new_string="hi"),
+        ctx,
+        state,
+        reg,
+        wire,
+    )
+    assert block["is_error"] is False
+    assert any(
+        isinstance(e, DiffPreview) and e.path == "a.txt" and "hi" in e.new for e in events
+    )
 
 
 def test_execute_one_tool_call_denies_dangerous_bash(tmp_path):
@@ -174,9 +213,9 @@ def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):
         _tool("exit_plan_mode", output="approved"),
     )
     state = RuntimeState(permission_mode="plan", asker=lambda request: True)
-    emitted: list[str] = []
+    wire, _ = _collecting_wire()
     calls = [_call("read_file"), _call("exit_plan_mode", plan_summary="my plan")]
-    blocks = execute_plan_boundary_calls(calls, ToolContext(cwd=tmp_path), state, reg, _make_emit(emitted))
+    blocks = execute_plan_boundary_calls(calls, ToolContext(cwd=tmp_path), state, reg, wire)
     assert blocks is not None
     # 非 exit_plan_mode 的同轮工具被跳过，返回 error block
     assert blocks[0]["is_error"] is True

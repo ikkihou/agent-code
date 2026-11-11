@@ -20,6 +20,7 @@ from agent_code.interactive import (
     _copy_output,
     _make_system_clipboard,
     append_output_text,
+    event_to_chunks,
     output_follow_position,
     parse_choice_index,
     parse_confirm_answer,
@@ -33,6 +34,37 @@ from agent_code.output import OutputChunk
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
+from agent_code.wire import (
+    CommandPreview,
+    DiffPreview,
+    Line,
+    PromptEcho,
+    StreamLineBuffer,
+    TextDelta,
+    ToolCallStarted,
+    Wire,
+)
+
+
+class _RecordingSink:
+    """同步 wire 消费者：记录收到的全部事件批（send 时立刻 flush）。"""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def send(self, batch: list[Any]) -> None:
+        self.events.extend(batch)
+
+    def texts(self) -> list[str]:
+        """TextDelta 原文流（模拟消费端攒行前的样子）。"""
+        return [e.text for e in self.events if isinstance(e, TextDelta)]
+
+
+def _collecting_wire() -> tuple[Wire, _RecordingSink]:
+    wire = Wire()
+    sink = _RecordingSink()
+    wire.sink = sink.send
+    return wire, sink
 
 
 def test_append_output_text_keeps_plain_transcript() -> None:
@@ -218,13 +250,13 @@ class _FragmentedProvider:
         )
 
 
-def test_run_agent_output_callback_receives_complete_lines(tmp_path: Path) -> None:
+def test_run_agent_streaming_reaches_wire_as_text_delta(tmp_path: Path) -> None:
     final_text = "第一行完整内容\n\n- **能力**：可以理解、生成和处理文本"
     provider = _FragmentedProvider(
         ["第一行", "完整内容\n\n- **能", "力**：可以理解、", "生成和处理文本"],
         final_text,
     )
-    output: list[str | OutputChunk] = []
+    wire, sink = _collecting_wire()
 
     result = run_agent(
         "介绍一下自己",
@@ -232,15 +264,48 @@ def test_run_agent_output_callback_receives_complete_lines(tmp_path: Path) -> No
         ToolRegistry(),
         RuntimeState(),
         cwd=tmp_path,
-        output=output.append,
+        wire=wire,
     )
 
     assert result.final == final_text
-    assert [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output] == [
-        "第一行完整内容\n",
-        "\n",
-        "- **能力**：可以理解、生成和处理文本\n",
-    ]
+    # 原始 delta 原样上 wire（合并是队列内相邻 TextDelta 的行为）；
+    # 攒成整行是消费端 StreamLineBuffer 的职责。
+    assert "".join(sink.texts()) == final_text
+
+    # 消费端攒行后得到与旧版 OutputChunk 相同的完整行。
+    lines: list[str] = []
+    line_buf = StreamLineBuffer(lines.append)
+    for text in sink.texts():
+        line_buf.feed(text)
+    line_buf.finish()
+    assert lines == ["第一行完整内容", "", "- **能力**：可以理解、生成和处理文本"]
+
+
+def test_wire_merges_adjacent_text_deltas_in_queue() -> None:
+    """UI 消费不及时时，相邻 TextDelta 在队列内原地合并，不积压成百条事件。"""
+    wire = Wire()
+    # 只 notify、不设 sink：模拟 UI 还没来 drain 的异步消费模式。
+    wire.notify = lambda: None
+
+    for text in ["a", "b", "c"]:
+        wire.send(TextDelta(text=text))
+
+    assert len(wire.drain()) == 1
+
+
+def test_wire_sync_sink_flushes_each_send() -> None:
+    """同步 sink：每次 send 立刻 flush，事件已被消费、不发生合并。"""
+    wire = Wire()
+    batches: list[list[Any]] = []
+    wire.sink = batches.append
+
+    wire.send(Line("one"))
+    wire.send(TextDelta("del"))
+    wire.send(TextDelta("ta"))
+
+    flat = [e for batch in batches for e in batch]
+    assert [type(e).__name__ for e in flat] == ["Line", "TextDelta", "TextDelta"]
+    assert flat[1].text == "del" and flat[2].text == "ta"
 
 
 def test_output_follow_position_follows_only_at_bottom() -> None:
@@ -280,7 +345,7 @@ def test_run_agent_retries_empty_completion_once(tmp_path: Path) -> None:
             ModelResponse(text="hello world"),
         ]
     )
-    output: list[str | OutputChunk] = []
+    wire, sink = _collecting_wire()
 
     result = run_agent(
         "hi",
@@ -288,12 +353,13 @@ def test_run_agent_retries_empty_completion_once(tmp_path: Path) -> None:
         ToolRegistry(),
         RuntimeState(),
         cwd=tmp_path,
-        output=output.append,
+        wire=wire,
     )
 
     assert result.final == "hello world"
-    texts = [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output]
-    assert any("continue: empty response" in text for text in texts)
+    assert any(
+        "continue: empty response" in e.text for e in sink.events if isinstance(e, Line)
+    )
 
 
 def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> None:
@@ -305,7 +371,7 @@ def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> 
             ModelResponse(text=""),
         ]
     )
-    output: list[str | OutputChunk] = []
+    wire, sink = _collecting_wire()
 
     result = run_agent(
         "hi",
@@ -313,12 +379,13 @@ def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> 
         ToolRegistry(),
         RuntimeState(),
         cwd=tmp_path,
-        output=output.append,
+        wire=wire,
     )
 
     assert result.final == ""
-    texts = [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output]
-    assert any("final: (empty response)" in text for text in texts)
+    assert any(
+        "final: (empty response)" in e.text for e in sink.events if isinstance(e, Line)
+    )
 
 
 def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None:
@@ -329,7 +396,7 @@ def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None
             ModelResponse(text="补充的结尾"),
         ]
     )
-    output: list[str | OutputChunk] = []
+    wire, sink = _collecting_wire()
 
     result = run_agent(
         "hi",
@@ -337,12 +404,13 @@ def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None
         ToolRegistry(),
         RuntimeState(),
         cwd=tmp_path,
-        output=output.append,
+        wire=wire,
     )
 
     assert result.final == "补充的结尾"
-    texts = [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output]
-    assert any("continue: max_tokens" in text for text in texts)
+    assert any(
+        "continue: max_tokens" in e.text for e in sink.events if isinstance(e, Line)
+    )
 
 
 def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
@@ -361,7 +429,7 @@ def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
             yield ModelStreamEvent(type="text_delta", text="世界\n")
             yield ModelStreamEvent(type="completed", response=ModelResponse())
 
-    output: list[str | OutputChunk] = []
+    wire, sink = _collecting_wire()
 
     result = run_agent(
         "hi",
@@ -369,14 +437,36 @@ def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
         ToolRegistry(),
         RuntimeState(),
         cwd=tmp_path,
-        output=output.append,
+        wire=wire,
     )
 
     # 兜底重建用的就是流式收到的原始分片，所以保留了末尾换行。
     assert result.final == "你好世界\n"
-    assert [chunk.text if isinstance(chunk, OutputChunk) else chunk for chunk in output] == [
-        "你好世界\n"
-    ]
+    assert "".join(sink.texts()) == "你好世界\n"
+
+
+def test_event_to_chunks_renders_wire_events() -> None:
+    """REPL 渲染策略：非流式事件全部翻译成 OutputChunk，格式由前端决定。"""
+    chunks = event_to_chunks(Line("hello"))
+    assert len(chunks) == 1
+    assert chunks[0].text == "hello\n"
+
+    echo = event_to_chunks(PromptEcho("hi there"))
+    assert echo[0].text == "\n\n> hi there\n\n"  # render_user_prompt 的深灰底块
+
+    tool = event_to_chunks(ToolCallStarted(name="read_file", args_preview="{'path': 'x'}"))
+    assert tool[0].text == "tool_call: read_file {'path': 'x'}\n"
+
+    diff = event_to_chunks(DiffPreview(path="a.py", old="x\n", new="y\n"))
+    assert len(diff) == 2
+    assert diff[0].format == "rich"
+    assert "+y" in diff[1].text
+
+    cmd = event_to_chunks(CommandPreview(command="echo hi"))
+    assert "Command: echo hi" in cmd[0].text
+
+    # TextDelta 不是 chunk 翻译的职责（StreamLineBuffer 攒行）。
+    assert event_to_chunks(TextDelta("half")) == []
 
 
 def _fake_event(clipboard: Any) -> Any:

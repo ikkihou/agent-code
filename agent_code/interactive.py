@@ -6,6 +6,11 @@ Contact   :   yihui.bao@apopgeei.com
 
 主线程 = prompt_toolkit Application（输出面板 + 输入行 + 状态栏）；
 worker 线程 = run_agent（消费 provider stream + 工具执行）。
+
+REPL 是 wire 的纯事件消费者：agent loop / 工具层只发结构化事件
+（TextDelta / Line / PromptEcho / ToolCallStarted / DiffPreview /
+CommandPreview），本模块把事件批翻译成 OutputChunk 喂给输出面板——
+行缓冲、着色、diff 渲染都是消费端的渲染关注点。
 """
 
 # here put the import lib
@@ -37,9 +42,21 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame, TextArea
 
-from .output import OutputChunk, OutputWriter, chunk_fragments
+from .output import OutputChunk, chunk_fragments
+from .prompt_ui import render_diff
 from .runtime import PromptFallback, PromptRequest, RuntimeState
 from .slash import SlashContext, SlashRegistry, default_slash_registry, dispatch_slash
+from .wire import (
+    CommandPreview,
+    DiffPreview,
+    Line,
+    PromptEcho,
+    StreamLineBuffer,
+    TextDelta,
+    ToolCallStarted,
+    Wire,
+    WireEvent,
+)
 
 PendingPrompt = dict[str, Any]
 StyleAndText = tuple[str, str]
@@ -201,7 +218,6 @@ class TranscriptLexer(Lexer):
         return "transcript-lexer"
 
 
-## 渲染用户prompt行
 def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
     normalized = text.rstrip()
     if not normalized.strip():
@@ -217,6 +233,44 @@ def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
         ("", "\n\n"),
     )
     return OutputChunk("\n\n" + body + "\n\n", fragments=fragments)
+
+
+## wire 事件 → 输出面板 chunk 的翻译（REPL 渲染策略）
+def event_to_chunks(event: WireEvent) -> list[OutputChunk]:
+    """把一个非流式 wire 事件翻译成 OutputChunk 列表。
+
+    TextDelta 不在此列——流式原文由 StreamLineBuffer 攒行后单独成 chunk
+    （见 InteractiveShell._drain_wire）。着色与行格式全部在这里决定，
+    agent / 工具层只提供事实。
+    """
+    if isinstance(event, Line):
+        return [OutputChunk(event.text + "\n", format="rich" if event.markup else "plain")]
+    if isinstance(event, PromptEcho):
+        return [render_user_prompt(event.text)]
+    if isinstance(event, ToolCallStarted):
+        return [OutputChunk(f"tool_call: {event.name} {event.args_preview}\n")]
+    if isinstance(event, DiffPreview):
+        return [
+            OutputChunk(f"\nDiff for {event.path}:", format="rich"),
+            OutputChunk(render_diff(event.old, event.new, event.path) + "\n", format="rich"),
+        ]
+    if isinstance(event, CommandPreview):
+        return [OutputChunk(f"\nCommand: {event.command}\n", format="rich")]
+    return []
+
+
+class CronPromptWire:
+    """cron prompt 的即发即渲 wire 替身：send 立刻经线程安全路径渲染。
+
+    cron prompt 量小且低频（每条一个 echo + 可能几行结果），不值得开
+    完整的 notify/drain 管线——直接逐事件线程安全投递。
+    """
+
+    def __init__(self, shell: "InteractiveShell") -> None:
+        self._shell = shell
+
+    def send(self, event: WireEvent) -> None:
+        self._shell._cron_prompt_send(event)
 
 
 def parse_confirm_answer(text: str, default: bool = False) -> bool | None:
@@ -285,7 +339,7 @@ class InteractiveShell:
     def __init__(
         self,
         state: RuntimeState,
-        run_turn: Callable[[str, OutputWriter], None],
+        run_turn: Callable[[str, Wire], None],
         make_slash_context: Callable[[], SlashContext],
         initial_output: str = "",
         initial_transcript: list[OutputChunk] | None = None,
@@ -304,7 +358,9 @@ class InteractiveShell:
 
         self._job_queue: queue.Queue[str] = queue.Queue()
         self._busy = threading.Event()
-        self._ui_writer: OutputWriter | None = None
+        self._turn_wire: Wire | None = None  # 当前 turn 的 wire，worker 线程期间持有
+        self._stream_lines = StreamLineBuffer(self._append_output_text_only)
+        self._drain_scheduled = False  # 已有一次 drain 排在 UI 队列上（合并 notify 用）
         self._input_prompt: list[str] = ["> "]
         self._pending_prompt: PendingPrompt | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -334,15 +390,15 @@ class InteractiveShell:
             self._job_queue.put(result.prompt)
         return True
 
-    def _handle_cron_prompt(self, text: str, writer: OutputWriter) -> None:
+    def _handle_cron_prompt(self, text: str, wire: Wire) -> None:
         """worker 线程处理 cron 到点 prompt：slash 就地分发，普通 prompt 作为新一轮 turn 入队。"""
         text = text.strip()
         if not text or text == "/exit":
             return  # cron 到点 prompt 不触发应用退出
         if text.startswith("/"):
-            self._route_slash_command(text, render=writer)
+            self._route_slash_command(text, render=lambda c: wire.send(PromptEcho(str(c))))
             return
-        writer(render_user_prompt(text, source="cron"))
+        wire.send(PromptEcho(text))
         self._job_queue.put(text)
 
     def _work_loop(self) -> None:
@@ -363,32 +419,104 @@ class InteractiveShell:
                 self._busy.set()
 
                 try:
-                    if self._ui_writer is None:
-                        continue
-                    self._run_turn(text, self._ui_writer)
+                    # 每个 turn 一个专属 wire：agent 只发事件；流式期间 notify
+                    # 把 drain 调度到 UI 线程，turn 结束再兜底排一次（见
+                    # _schedule_turn_finish），保证事件与半行都落面板。
+                    wire = Wire()
+                    self._turn_wire = wire
+                    wire.notify = self._schedule_wire_drain
+                    self._run_turn(text, wire)
+                    self._schedule_turn_finish()
                 except Exception as e:  # provider/工具异常别让 worker 静默死掉
-                    if self._ui_writer is not None:
-                        # 带上 traceback：只有 str(e) 时无法定位是哪条路径抛的
-                        # （编码类错误尤其明显——报错文案里看不出调用栈）。
-                        detail = "".join(
-                            traceback.format_exception(type(e), e, e.__traceback__)
-                        )
-                        self._ui_writer(f"[error] {e}\n{detail}\n")
+                    # 带上 traceback：只有 str(e) 时无法定位是哪条路径抛的
+                    # （编码类错误尤其明显——报错文案里看不出调用栈）。
+                    detail = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+                    self._append_output_safe(f"[error] {e}\n{detail}\n")
                 finally:
+                    self._turn_wire = None
                     self._busy.clear()
-
-            if self._ui_writer is None:
-                continue
 
             while not self._state.input_queue.empty():
                 self._job_queue.put(self._state.input_queue.get())
 
-            # cron 到点 prompt：与用户输入一样走 slash 分发或作为新一轮 turn，
-            # 但渲染走线程安全的 ui_writer。worker 在 get(timeout=1.0) 上空闲轮询，
-            # 因此 cron 不依赖用户输入也能触发。
+            # cron 到点 prompt：与用户输入一样走 slash 分发或作为新一轮 turn。
+            # worker 在 get(timeout=1.0) 上空闲轮询，因此 cron 不依赖用户输入
+            # 也能触发。
             if self._drain_pending is not None:
                 for prompt in self._drain_pending():
-                    self._handle_cron_prompt(prompt, self._ui_writer)
+                    self._handle_cron_prompt(prompt, CronPromptWire(self))
+
+    # ---- wire 消费（worker 线程产出，UI 线程渲染）--------------------------
+
+    def _drain_wire(self) -> None:
+        """UI 线程回调：取走当前 wire 的全部事件并渲染进输出面板。"""
+        wire = self._turn_wire
+        if wire is None:
+            return
+        batch = wire.drain()
+        if not batch:
+            return
+        for event in batch:
+            if isinstance(event, TextDelta):
+                # 流式文本攒完整行才落面板（pt 不能被覆写半行）；
+                # pending 半行保留到下一批，绝不 finish 截断。
+                self._stream_lines.feed(event.text)
+            else:
+                for chunk in event_to_chunks(event):
+                    self._append_output(chunk)
+        self._app.invalidate()
+
+    def _schedule_wire_drain(self) -> None:
+        """worker 线程侧的 notify：把 drain 调度到 UI 事件循环。
+
+        call_soon_threadsafe 自带"同一迭代内多次调度只跑一次回调队列"的
+        开销下限，流式 token 密集时每 token 一次调用仍偏贵——这里用
+        pending 标志把同一轮 UI 迭代内的多次 notify 合并成一次 drain。
+        """
+        if self._drain_scheduled:
+            return
+        self._drain_scheduled = True
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._drain_scheduled_cb)
+
+    def _drain_scheduled_cb(self) -> None:
+        """UI 事件循环回调：清掉 pending 标志后执行真正的 drain。"""
+        self._drain_scheduled = False
+        self._drain_wire()
+
+    def _schedule_turn_finish(self) -> None:
+        """turn 结束的兜底渲染：清空剩余事件 + flush 攒着的半行（UI 线程执行）。"""
+        self._drain_scheduled = True
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._turn_finish_cb)
+
+    def _turn_finish_cb(self) -> None:
+        self._drain_scheduled = False
+        self._drain_wire()
+        self._stream_lines.finish()
+
+    def _append_output_text_only(self, line: str) -> None:
+        """流式文本行落面板（StreamLineBuffer 回调）。
+
+        在 UI 线程被调用（_drain_wire 的 TextDelta 攒行）。"""
+        self._append_output(OutputChunk(line + "\n"))
+
+    def _append_output_safe(self, text: str) -> None:
+        """worker 线程兜底写面板（异常路径）：经 call_soon_threadsafe 跳 UI 线程。"""
+        self._append_output_safe_chunk(OutputChunk(text))
+
+    def _append_output_safe_chunk(self, chunk: OutputChunk) -> None:
+        """worker 线程写一个 chunk 进面板：经 call_soon_threadsafe 跳 UI 线程。"""
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._append_output, chunk)
+
+    def _cron_prompt_send(self, event: WireEvent) -> None:
+        """cron prompt 的即发即渲通道：PromptEcho 之外的事件直接翻译渲染。"""
+        if isinstance(event, PromptEcho):
+            self._append_output_safe(render_user_prompt(event.text))
+        else:
+            for chunk in event_to_chunks(event):
+                self._append_output_safe_chunk(chunk)
 
     def _append_output(self, output: str | OutputChunk) -> None:
         chunk = output if isinstance(output, OutputChunk) else OutputChunk(output)
@@ -410,9 +538,6 @@ class InteractiveShell:
             bypass_readonly=True,
         )
         self._app.invalidate()
-
-    def _ui_write(self, output: str | OutputChunk) -> None:
-        self._loop.call_soon_threadsafe(self._append_output, output)
 
     def _submit_text(self, text: str) -> None:
         """统一输入入口：有 pending 提问时先喂给提问状态机，否则作为新输入提交。"""
@@ -598,7 +723,6 @@ class InteractiveShell:
         self._loop = asyncio.get_running_loop()
         self._app = self._build_layout()
 
-        self._ui_writer = self._ui_write
         worker = threading.Thread(target=self._work_loop, daemon=True)
         worker.start()
 
@@ -606,7 +730,6 @@ class InteractiveShell:
         try:
             await self._app.run_async()
         finally:
-            self._ui_writer = None
             self._state.asker = None
 
     def run(self) -> None:
@@ -616,7 +739,7 @@ class InteractiveShell:
 
 def run_interactive_shell(
     state: RuntimeState,
-    run_turn: Callable[[str, OutputWriter], None],
+    run_turn: Callable[[str, Wire], None],
     make_slash_context: Callable[[], SlashContext],
     initial_output: str = "",
     initial_transcript: list[OutputChunk] | None = None,

@@ -3,13 +3,15 @@
 从 agent.py 拆出，承接 execute_one_tool_call 及其配套的 plan 边界与并行分组逻辑，
 让 run_agent 主循环只负责调度，不内联每种工具的特殊分支。
 
-输出约定：本模块只通过 ``emit(text, markup=)`` 发射终端可见行；工具返回内容的
-"observation" 不再发往终端——完整内容经 tool_result block 回填给模型。
+输出约定：本模块只通过 ``Wire`` 发结构化事件（ToolCallStarted / DiffPreview /
+CommandPreview）——工具层只描述"发生了什么"，着色与行格式完全由前端决定；
+工具返回内容的 "observation" 不再发往终端——完整内容经 tool_result block 回填
+给模型。
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 
 from .fs_safety import (
     apply_single_replace,
@@ -27,13 +29,10 @@ from .prompt_ui import (
     confirm_plan,
     confirm_tool_use,
     prompt_single_choice,
-    render_diff,
 )
 from .runtime import RuntimeState
 from .tools import ToolContext, ToolRegistry
-
-# 终端可见行发射器：emit(text, markup=bool)。
-EmitFunc = Callable[..., None]
+from .wire import CommandPreview, DiffPreview, Line, ToolCallStarted, Wire
 
 
 def _error_block(tool_call_id: str, content: str) -> dict[str, Any]:
@@ -105,7 +104,7 @@ def _handle_ask(
     call: ToolCall,
     edit_preview: tuple[str, str, str] | None,
     state: RuntimeState,
-    emit: EmitFunc,
+    wire: Wire,
 ) -> dict[str, Any] | None:
     """ask 模式下按工具类型分发确认 UI。
 
@@ -114,13 +113,12 @@ def _handle_ask(
     """
     if call.name in ("file_write", "file_edit") and edit_preview is not None:
         path_str, old_content, new_content = edit_preview
-        emit(f"\nDiff for {path_str}:", markup=True)
-        emit(render_diff(old_content, new_content, path_str), markup=True)
+        wire.send(DiffPreview(path=path_str, old=old_content, new=new_content))
         if not confirm_edit(state, path_str):
             return _error_block(call.id, "error: edit rejected by user")
     elif call.name == "bash":
         command = call.arguments.get("command", "")
-        emit(f"\nCommand: {command}", markup=True)
+        wire.send(CommandPreview(command=command))
         if not confirm_command(state, command):
             return _error_block(call.id, "error: command rejected by user")
     elif call.name in ("web_fetch", "web_search"):
@@ -135,7 +133,6 @@ def _handle_ask(
             content = "User skipped the question."
         else:
             content = f'User selected: "{selected}"'
-            emit(f"choice: {selected}")
         return {
             "type": "tool_result",
             "tool_use_id": call.id,
@@ -146,8 +143,8 @@ def _handle_ask(
 
 
 def _format_call_args(args: dict[str, Any]) -> str:
-    """trace 里的工具参数可能很大（file_write 的内容、后面 v6 exit_plan_mode 的整段计划）。
-    长字符串只在 trace 里截断，完整参数仍照常传给工具。"""
+    """工具参数预览可能很大（file_write 的内容、后面 v6 exit_plan_mode 的整段计划）。
+    长字符串只在展示预览里截断，完整参数仍照常传给工具。"""
     preview: dict[str, Any] = {}
     for key, value in args.items():
         if isinstance(value, str) and len(value) > 80:
@@ -162,10 +159,10 @@ def execute_one_tool_call(
     ctx: ToolContext,
     state: RuntimeState,
     tools: ToolRegistry,
-    emit: EmitFunc,
+    wire: Wire,
 ) -> dict[str, Any]:
     """跑单个工具，返回一个 tool_result block。"""
-    emit(f"tool_call: {call.name} {_format_call_args(call.arguments)}")
+    wire.send(ToolCallStarted(name=call.name, args_preview=_format_call_args(call.arguments)))
 
     request = PermissionRequest(
         tool_name=call.name,
@@ -186,7 +183,7 @@ def execute_one_tool_call(
             plan_summary = call.arguments.get("plan_summary", "")
             if not approve_plan(state, plan_summary):
                 obs = "Plan not approved. Revise the plan and call exit_plan_mode again"
-                emit(f"plan rejected: {obs}")
+                wire.send(Line(f"plan rejected: {obs}"))
                 return _error_block(call.id, obs)
 
     # 文件写前置校验（file_write/file_edit；acceptEdits 也要过校验，只是后面跳过确认 UI）
@@ -202,7 +199,7 @@ def execute_one_tool_call(
 
     # ask：按工具类型分发确认 UI（confirm_* 已在 1.5 包了 _ask，自动借回终端）
     if decision.behavior == "ask":
-        block = _handle_ask(call, edit_preview, state, emit)
+        block = _handle_ask(call, edit_preview, state, wire)
         if block is not None:
             return block
 
@@ -217,7 +214,7 @@ def execute_one_tool_call(
             tool_result=result.content,
         ):
             status = "ok" if h["success"] else f"warning: {h['output']}"
-            emit(f"hook: PostToolUse {call.name} {status}", markup=True)
+            wire.send(Line(f"hook: PostToolUse {call.name} {status}", markup=True))
     return {
         "type": "tool_result",
         "tool_use_id": result.tool_call_id,
@@ -250,7 +247,7 @@ def execute_plan_boundary_calls(
     ctx: ToolContext,
     state: RuntimeState,
     tools: ToolRegistry,
-    emit: EmitFunc,
+    wire: Wire,
 ) -> list[dict[str, Any]] | None:
     """plan 模式下，exit_plan_mode 是 turn boundary：同轮其它工具不执行。"""
     if state.permission_mode != "plan":
@@ -262,7 +259,7 @@ def execute_plan_boundary_calls(
     blocks: list[dict[str, Any]] = []
     for call in calls:
         if call is exit_call:
-            blocks.append(execute_one_tool_call(call, ctx, state, tools, emit))
+            blocks.append(execute_one_tool_call(call, ctx, state, tools, wire))
             continue
         blocks.append(
             {

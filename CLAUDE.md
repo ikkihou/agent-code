@@ -33,15 +33,18 @@ The data flow is `cli.py` (entry) → `run_agent()` in `agent.py` (the loop) →
 Protocol constraints that are easy to break:
 
 - **`tool_result` blocks must come back in `tool_use` order.** `partition_tool_calls()` groups consecutive read-only tools into parallel batches run through `ThreadPoolExecutor.map`, which preserves input order — keep it that way. Write/unknown tools get their own serial batch.
-- Tool-call args are truncated in the terminal trace only (`_format_call_args`, 80-char preview); the **full** args still go to the tool.
-- Trace lines starting `observation:` are sent back to the model but filtered from terminal output (`emit`).
+- Tool-call args are truncated in the display preview only (`_format_call_args`, 80-char preview); the **full** args still go to the tool.
 - When `len(messages) > 40`, `compact()` (`compact_basic.py`) deterministically replaces the middle with a `<compacted-history>` summary block — no LLM involved.
 
-### Streaming, cancellation, and output (`model.py`, `output.py`)
+### The wire (loop ↔ frontend decoupling, `wire.py`)
+
+`run_agent` and the tool layer never touch the terminal: they `wire.send()` structured events (`TextDelta` raw stream deltas, `Line` notices, `PromptEcho`, `ToolCallStarted`, `DiffPreview`, `CommandPreview`), and every frontend (one-shot console sink in `cli.py`, REPL panel in `interactive.py`) is a pure event consumer that owns all formatting/coloring/line-buffering. Adjacent unconsumed `TextDelta`s merge in the queue so a slow UI never accumulates a delta backlog. `AgentResult.trace` is maintained separately by `run_agent` and is not part of the event stream.
+
+### Streaming, cancellation, and rendering (`model.py`, `output.py`)
 
 `ModelProvider` is a protocol with `complete_stream()`, which yields `ModelStreamEvent`s (`text_delta` / `completed`) and takes a `CancellationSignal`. `AnthropicProvider` runs a watcher thread that closes the HTTP stream when the signal fires; callers must re-check the signal after stream completion and map read failures to `ModelRequestAborted` when the signal is set. `MockProvider` is the test double.
 
-Streaming text is buffered into whole lines by `_LineBufferedStreamRenderer` before reaching the printer — `run_agent`'s `output` callback must only ever receive complete lines, because prompt_toolkit overwrites partial chunks. The `OutputWriter` / `OutputChunk` types in `output.py` carry either plain text or Rich-rendered ANSI.
+`TextDelta`s arrive as raw deltas; the consumer's `StreamLineBuffer` (in `wire.py`) buffers them into whole lines — prompt_toolkit must never receive a partial line, and the buffer is only `finish()`ed at turn end. The `OutputChunk` type in `output.py` (plain text + prompt_toolkit style fragments) is the display unit inside the REPL panel, transcript persistence, and resume replay.
 
 ### Tools (`tools/` package)
 

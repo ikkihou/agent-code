@@ -14,14 +14,11 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
-
-from rich.console import Console
+from typing import Any
 
 from .compact_basic import compact
 from .fs_safety import SkipPolicy, load_gitignore
 from .model import ModelProvider, ModelRequestAborted, ModelResponse
-from .output import OutputChunk, OutputWriter
 from .project_memory import load_agent_md
 from .runtime import RuntimeState
 from .session import Session
@@ -32,8 +29,7 @@ from .tool_execution import (
     partition_tool_calls,
 )
 from .tools import ToolContext, ToolRegistry
-
-console = Console()
+from .wire import Line, TextDelta, Wire
 
 # 只读工具并行批的 worker 数。只读调用并发安全；写工具自成串行组，不受此限。
 _PARALLEL_READONLY_WORKERS = 4
@@ -44,30 +40,6 @@ class AgentResult:
     final: str
     trace: list[str]
     messages: list[dict[str, Any]]
-
-
-@dataclass
-class _LineBufferedStreamRenderer:
-    """Render complete lines so prompt-toolkit cannot overwrite partial chunks."""
-
-    write_line: Callable[[str], None]
-    pending: str = ""
-    started: bool = False
-
-    def feed(self, text: str) -> None:
-        if not text:
-            return
-
-        self.started = True
-        self.pending += text
-        while "\n" in self.pending:
-            line, self.pending = self.pending.split("\n", 1)
-            self.write_line(line.removesuffix("\r"))
-
-    def finish(self) -> None:
-        if self.pending:
-            self.write_line(self.pending)
-            self.pending = ""
 
 
 _SYSTEM_CORE = (
@@ -124,7 +96,7 @@ def run_agent(  ## AGENT LOOP
     cwd: Path | None = None,
     session: Session | None = None,
     system_prompt: str | None = None,
-    output: OutputWriter | None = None,
+    wire: Wire | None = None,
 ) -> AgentResult:
     ## 解析 cwd
     resolved_cwd = cwd or Path.cwd()
@@ -145,30 +117,24 @@ def run_agent(  ## AGENT LOOP
     if session:
         session.append_messages([messages[-1]])
 
-    def emit(text: str, *, markup: bool = False) -> None:
-        """唯一输出/trace 双写通道：一行完整文本（不带行尾换行）。
+    # 事件通道：wire 是 loop 与前端之间的唯一边界。未提供时用一个空通道，
+    # 事件自然落空（fire-and-forget），loop 对"有没有人在听"无感知。
+    if wire is None:
+        wire = Wire()
 
-        markup=True 表示 text 是 Rich markup，由前端各自渲染（one-shot 交给
-        Rich，REPL 转样式片段）；trace 恒记传入原文。
+    def emit(text: str, *, markup: bool = False) -> None:
+        """通知事件发射：一行完整文本（不带行尾换行）。
+
+        markup=True 表示 text 是 Rich markup，由前端各自渲染；trace 恒记
+        传入原文。trace 仍由 run_agent 维护——它是 AgentResult 的一部分，
+        供测试与 --resume 审计，不属于事件流。
         """
         trace.append(text)
-        if output is not None:
-            output(OutputChunk(text + "\n", format="rich" if markup else "plain"))
-        elif markup:
-            console.print(text, markup=True, highlight=False)
-        else:
-            console.print(text, markup=False, highlight=False)
+        wire.send(Line(text, markup=markup))
 
     def interrupted_result() -> AgentResult:
         emit("interrupted by user")
         return AgentResult(final="interrupted", trace=trace, messages=messages)
-
-    def write_stream_line(line: str) -> None:
-        """流式模型文本：只上终端，不进 trace（trace 只在 final 收尾时记一行）。"""
-        if output is not None:
-            output(OutputChunk(line + "\n"))
-        else:
-            console.print(line, markup=False, highlight=False, soft_wrap=True)
 
     trace: list[str] = []
     continuation_count = 0
@@ -194,7 +160,6 @@ def run_agent(  ## AGENT LOOP
             emit(f"compacted: {len(messages)} messages remaining", markup=True)
 
         response = None
-        stream_renderer = _LineBufferedStreamRenderer(write_stream_line)
         streamed_parts: list[str] = []
         try:
             for event in provider.complete_stream(
@@ -205,15 +170,14 @@ def run_agent(  ## AGENT LOOP
             ):
                 if event.type == "text_delta" and event.text:
                     streamed_parts.append(event.text)
-                    stream_renderer.feed(event.text)
+                    # 原始 delta 直接上 wire；行缓冲是前端渲染关注点，
+                    # 由消费端用 StreamLineBuffer 攒行。
+                    wire.send(TextDelta(text=event.text))
                 elif event.type == "completed":
                     response = event.response
         except ModelRequestAborted:
-            stream_renderer.finish()
             return interrupted_result()
 
-        stream_renderer.finish()
-        streamed_text = stream_renderer.started
         if response is None:
             raise RuntimeError("provider stream ended without a completed response")
 
@@ -287,7 +251,7 @@ def run_agent(  ## AGENT LOOP
             if forced is not None:
                 continue_with(forced, f"continue: {forced}")
                 continue  # 回到 loop 顶，再跑一轮
-            if streamed_text:
+            if streamed_parts:
                 trace.append(f"final: {final}")
             else:
                 emit(f"final: {final}" if final.strip() else "final: (empty response)")
@@ -301,14 +265,14 @@ def run_agent(  ## AGENT LOOP
             ctx,
             state,
             tools,
-            emit,
+            wire,
         )
         if tool_result_blocks is None:
             tool_result_blocks = []
             for batch in partition_tool_calls(response.tool_calls, tools):
                 if len(batch) == 1:
                     tool_result_blocks.append(
-                        execute_one_tool_call(batch[0], ctx, state, tools, emit)
+                        execute_one_tool_call(batch[0], ctx, state, tools, wire)
                     )
                 else:
                     # 只读组并行。ex.map 按输入顺序返回结果，
@@ -316,7 +280,7 @@ def run_agent(  ## AGENT LOOP
                     with ThreadPoolExecutor(max_workers=_PARALLEL_READONLY_WORKERS) as ex:
                         results = list(
                             ex.map(
-                                lambda c: execute_one_tool_call(c, ctx, state, tools, emit),
+                                lambda c: execute_one_tool_call(c, ctx, state, tools, wire),
                                 batch,
                             )
                         )
