@@ -38,13 +38,13 @@ Protocol constraints that are easy to break:
 
 ### The wire (loop ↔ frontend decoupling, `wire.py`)
 
-`run_agent` and the tool layer never touch the terminal: they `wire.send()` structured events (`TextDelta` raw stream deltas, `Line` notices, `PromptEcho`, `ToolCallStarted`, `DiffPreview`, `CommandPreview`), and every frontend (one-shot console sink in `cli.py`, REPL panel in `interactive.py`) is a pure event consumer that owns all formatting/coloring/line-buffering. Adjacent unconsumed `TextDelta`s merge in the queue so a slow UI never accumulates a delta backlog. `AgentResult.trace` is maintained separately by `run_agent` and is not part of the event stream.
+`run_agent` and the tool layer never touch the terminal: they `wire.send()` structured events (`TextDelta` raw stream deltas, `Line` notices, `PromptEcho`, `ToolCallStarted`/`ToolCallCompleted`, `DiffPreview`, `CommandPreview`, `TurnStarted`/`TurnEnded`), and every frontend (one-shot console sink in `cli.py`, scrollback+Live REPL in `interactive.py`) is a pure event consumer that owns all formatting/coloring/line-buffering. Adjacent unconsumed `TextDelta`s merge in the queue so a slow UI never accumulates a delta backlog. `AgentResult.trace` is maintained separately by `run_agent` and is not part of the event stream.
 
 ### Streaming, cancellation, and rendering (`model.py`, `output.py`)
 
 `ModelProvider` is a protocol with `complete_stream()`, which yields `ModelStreamEvent`s (`text_delta` / `completed`) and takes a `CancellationSignal`. `AnthropicProvider` runs a watcher thread that closes the HTTP stream when the signal fires; callers must re-check the signal after stream completion and map read failures to `ModelRequestAborted` when the signal is set. `MockProvider` is the test double.
 
-`TextDelta`s arrive as raw deltas; the consumer's `StreamLineBuffer` (in `wire.py`) buffers them into whole lines — prompt_toolkit must never receive a partial line, and the buffer is only `finish()`ed at turn end. The `OutputChunk` type in `output.py` (plain text + prompt_toolkit style fragments) is the display unit inside the REPL panel, transcript persistence, and resume replay.
+`TextDelta`s arrive as raw deltas; each consumer buffers them itself. The `OutputChunk` type in `output.py` (plain text + prompt_toolkit style fragments) is the display unit for scrollback commits, transcript persistence, and resume replay. The REPL does not buffer into whole lines via `StreamLineBuffer` — it uses `LiveArea.feed_stream()`, which commits *closed paragraphs* (blank-line delimited) immediately and keeps only the open paragraph tail in the Live area. `StreamLineBuffer` remains in `wire.py` for consumers that need line-oriented output.
 
 ### Tools (`tools/` package)
 
@@ -63,7 +63,7 @@ File-edit safety lives in `agent.py`, not in the tool functions: before an ask/a
 
 ### Interactive shell (`interactive.py`, `prompt_ui.py`)
 
-The REPL is a full-screen prompt_toolkit `Application` (output transcript pane + input line + status bar) running on the main thread; `run_agent` runs on a worker thread. Output crosses threads via `loop.call_soon_threadsafe`; the output pane auto-scrolls only when the user is at the bottom (up-scroll pauses it). Questions the worker needs answered (confirmations, choices) go through `prompt_ui.set_terminal_asker()` → `ask_in_app` via `run_coroutine_threadsafe`; one-shot mode (no asker injected) falls back to `typer` prompts. ESC sets `state.abort_event`.
+The REPL is a **scrollback + Live** design: `PromptSession.prompt_async()` owns the terminal and redraws only the input line, the `message` area (Live: spinner + elapsed, active tool, pending approval preview, tail of the open paragraph) and `bottom_toolbar`. Everything already finished is written to native terminal scrollback via `sys.stdout.write` inside `patch_stdout`'s `StdoutProxy` — never `print_formatted_text`, which schedules an un-awaited `run_in_terminal` and corrupts prompt input. `run_agent` runs on a worker thread; its wire sink only does `loop.call_soon_threadsafe`, and an async `_consume_events()` coroutine does the actual rendering on the UI thread. Questions the worker needs answered (confirmations, choices) are rendered *inside the Live area* through `prompt_ui.set_terminal_asker()` → `_ask_in_app` via `run_coroutine_threadsafe`, with `_submit_text` feeding the answer into the pending future; writing them to stdout instead would detach prompt input and deadlock. One-shot mode (no asker injected) falls back to `typer` prompts. ESC sets `state.abort_event`, shift+tab cycles permission mode.
 
 ### Persistence & memory
 

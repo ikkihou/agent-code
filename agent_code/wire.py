@@ -60,10 +60,20 @@ class PromptEcho:
 
 @dataclass(frozen=True)
 class ToolCallStarted:
-    """一次工具调用开始。args_preview 是截断后的参数预览（仅展示用）。"""
+    """一次工具调用开始（Live 区显示 spinner）。args_preview 是截断后的参数预览。"""
 
+    call_id: str
     name: str
     args_preview: str
+
+
+@dataclass(frozen=True)
+class ToolCallCompleted:
+    """一次工具调用结束（spinner 落定，前端提交回执行到 scrollback）。"""
+
+    call_id: str
+    name: str
+    is_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,7 +92,27 @@ class CommandPreview:
     command: str
 
 
-WireEvent = TextDelta | Line | PromptEcho | ToolCallStarted | DiffPreview | CommandPreview
+@dataclass(frozen=True)
+class TurnStarted:
+    """一个 turn 开始（前端启动 Live 区 spinner/计时）。"""
+
+
+@dataclass(frozen=True)
+class TurnEnded:
+    """一个 turn 结束（前端收尾：提交流式全文、落定 spinner）。"""
+
+
+WireEvent = (
+    TextDelta
+    | Line
+    | PromptEcho
+    | ToolCallStarted
+    | ToolCallCompleted
+    | DiffPreview
+    | CommandPreview
+    | TurnStarted
+    | TurnEnded
+)
 
 # 消费端回调：接收一批事件（保证按 send 顺序排列）。
 EventSink = Callable[[list[WireEvent]], None]

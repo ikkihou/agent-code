@@ -32,7 +32,7 @@ from .prompt_ui import (
 )
 from .runtime import RuntimeState
 from .tools import ToolContext, ToolRegistry
-from .wire import CommandPreview, DiffPreview, Line, ToolCallStarted, Wire
+from .wire import CommandPreview, DiffPreview, Line, ToolCallCompleted, ToolCallStarted, Wire
 
 
 def _error_block(tool_call_id: str, content: str) -> dict[str, Any]:
@@ -162,7 +162,9 @@ def execute_one_tool_call(
     wire: Wire,
 ) -> dict[str, Any]:
     """跑单个工具，返回一个 tool_result block。"""
-    wire.send(ToolCallStarted(name=call.name, args_preview=_format_call_args(call.arguments)))
+    wire.send(
+        ToolCallStarted(call_id=call.id, name=call.name, args_preview=_format_call_args(call.arguments))
+    )
 
     request = PermissionRequest(
         tool_name=call.name,
@@ -205,6 +207,7 @@ def execute_one_tool_call(
 
     # allow / ask 通过：执行
     result = tools.run(call, ctx)
+    wire.send(ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error))
     if not result.is_error:
         for h in run_hooks(
             "PostToolUse",

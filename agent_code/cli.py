@@ -32,6 +32,7 @@ from .wire import (
     Line,
     PromptEcho,
     TextDelta,
+    ToolCallCompleted,
     ToolCallStarted,
     Wire,
 )
@@ -114,6 +115,8 @@ class _ConsoleWireSink:
                 console.print(f"> {event.text}")
             elif isinstance(event, ToolCallStarted):
                 console.print(f"tool_call: {event.name} {event.args_preview}")
+            elif isinstance(event, ToolCallCompleted):
+                console.print(f"✓ {event.name}" + (" (error)" if event.is_error else ""))
             elif isinstance(event, DiffPreview):
                 console.print(f"\nDiff for {event.path}:", markup=True)
                 from .prompt_ui import render_diff
