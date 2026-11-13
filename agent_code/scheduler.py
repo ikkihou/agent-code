@@ -17,7 +17,8 @@ from queue import Empty, Queue
 
 
 class CronJob:
-    """一个定时任务。id 是 12 位 hex，slash 是到点要重放的命令 /prompt"""
+    """One scheduled job. id is a 12-char hex string; slash is the command/prompt to
+    replay when the job comes due."""
 
     def __init__(
         self,
@@ -41,14 +42,15 @@ _CRON_FILE = ".agent/cron.json"
 
 
 def _cron_path(cwd: Path) -> Path:
-    """返回 .agent/cron.json 路径，自动创建 .agent/ 目录。"""
+    """Return the .agent/cron.json path, creating the .agent/ directory as needed."""
     agent_dir = cwd / ".agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
     return agent_dir / "cron.json"
 
 
 def _load_jobs(cwd: Path) -> list[CronJob]:
-    """从 .agent/cron.json 加载持久化 job 列表。文件不存在或损坏返回 []。"""
+    """Load the persisted job list from .agent/cron.json. Returns [] when the file is
+    missing or corrupt."""
     fpath = _cron_path(cwd)
     if not fpath.exists():
         return []
@@ -70,12 +72,12 @@ def _load_jobs(cwd: Path) -> list[CronJob]:
                 )
             )
         except (KeyError, TypeError):
-            continue  # 跳过损坏的 job，不让一条坏数据阻塞调度器
+            continue  # Skip corrupt jobs instead of letting one bad record stall the scheduler
     return jobs
 
 
 def _save_jobs(cwd: Path, jobs: list[CronJob]) -> None:
-    """把当前 job 列表序列化到 .agent/cron.json。"""
+    """Serialize the current job list to .agent/cron.json."""
     fpath = _cron_path(cwd)
     data = {
         "jobs": [
@@ -94,17 +96,19 @@ def _save_jobs(cwd: Path, jobs: list[CronJob]) -> None:
 
 
 class CronScheduler:
-    """REPL 内 cron 调度器。
+    """Cron scheduler for the REPL.
 
-    - 后台线程只负责到点把 prompt 放进 pending queue，绝不直接调用 run_agent
-    - REPL 主循环在每次 run_once 返回后 drain queue，把待处理 prompt 作为新一轮用户输入
-    - 调度器只在 REPL 模式激活；一次性模式不创建后台线程
+    - The background thread only moves due prompts into a pending queue; it never
+      calls run_agent directly
+    - After each run_once returns, the REPL main loop drains the queue and treats
+      pending prompts as new user input
+    - The scheduler is active in REPL mode only; one-shot mode starts no thread
     """
 
     def __init__(self, cwd: Path) -> None:
         self.cwd = cwd
         self._jobs: list[CronJob] = _load_jobs(cwd)
-        self._pending: Queue[str] = Queue()  # 到点排队的 prompt
+        self._pending: Queue[str] = Queue()  # prompts queued once due
         self._running = False
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -149,7 +153,7 @@ class CronScheduler:
         return items
 
     def _check_due(self) -> None:
-        """扫描一次全部 job，把到点 job 的 prompt 放进 pending 队列并更新 last_run_at。"""
+        """Scan every job once, queue the prompts of due jobs and update last_run_at."""
         now_ts = datetime.now(timezone.utc).timestamp()
         dirty = False
         with self._lock:
@@ -183,7 +187,7 @@ class CronScheduler:
             self._check_due()
 
     def start(self) -> None:
-        """启动后台调度线程（daemon，随主进程退出自动回收）。"""
+        """Start the background scheduling thread (daemon: reaped when the main process exits)."""
         if self._running:
             return
         self._running = True
@@ -192,7 +196,7 @@ class CronScheduler:
         self._thread.start()
 
     def stop(self) -> None:
-        """停止调度器。不 join——daemon thread 会在主线程退出时回收。"""
+        """Stop the scheduler. No join -- the daemon thread is reaped when the main thread exits."""
         if not self._running:
             return
         self._running = False

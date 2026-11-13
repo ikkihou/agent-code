@@ -1,4 +1,4 @@
-"""web工具：web_search, web_fetch"""
+"""Web tools: web_search, web_fetch."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ WEB_SEARCH_TIMEOUT_S = 15.0
 
 
 def _validate_url(url: str) -> None:
-    # URL 校验是 web_fetch 的第一道门，所有失败都在 httpx 真正发请求之前。
+    # URL validation is web_fetch's first gate: every failure happens before httpx
+    # actually sends a request.
     if len(url) > WEB_URL_MAX_LENGTH:
         raise ValueError(f"url too long: {len(url)} > {WEB_URL_MAX_LENGTH}")
     parsed = urlparse(url)
@@ -37,7 +38,7 @@ def _validate_url(url: str) -> None:
 
 def _html_to_markdown(html: str) -> str:
     converter = html2text.HTML2Text()
-    converter.body_width = 0  # 关掉硬换行，保留模型上下文里更长的段落。
+    converter.body_width = 0  # Disable hard wrapping, keep longer paragraphs in context.
     converter.ignore_images = True
     converter.ignore_emphasis = False
     return converter.handle(html).strip()
@@ -75,8 +76,8 @@ def web_fetch(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def _unwrap_ddg_url(href: str) -> str:
-    # DuckDuckGo HTML 端点返回的 href 形如 /l/?uddg=ENCODED_URL&rut=...
-    # 这里把真实目标 URL 提出来，让模型看到的就是最终落地址。
+    # DuckDuckGo's HTML endpoint returns hrefs like /l/?uddg=ENCODED_URL&rut=...
+    # Extract the real target URL so the model sees the final landing address.
     if "/l/" not in href:
         return href
     if href.startswith("//"):
@@ -92,8 +93,9 @@ def _unwrap_ddg_url(href: str) -> str:
 
 
 def _duckduckgo_search(query: str, max_results: int) -> list[dict[str, str]]:
-    # DuckDuckGo 没有官方 API。HTML 端点是教学版的兜底；
-    # 想稳定就换成 Tavily/Serper/Brave 等带 API key 的搜索 provider。
+    # DuckDuckGo has no official API. The HTML endpoint is the teaching-grade
+    # fallback; switch to an API-key provider such as Tavily/Serper/Brave for
+    # reliability.
     headers = {"User-Agent": WEB_USER_AGENT}
     with httpx.Client(timeout=WEB_SEARCH_TIMEOUT_S, follow_redirects=True) as client:
         resp = client.get(

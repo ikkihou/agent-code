@@ -23,15 +23,16 @@ from .runtime import PromptAsker, PromptFallback, PromptRequest, RuntimeState
 def _ask_request(
     state: RuntimeState, request: PromptRequest, fallback: PromptFallback
 ) -> Any:
-    """worker 要问用户时走这里。交互 shell 注入了 asker → 丢回主线程事件循环问；
-    one-shot 没注入（state.asker is None）→ 走 typer fallback 直接问。"""
+    """Where the worker asks the user something. The interactive shell injects an asker,
+    so the question is posted back to the main-thread event loop; one-shot mode injects
+    nothing (state.asker is None) and asks directly through the typer fallback."""
     if state.asker is not None:
         return state.asker(request)
     return fallback()
 
 
 def render_diff(old: str, new: str, path: str) -> str:
-    """用 difflib 生成 unified diff，给增删行加 rich markup 着色。"""
+    """Build a unified diff with difflib and color added/removed lines with rich markup."""
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
     diff_lines = difflib.unified_diff(
@@ -57,7 +58,7 @@ def render_diff(old: str, new: str, path: str) -> str:
 
 
 def confirm_edit(state: RuntimeState, path: str) -> bool:
-    """让用户确认是否应用这次编辑，默认不应用。"""
+    """Ask the user whether to apply this edit; defaults to no."""
     return bool(
         _ask_request(
             state,
@@ -72,7 +73,7 @@ def confirm_edit(state: RuntimeState, path: str) -> bool:
 
 
 def confirm_command(state: RuntimeState, command: str) -> bool:
-    """让用户确认是否执行这条 bash 命令，默认不执行。"""
+    """Ask the user whether to run this bash command; defaults to no."""
     return bool(
         _ask_request(
             state,
@@ -88,7 +89,7 @@ def confirm_command(state: RuntimeState, command: str) -> bool:
 
 
 def confirm_tool_use(state: RuntimeState, tool_name: str, detail: str) -> bool:
-    """让用户确认非 bash 的 ask 类工具，例如访问外部网络。"""
+    """Ask the user whether to allow a non-bash ask-class tool, e.g. external network access."""
     return bool(
         _ask_request(
             state,

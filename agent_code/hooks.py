@@ -42,11 +42,11 @@ def load_hooks(cwd: Path) -> dict[str, list[dict[str, Any]]]:
 
 
 def _matches(tool_name: str, matcher: str) -> bool:
-    """matcher 和 tool_name 的匹配规则：
-    - "*" 匹配所有工具
-    - 单值精确匹配
-    - "a|b" 多值匹配
-    不做正则和支持通配符，保持简单可预期。"""
+    """How matcher is matched against tool_name:
+    - "*" matches every tool
+    - a single value matches exactly
+    - "a|b" matches any of several values
+    No regex or glob support -- keep it simple and predictable."""
     if matcher == "*":
         return True
 
@@ -90,11 +90,13 @@ def run_hooks(
     cwd: Path,
     tool_result: str = "",
 ) -> list[dict[str, Any]]:
-    """在给定 event 下执行所有匹配 tool_name 的 hooks。
-    返回一个 list，每个元素是 {"event": ..., "tool": ..., "success": bool, "output": str}。
-    空 list 表示没有匹配到 hook。
+    """Run every hook matching tool_name for the given event.
+    Returns a list whose elements are
+    {"event": ..., "tool": ..., "success": bool, "output": str}.
+    An empty list means no hook matched.
 
-    这是 harness 的 hook dispatch 入口——agent.py 在工具前后调用本函数。"""
+    This is the harness hook dispatch entry point -- agent.py calls it before and
+    after each tool run."""
     config = load_hooks(cwd)
     entries = config.get(event, [])
     results: list[dict[str, Any]] = []
@@ -102,7 +104,7 @@ def run_hooks(
         matcher = entry.get("matcher", "*")
         if not _matches(tool_name, matcher):
             continue
-        # 支持两种格式："run" 单命令，或 "hooks"[].command 多命令。
+        # Two accepted shapes: a single "run" command, or "hooks"[].command entries.
         commands: list[str] = []
         if "run" in entry:
             commands = [entry["run"]]
@@ -136,12 +138,13 @@ def run_hooks(
 def run_hooks_raw(
     event: str, payload: dict[str, Any], cwd: Path
 ) -> list[dict[str, Any]]:
-    """跑没有工具上下文的 hook（如 Stop）。payload 整个作为 stdin JSON 传给 hook。"""
+    """Run hooks that have no tool context (e.g. Stop). The whole payload is passed to
+    the hook as stdin JSON."""
     config = load_hooks(cwd)
     results: list[dict[str, Any]] = []
     for entry in config.get(event, []):
         matcher = entry.get("matcher", "*")
-        if matcher not in ("*", ""):  # Stop 没有 tool_name，只认 * / 空 matcher
+        if matcher not in ("*", ""):  # Stop has no tool_name; only * / empty match
             continue
         commands: list[str] = []
         if "run" in entry:

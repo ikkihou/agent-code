@@ -1,12 +1,15 @@
-"""工具调用执行层：单次工具调用的权限决策 → 确认/拦截 → 执行 → hooks。
+"""Tool call execution layer: permission decision -> confirm/intercept -> execute -> hooks
+for a single tool call.
 
-从 agent.py 拆出，承接 execute_one_tool_call 及其配套的 plan 边界与并行分组逻辑，
-让 run_agent 主循环只负责调度，不内联每种工具的特殊分支。
+Split out of agent.py: this module owns execute_one_tool_call plus the plan-boundary
+and parallel-grouping logic around it, leaving the run_agent main loop responsible
+only for scheduling instead of inlining a special branch per tool.
 
-输出约定：本模块只通过 ``Wire`` 发结构化事件（ToolCallStarted / DiffPreview /
-CommandPreview）——工具层只描述"发生了什么"，着色与行格式完全由前端决定；
-工具返回内容的 "observation" 不再发往终端——完整内容经 tool_result block 回填
-给模型。
+Output contract: this module emits structured events only through ``Wire``
+(ToolCallStarted / DiffPreview / CommandPreview) -- the tool layer only describes
+"what happened", while coloring and line formatting belong entirely to the frontend.
+The "observation" returned by a tool is no longer printed to the terminal; the full
+content goes back to the model in a tool_result block.
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from .wire import CommandPreview, DiffPreview, Line, ToolCallCompleted, ToolCall
 
 
 def _error_block(tool_call_id: str, content: str) -> dict[str, Any]:
-    """构造一个 error 性质的 tool_result block。"""
+    """Build an error-flavored tool_result block."""
     return {
         "type": "tool_result",
         "tool_use_id": tool_call_id,
@@ -46,7 +49,8 @@ def _error_block(tool_call_id: str, content: str) -> dict[str, Any]:
 
 
 def approve_plan(state: RuntimeState, plan_text: str) -> bool:
-    """plan 批准统一入口：确认则把模式切到 acceptEdits 并返回 True。"""
+    """Single entry point for plan approval: on confirmation, switch the mode to
+    acceptEdits and return True."""
     if confirm_plan(state, plan_text):
         state.permission_mode = "acceptEdits"
         return True
@@ -56,11 +60,13 @@ def approve_plan(state: RuntimeState, plan_text: str) -> bool:
 def _edit_preflight(
     call: ToolCall, ctx: ToolContext
 ) -> tuple[tuple[str, str, str] | None, str | None]:
-    """file_write/file_edit 的读前校验 + diff 预览构造。
+    """Read-before-edit validation plus diff preview construction for
+    file_write/file_edit.
 
     Returns:
-        (edit_preview, error_content)：preview 为 (path_str, old_content, new_content)；
-        error_content 非 None 表示校验失败，调用方应直接返回 error block。
+        (edit_preview, error_content): preview is (path_str, old_content, new_content);
+        a non-None error_content means validation failed and the caller should return
+        an error block directly.
     """
     path_str = call.arguments.get("file_path", "")
     if not path_str:
@@ -106,10 +112,11 @@ def _handle_ask(
     state: RuntimeState,
     wire: Wire,
 ) -> dict[str, Any] | None:
-    """ask 模式下按工具类型分发确认 UI。
+    """Dispatch the confirmation UI by tool type in ask mode.
 
     Returns:
-        返回 block 表示流程到此终止（拒绝或被拦截）；返回 None 表示确认通过，继续执行。
+        A block ends the flow here (rejected or intercepted); None means confirmed and
+        execution continues.
     """
     if call.name in ("file_write", "file_edit") and edit_preview is not None:
         path_str, old_content, new_content = edit_preview
@@ -143,8 +150,9 @@ def _handle_ask(
 
 
 def _format_call_args(args: dict[str, Any]) -> str:
-    """工具参数预览可能很大（file_write 的内容、后面 v6 exit_plan_mode 的整段计划）。
-    长字符串只在展示预览里截断，完整参数仍照常传给工具。"""
+    """Tool argument previews can be large (file_write content, or the whole plan text
+    of v6's exit_plan_mode). Long strings are truncated in the display preview only;
+    the full arguments still reach the tool."""
     preview: dict[str, Any] = {}
     for key, value in args.items():
         if isinstance(value, str) and len(value) > 80:
@@ -161,7 +169,7 @@ def execute_one_tool_call(
     tools: ToolRegistry,
     wire: Wire,
 ) -> dict[str, Any]:
-    """跑单个工具，返回一个 tool_result block。"""
+    """Run a single tool and return one tool_result block."""
     wire.send(
         ToolCallStarted(call_id=call.id, name=call.name, args_preview=_format_call_args(call.arguments))
     )
@@ -188,24 +196,26 @@ def execute_one_tool_call(
                 wire.send(Line(f"plan rejected: {obs}"))
                 return _error_block(call.id, obs)
 
-    # 文件写前置校验（file_write/file_edit；acceptEdits 也要过校验，只是后面跳过确认 UI）
+    # File-write preflight (file_write/file_edit; acceptEdits must pass it too, it only
+    # skips the confirmation UI afterwards).
     edit_preview: tuple[str, str, str] | None = None
     if call.name in ("file_write", "file_edit") and decision.behavior != "deny":
         edit_preview, preflight_err = _edit_preflight(call, ctx)
         if preflight_err is not None:
             return _error_block(call.id, preflight_err)
 
-    # deny：直接返回 error，不弹 UI
+    # deny: return the error immediately, no UI.
     if decision.behavior == "deny":
         return _error_block(call.id, f"error: {decision.message}")
 
-    # ask：按工具类型分发确认 UI（confirm_* 已在 1.5 包了 _ask，自动借回终端）
+    # ask: dispatch the confirmation UI by tool type (the confirm_* helpers already wrap
+    # _ask, which routes the question back to the terminal).
     if decision.behavior == "ask":
         block = _handle_ask(call, edit_preview, state, wire)
         if block is not None:
             return block
 
-    # allow / ask 通过：执行
+    # allow / ask approved: execute.
     result = tools.run(call, ctx)
     wire.send(ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error))
     if not result.is_error:
@@ -227,8 +237,9 @@ def execute_one_tool_call(
 
 
 def partition_tool_calls(calls: list[ToolCall], tools: ToolRegistry) -> list[list[ToolCall]]:
-    """连续只读工具合成并行组；写工具截断、自成串行组。
-    例：[Read, Read, Write, Read] → [[Read, Read], [Write], [Read]]"""
+    """Group consecutive read-only tools into parallel batches; a write tool closes the
+    current group and forms its own serial batch.
+    Example: [Read, Read, Write, Read] -> [[Read, Read], [Write], [Read]]"""
     batches: list[list] = []
     current: list = []
     for call in calls:
@@ -236,10 +247,10 @@ def partition_tool_calls(calls: list[ToolCall], tools: ToolRegistry) -> list[lis
         if tool is not None and tool.is_read_only:
             current.append(call)
         else:
-            if current:  # 写工具前先收掉前面攒的只读组
+            if current:  # Close the read-only group accumulated so far before the write.
                 batches.append(current)
                 current = []
-            batches.append([call])  # 写/未知工具单独一组（未知 fail-closed 当串行）
+            batches.append([call])  # Write/unknown tools get their own batch (unknown fail-closed, treated as serial)
     if current:
         batches.append(current)
     return batches
@@ -252,7 +263,7 @@ def execute_plan_boundary_calls(
     tools: ToolRegistry,
     wire: Wire,
 ) -> list[dict[str, Any]] | None:
-    """plan 模式下，exit_plan_mode 是 turn boundary：同轮其它工具不执行。"""
+    """In plan mode, exit_plan_mode is a turn boundary: no other tool in the same turn runs."""
     if state.permission_mode != "plan":
         return None
     exit_call = next((call for call in calls if call.name == "exit_plan_mode"), None)

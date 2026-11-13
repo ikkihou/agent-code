@@ -100,9 +100,11 @@ def run_once(
 
 
 class _ConsoleWireSink:
-    """one-shot 前端：wire 事件的同步消费者，直接渲染到终端。
+    """one-shot frontend: a synchronous consumer of wire events that renders straight
+    to the terminal.
 
-    run_agent 在同线程调用 send → notify 为空 → sink 立刻收到事件批。
+    run_agent calls send on this same thread and notify is empty, so the sink receives
+    each event batch immediately.
     """
 
     def send(self, events: list[object]) -> None:
@@ -145,24 +147,24 @@ def main_command(
         "--permission-mode",
         help="Permission mode: default, acceptEdits, plan",
     ),
-    resume: str | None = typer.Option(None, "--resume", help="按 session id 恢复指定会话"),
-    continue_: bool = typer.Option(False, "--continue", "-c", help="恢复 cwd 最近一次会话"),
+    resume: str | None = typer.Option(None, "--resume", help="resume the given session id"),
+    continue_: bool = typer.Option(False, "--continue", "-c", help="resume the latest session in cwd"),
 ) -> None:
 
-    # 启动时只解析一次 cwd，让整次运行共享同一个工作目录。
+    # Resolve cwd once at startup so the whole run shares one working directory.
     resolved_cwd = cwd.resolve()
 
-    # 加载对话记录
+    # Load the conversation record.
     session: Session | None = None
     if continue_:
         session = Session.load_latest(resolved_cwd)
         if session is None:
-            console.print("[red]没有找到历史会话，无法 --continue。[/red]")
+            console.print("[red]No earlier session found, cannot --continue.[/red]")
             raise typer.Exit(code=1)
     elif resume:
         session = Session.load_by_id(resolved_cwd, resume)
         if session is None:
-            console.print(f"[red]找不到 session: {resume}[/red]")
+            console.print(f"[red]session not found: {resume}[/red]")
             raise typer.Exit(code=1)
 
     ## Create and start cron scheduler
@@ -170,12 +172,13 @@ def main_command(
     scheduler.start()
     slash_registry = default_slash_registry()
 
-    # 构造系统提示词
+    # Build the system prompt.
     system_prompt = build_system_prompt(cwd)
 
     def run_user_input(line: str) -> None:
-        """统一处理用户输入：先走 slash dispatch，未命中再进入 Agent Loop。
-        REPL 用户输入和 cron pending prompt 都必须走这个入口。"""
+        """Single entry point for user input: try slash dispatch first, then enter the agent
+        loop when nothing matched. Both REPL input and cron pending prompts come
+        through here."""
         nonlocal session
         slash_result = dispatch_slash(
             line,
@@ -192,7 +195,7 @@ def main_command(
             if slash_result.message:
                 console.print(slash_result.message, markup=slash_result.markup)
             if slash_result.should_query:
-                # 把 slash 展开的 prompt 作为新一轮用户输入跑 Agent Loop
+                # Run the prompt expanded by the slash command as a new user input.
                 if session is None:
                     session = Session.create(resolved_cwd)
                 run_once(
@@ -224,13 +227,13 @@ def main_command(
             scheduler=scheduler,
         )
 
-    # (1) 一次性调用分支
+    # (1) One-shot branch.
     text = prompt.strip()
     if text:
         run_user_input(text.strip())
         return
 
-    # (2) REPL 分支——命令后面没跟 prompt，走下面交互循环
+    # (2) REPL branch -- no prompt after the command, fall into the interactive loop below.
     if session is None:
         session = Session.create(resolved_cwd)
 
@@ -278,13 +281,16 @@ def main_command(
 
 
 def _ensure_utf8_stdio() -> None:
-    """把标准流切到 UTF-8，避免中文 Windows 下按 GBK 编码写出时崩溃。
+    """Switch the standard streams to UTF-8 so writing as GBK cannot crash on Chinese
+    Windows.
 
-    真正控制台由 Python 的 WindowsConsoleIO 走宽字符，一般不出问题；出问题的是
-    重定向/管道到文件时 Python 用 locale 编码（GBK）写出，或子进程按 GBK 产出后
-    被我方按 UTF-8 解码——后者在 ``decode_subprocess_output`` 里已按
-    UTF-8 → 系统编码兜底。这里统一上游，连同 PYTHONIOENCODING 一起让整条
-    链路（含 bash/hooks/rg 子进程）说同一种编码。
+    The real console goes through Python's WindowsConsoleIO with wide characters and
+    is usually fine; the problems come from redirection/pipes to files, where Python
+    writes with the locale encoding (GBK), or from a child process emitting GBK while we
+    decode as UTF-8 -- the latter is already handled in ``decode_subprocess_output``
+    with a UTF-8 -> system encoding fallback. This normalizes the upstream side, and
+    together with PYTHONIOENCODING makes the whole chain (bash/hooks/rg children
+    included) speak one encoding.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -294,7 +300,8 @@ def _ensure_utf8_stdio() -> None:
             reconfigure(encoding="utf-8", errors="replace")
         except (ValueError, OSError):
             continue
-    # 让子进程（bash / hooks / rg）也按 UTF-8 产出，和上面的解码约定一致。
+    # Make child processes (bash / hooks / rg) emit UTF-8, matching the decoding
+    # convention above.
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 

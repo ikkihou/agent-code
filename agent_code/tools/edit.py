@@ -1,4 +1,4 @@
-"""文件写入/编辑工具：file_write、file_edit。"""
+"""File write/edit tools: file_write, file_edit."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from .core import Tool, ToolContext
 
 
 def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
-    """整文件覆盖写入。前置校验由 agent.py 的拦截块完成。"""
+    """Overwrite a whole file. Upfront validation happens in agent.py's intercept block."""
     path_str = args.get("file_path", "")
     content = args.get("content", "")
 
@@ -23,7 +23,8 @@ def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
         return f"error: {e}"
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 内容由模型给出（str），统一按 UTF-8 落盘；老文件按容错读法做备份。
+    # The model supplies the content (str), always persisted as UTF-8; existing
+    # files are backed up using the tolerant read path.
     if path.exists():
         try:
             old, _ = read_text_file(path)
@@ -37,7 +38,7 @@ def file_write(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
-    """字符串替换编辑。前置校验在 agent.py 拦截块里完成。"""
+    """String-replacement edit. Upfront validation happens in agent.py's intercept block."""
     path_str = args.get("file_path", "")
     old_string = args.get("old_string", "")
     new_string = args.get("new_string", "")
@@ -50,15 +51,17 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
         return f"error: {exc}"
 
     try:
-        # 按候选编码容错读（源文件可能是 GBK），并记住实际编码以便原样写回——
-        # 否则一次编辑就会把 GBK 文件静默改写成 UTF-8。
+        # Read tolerantly over the candidate encodings (the file may be GBK) and
+        # remember the actual encoding so we write it back unchanged -- otherwise one
+        # edit would silently rewrite a GBK file as UTF-8.
         content, encoding = read_text_file(path)
         backup(ctx.cwd, path, content)
     except (FileNotFoundError, IsADirectoryError) as exc:
         return f"error: {exc}"
 
-    # 防 race：agent.py 已经做过一次 apply_single_replace 算 diff，
-    # 如果 confirm 那一刻到现在 old_content 又被外部改过，这里会再兜一次。
+    # Race guard: agent.py already ran apply_single_replace to build the diff; if an
+    # external writer touched old_content between the confirm prompt and now, this
+    # catches it once more.
     new_content, err = apply_single_replace(
         content, old_string, new_string, replace_all
     )
@@ -72,7 +75,7 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="file_write",

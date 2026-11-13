@@ -1,4 +1,4 @@
-"""Slash 命令补全器：输入行以 `/` 开头时列出可用命令。"""
+"""Slash command completer: lists available commands when the input line starts with `/`."""
 
 from __future__ import annotations
 

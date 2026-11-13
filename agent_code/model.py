@@ -82,11 +82,12 @@ class ModelProvider(Protocol):
 
 
 def _load_claude_settings() -> dict[str, str]:
-    """从 ~/.claude/settings.json 的 env 字段加载环境变量。"""
+    """Load environment variables from the env field of ~/.claude/settings.json."""
     settings_path = Path.home() / ".claude" / "settings.json"
     try:
-        # 显式 UTF-8：默认编码在中文 Windows 上是 GBK，setting 文件里若有中文注释
-        # 会抛 UnicodeDecodeError。errors="replace" 保证读坏也不至于整个启动失败。
+        # Explicit UTF-8: the default encoding is GBK on Chinese Windows, so a Chinese
+        # comment in the settings file would raise UnicodeDecodeError. errors="replace"
+        # keeps a bad read from taking the whole startup down.
         data = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
         return data.get("env", {})
     except (FileNotFoundError, json.JSONDecodeError, PermissionError, UnicodeError):
@@ -179,8 +180,9 @@ class MockProvider:
         if signal is not None and signal.is_set():
             raise ModelRequestAborted()
 
-        # 一个假模型，固定回一句话，够用来打通 CLI <-> Provider 这条边界。
-        response = ModelResponse(text="我是 MockProvider，你说了：mocking")
+        # A fake model that always returns a fixed line -- enough to exercise the
+        # CLI <-> Provider boundary.
+        response = ModelResponse(text="I am MockProvider; you said: mocking")
         yield ModelStreamEvent(type="text_delta", text=response.text)
 
         if signal is not None and signal.is_set():
@@ -195,7 +197,7 @@ class AnthropicProvider:
         max_tokens: int = 4096,
         base_url: str | None = None,
     ) -> None:
-        # 优先从 ~/.claude/settings.json 的 env 字段读取，其次回退到 os.environ。
+        # Prefer the env field of ~/.claude/settings.json, then fall back to os.environ.
         claude_env = _load_claude_settings()
 
         api_key = (
@@ -206,7 +208,8 @@ class AnthropicProvider:
         )
         if not api_key:
             raise RuntimeError(
-                "请先设置 ANTHROPIC_AUTH_TOKEN，例如：export ANTHROPIC_AUTH_TOKEN='sk-...'"
+                "ANTHROPIC_AUTH_TOKEN is not set. Set it first, e.g. "
+                "export ANTHROPIC_AUTH_TOKEN='sk-...'"
             )
 
         self.model = model

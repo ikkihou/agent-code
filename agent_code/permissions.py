@@ -7,7 +7,8 @@ from pathlib import Path
 
 @dataclass
 class PermissionRequest:
-    """一次工具调用的权限请求。工具只描述意图，是否执行交给 harness 决定。"""
+    """A permission request for one tool call. Tools only state intent; the harness
+    decides whether they run."""
 
     tool_name: str
     args: dict
@@ -17,13 +18,14 @@ class PermissionRequest:
 
 @dataclass
 class PermissionDecision:
-    """权限引擎的决策结果。behavior 是 allow / ask / deny 之一。"""
+    """The permission engine's decision. behavior is one of allow / ask / deny."""
 
     behavior: str  # "allow" | "ask" | "deny"
-    message: str | None = None  # deny 或 ask 时的说明文字
+    message: str | None = None  # explanation shown for deny or ask
 
 
-# 教学版危险命令列表。正则只是兜底，不是完整 shell sandbox。
+# Teaching-grade list of dangerous commands. These regexes are a backstop, not a
+# complete shell sandbox.
 _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"rm\s+-rf", "rm -rf is destructive"),
     (r"rm\s+-fr", "rm -fr is destructive"),
@@ -41,14 +43,15 @@ _DANGEROUS_PATTERNS: list[tuple[str, str]] = [
 
 
 def _is_dangerous(command: str) -> str | None:
-    """检查命令是否匹配危险模式。返回 None 表示安全，返回字符串表示危险原因。"""
+    """Check a command against the dangerous patterns. None means safe; a string is
+    the reason it is dangerous."""
     for pattern, reason in _DANGEROUS_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return reason
     return None
 
 
-# 只读工具白名单——这些工具默认 allow，不走 ask 弹窗
+# Read-only tool allowlist -- allowed by default, never show an ask prompt.
 _READONLY_TOOLS = frozenset(
     {
         "read_file",
@@ -66,7 +69,8 @@ _READONLY_TOOLS = frozenset(
     }
 )
 
-# default / acceptEdits 直接放行；plan 模式仍然 deny——plan 的硬约束就是只读。
+# default / acceptEdits let these through; plan mode still denies them -- plan mode's
+# hard constraint is read-only.
 _LOW_RISK_WRITES = frozenset(
     {
         "memory_write",
@@ -78,7 +82,8 @@ _LOW_RISK_WRITES = frozenset(
     }
 )
 
-# 交互和网络都不是写入，但仍需要用户知道 Agent 正在停下来问人或访问外部资源。
+# Interaction and network access are not writes, but the user should still know the
+# agent is pausing to ask a question or reaching out to external resources.
 _ASK_TOOLS = frozenset(
     {
         "ask_user_question",
@@ -89,7 +94,8 @@ _ASK_TOOLS = frozenset(
 
 
 def decide_permission(request: PermissionRequest) -> PermissionDecision:
-    """权限引擎入口：根据工具名、参数和当前模式决定 allow / ask / deny。"""
+    """Permission engine entry point: decide allow / ask / deny from the tool name,
+    arguments and current mode."""
     tool_name = request.tool_name
     args = request.args
     mode = request.mode
@@ -97,8 +103,8 @@ def decide_permission(request: PermissionRequest) -> PermissionDecision:
     if tool_name in _ASK_TOOLS:
         return PermissionDecision("ask")
 
-    # plan 模式：只允许只读工具；ask_user_question / web_* 仍会走 ask。
-    # 写类工具一律 deny。
+    # plan mode: only read-only tools are allowed; ask_user_question / web_* still go
+    # through ask. Every write tool is denied.
     if mode == "plan":
         if tool_name in _READONLY_TOOLS:
             return PermissionDecision("allow")
@@ -114,18 +120,19 @@ def decide_permission(request: PermissionRequest) -> PermissionDecision:
             f"plan mode: {tool_name} is not allowed. Only read-only tools can run in plan mode.",
         )
 
-    # 只读工具在所有模式下默认允许
+    # Read-only tools are allowed by default in every mode.
     if tool_name in _READONLY_TOOLS:
         return PermissionDecision("allow")
 
-    # bash 工具的危险命令检测——不管什么模式，危险命令先拦截
+    # Dangerous-command detection for the bash tool -- intercept first in every mode.
     if tool_name == "bash":
         command = args.get("command", "")
         danger_reason = _is_dangerous(command)
         if danger_reason:
             return PermissionDecision("deny", f"Dangerous command blocked: {danger_reason}")
 
-    # acceptEdits 模式：文件编辑跳过确认 UI，但安全校验仍在 agent.py 做
+    # acceptEdits mode: file edits skip the confirmation UI, but the safety checks in
+    # agent.py still run.
     if mode == "acceptEdits":
         if tool_name in ("file_write", "file_edit"):
             return PermissionDecision("allow")
@@ -133,5 +140,5 @@ def decide_permission(request: PermissionRequest) -> PermissionDecision:
     if tool_name in _LOW_RISK_WRITES:
         return PermissionDecision("allow")
 
-    # 默认模式：写文件和 bash 需要确认
+    # Default mode: file writes and bash require confirmation.
     return PermissionDecision("ask")

@@ -15,31 +15,34 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-# 四种记忆类型：user 是用户本身的事实，feedback 是用户反馈的做法，
-# project 是项目里此刻在做什么，reference 是外部系统指针。
+# Four memory types: user = durable facts about the user, feedback = how the user
+# wants work done, project = what is happening in the project right now,
+# reference = pointers to external systems.
 MEMORY_TYPES = ("user", "feedback", "project", "reference")
 
 
 @dataclass
 class MemoryEntry:
-    """一条记忆的完整数据。"""
+    """A complete memory record."""
 
     mem_type: str  # user / feedback / project / reference
-    title: str  # 人类可读标题
-    slug: str  # 文件名安全标识
-    body: str  # 正文（markdown）
-    file_path: str  # 相对于 cwd 的路径，如 .agent/memory/user/my-role.md
+    title: str  # human-readable title
+    slug: str  # filename-safe identifier
+    body: str  # body (markdown)
+    file_path: str  # path relative to cwd, e.g. .agent/memory/user/my-role.md
 
 
 def make_slug(title: str, max_len: int = 64) -> str:
-    """把 title 转成文件名安全的 slug：只留 ASCII 字母数字 + 短横。
-    title 是纯中文/纯日文等非 ASCII 内容时退到 hash slug，保证跨平台稳定。"""
+    """Turn a title into a filename-safe slug: keep ASCII alnum plus dashes.
+
+    When the title has no ASCII at all (e.g. pure Chinese/Japanese), fall back to a
+    hash slug so the name stays stable across platforms."""
     slug = title.lower().strip()
-    # 只保留 a-z / 0-9 / 空格 / 短横；中文、表情等都会被丢掉
+    # Keep only a-z / 0-9 / spaces / dashes; CJK, emoji and the like are dropped.
     slug = re.sub(r"[^a-z0-9\s-]", "", slug)
     slug = re.sub(r"[-\s]+", "-", slug)
     slug = slug.strip("-")[:max_len]
     if not slug:
-        # title 完全没 ASCII（例如纯中文）时，用 sha1 前 8 位兜底
+        # No ASCII at all in the title (e.g. pure Chinese): use the first 8 sha1 chars.
         slug = "mem-" + hashlib.sha1(title.encode("utf-8")).hexdigest()[:8]
     return slug

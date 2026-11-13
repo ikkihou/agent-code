@@ -17,8 +17,9 @@ from pathlib import Path
 
 from .fs_safety import decode_subprocess_output, truncate_output
 
-# 最小环境：子进程不继承完整用户环境，只给 shell 必需的四项。
-# bg_manager.py 也复用这一份，改这里即可同时影响同步/后台两条路径。
+# Minimal environment: child processes inherit only the four variables a shell
+# needs, not the full user environment. bg_manager.py reuses this dict, so changing
+# it here affects both the synchronous and background paths.
 MINIMAL_ENV = {
     "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
     "HOME": os.environ.get("HOME", ""),
@@ -26,13 +27,15 @@ MINIMAL_ENV = {
     "SHELL": os.environ.get("SHELL", "/bin/bash"),
 }
 
-# bash 输出上限：命令回显常比文件内容长，给得比普通 observation（8000）宽一些。
+# bash output cap: command echoes tend to be longer than file contents, so this is
+# more generous than the usual observation cap (8000).
 _BASH_OUTPUT_MAX_CHARS = 12000
 
 
 def run_sync(command: str, cwd: Path, timeout: int = 30) -> str:
     """
-    同步执行 shell 命令。cwd 锁定项目目录，超时后杀进程。
+    Run a shell command synchronously. cwd is pinned to the project directory and the
+    process is killed on timeout.
     """
     try:
         proc = subprocess.run(

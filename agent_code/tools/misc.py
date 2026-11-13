@@ -1,4 +1,4 @@
-"""基础/杂项工具：echo、system_date、ask_user_question。"""
+"""Basic and miscellaneous tools: echo, system_date, ask_user_question."""
 
 from __future__ import annotations
 
@@ -13,28 +13,31 @@ def echo(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def system_date(args: dict[str, Any], ctx: ToolContext) -> str:
-    # system_date 是模型看不到系统时钟时，需要向 harness 请求的能力。
+    # system_date exists because the model cannot see the system clock and has to ask
+    # the harness for it.
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def _ask_user_question(args: dict[str, Any], ctx: ToolContext) -> str:
-    """由 agent.py 拦截块处理——工具函数本身不读 stdin。
-    拦截块识别 call.name == "ask_user_question"，调 prompt_ui 后把结果作为 observation 返回。"""
+    """Handled by agent.py's intercept block -- the tool function itself never reads stdin.
+    The intercept block matches call.name == "ask_user_question", calls prompt_ui, and
+    feeds the answer back as the observation."""
     prompt = args.get("prompt", "")
     options = args.get("options", [])
     if not prompt:
         return "error: missing required argument 'prompt'"
     if not options or not isinstance(options, list):
         return "error: options must be a non-empty list"
-    # 实际交互在 agent.py 拦截块里完成——这里只返回占位。
-    # 正常路径不会走到这里，因为拦截块会先处理。
+    # The real interaction happens in agent.py's intercept block -- this is only a
+    # placeholder. The normal path never reaches here because the intercept block
+    # handles the call first.
     return (
         "error: ask_user_question must be handled by the harness, not executed directly"
     )
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="echo",

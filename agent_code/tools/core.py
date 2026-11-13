@@ -1,4 +1,4 @@
-"""工具包基础设施：Tool / ToolContext / ToolRegistry 等共享类型。"""
+"""Tools package infrastructure: shared types such as Tool / ToolContext / ToolRegistry."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class Tool:
 
 class ToolRegistry:
     def __init__(self) -> None:
-        # 注册表是工具名和 Python 函数之间的 harness 边界。
+        # The registry is the harness boundary between a tool name and its Python fn.
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -49,7 +49,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def run(self, call: ToolCall, context: ToolContext) -> ToolResult:
-        # 未知工具也返回 observation，不让 Agent Loop 崩掉。
+        # Unknown tools also return an observation so the agent loop never crashes.
         tool = self._tools.get(call.name)
         if tool is None:
             return ToolResult(

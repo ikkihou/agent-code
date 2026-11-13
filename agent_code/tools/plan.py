@@ -1,4 +1,4 @@
-"""计划模式工具：enter_plan_mode、exit_plan_mode。"""
+"""Plan mode tools: enter_plan_mode, exit_plan_mode."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def exit_plan_mode(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="enter_plan_mode",

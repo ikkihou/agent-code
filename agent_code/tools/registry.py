@@ -1,4 +1,5 @@
-"""聚合注册入口：default_tools() 组装所有功能子模块 + cron 工具。"""
+"""Aggregate registration entry point: default_tools() assembles every feature
+sub-module plus the cron tools."""
 
 from __future__ import annotations
 
@@ -7,8 +8,9 @@ from .core import Tool, ToolRegistry
 
 
 def default_tools() -> ToolRegistry:
-    # cron 工具保持延迟导入——cron_tools 依赖本包的 ToolContext，
-    # 函数体内导入是打破该循环依赖的关键（与重构前 tools.py 做法一致）。
+    # The cron tools stay lazily imported: cron_tools depends on this package's
+    # ToolContext, and importing inside the function body is what breaks that
+    # cycle (same approach as the pre-refactor tools.py).
     from ..cron_tools import cron_cancel, cron_create, cron_list
 
     registry = ToolRegistry()

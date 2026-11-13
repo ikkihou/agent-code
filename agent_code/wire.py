@@ -1,23 +1,29 @@
-"""Agent loop ↔ 前端的解耦通道（借鉴 kimi-cli 的 wire 架构）。
+"""Decoupling channel between the agent loop and the frontend (modelled on
+kimi-cli's wire architecture).
 
-run_agent / 工具层只通过 ``Wire.send()`` 发布结构化事件——不碰终端、不知道
-前端存在；前端（REPL 输出面板、one-shot 直打、未来的录制重放）是纯事件
-消费者：收到事件决定怎么渲染。
+run_agent and the tool layer only publish structured events through
+``Wire.send()`` -- they never touch the terminal and do not know a frontend exists.
+Frontends (REPL output panel, one-shot direct printing, future record/replay) are
+pure event consumers: they decide how to render each event.
 
-事件分两类：
+Events fall into two families:
 
-- **内容事件**：``TextDelta``（模型流式原文，队列内相邻 delta 原地合并，
-  生产快于消费时不积压）、``Line``（一行完整通知，可带 Rich markup）、
-  ``PromptEcho``（用户/cron 输入的回显块）。
-- **展示事件**：``ToolCallStarted`` / ``DiffPreview`` / ``CommandPreview``
-  ——工具层只描述"发生了什么"，着色、diff 样式、行格式完全由前端决定。
+- **Content events**: ``TextDelta`` (raw model streaming text; adjacent deltas merge
+  in place inside the queue, so a slow consumer never builds a backlog), ``Line``
+  (one complete notification line, optionally Rich markup), ``PromptEcho`` (the echo
+  block for user/cron input).
+- **Display events**: ``ToolCallStarted`` / ``DiffPreview`` / ``CommandPreview`` --
+  the tool layer only describes "what happened"; coloring, diff styling and line
+  formatting are entirely up to the frontend.
 
-Wire 的消费模型：生产端（worker 线程）send；消费端设置 ``sink``（接收事件
-批）。两种节奏：
+Wire consumption model: the producer (worker thread) sends; the consumer sets a
+``sink`` that receives event batches. Two pacing modes:
 
-- 同步消费（one-shot）：只设 ``sink``，send 时立刻 flush 给 sink；
-- 异步消费（REPL）：设 ``sink`` + ``notify``，send 只触发 notify（前端把它
-  调度到 UI 线程），UI 线程 drain() 后交给 sink——合并缓冲因此生效。
+- Synchronous consumption (one-shot): ``sink`` only, every send flushes to it
+  immediately;
+- Asynchronous consumption (REPL): ``sink`` plus ``notify``, send only triggers
+  notify (the frontend schedules it onto the UI thread), and the UI thread hands the
+  drained batch to the sink -- which is what makes the merge buffer effective.
 """
 
 # here put the import lib
@@ -28,23 +34,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
-# 事件类型
+# Event types
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class TextDelta:
-    """模型流式文本增量（未经行缓冲的原文，消费端自行攒行）。"""
+    """A model streaming text increment (raw text, not line-buffered; the consumer
+    assembles lines itself)."""
 
     text: str
 
 
 @dataclass(frozen=True)
 class Line:
-    """一行完整的 agent 通知（continue/final/hook/error 等）。
+    """One complete agent notification line (continue/final/hook/error, ...).
 
-    markup=True 表示 text 是 Rich markup，由前端各自渲染；
-    trace（AgentResult.trace）在 agent 侧另行记录，与事件无关。
+    markup=True means text is Rich markup for each frontend to render; trace
+    (AgentResult.trace) is recorded separately on the agent side and is unrelated to
+    events.
     """
 
     text: str
@@ -53,14 +61,16 @@ class Line:
 
 @dataclass(frozen=True)
 class PromptEcho:
-    """用户输入（或 cron 到点 prompt）的回显块，前端渲染成高亮 prompt 行。"""
+    """Echo block for user input (or a cron-due prompt); the frontend renders it as a
+    highlighted prompt line."""
 
     text: str
 
 
 @dataclass(frozen=True)
 class ToolCallStarted:
-    """一次工具调用开始（Live 区显示 spinner）。args_preview 是截断后的参数预览。"""
+    """A tool call starts (the Live area shows a spinner). args_preview is the truncated
+    argument preview."""
 
     call_id: str
     name: str
@@ -69,7 +79,8 @@ class ToolCallStarted:
 
 @dataclass(frozen=True)
 class ToolCallCompleted:
-    """一次工具调用结束（spinner 落定，前端提交回执行到 scrollback）。"""
+    """A tool call finishes (the spinner settles and the frontend commits the line to
+    scrollback)."""
 
     call_id: str
     name: str
@@ -78,7 +89,7 @@ class ToolCallCompleted:
 
 @dataclass(frozen=True)
 class DiffPreview:
-    """一次文件写入/编辑的 diff 预览（原文，前端负责着色渲染）。"""
+    """Diff preview for one file write/edit (raw text; the frontend handles coloring)."""
 
     path: str
     old: str
@@ -87,19 +98,19 @@ class DiffPreview:
 
 @dataclass(frozen=True)
 class CommandPreview:
-    """一条待确认的 bash 命令（原文，前端负责渲染）。"""
+    """A bash command awaiting confirmation (raw text; the frontend handles rendering)."""
 
     command: str
 
 
 @dataclass(frozen=True)
 class TurnStarted:
-    """一个 turn 开始（前端启动 Live 区 spinner/计时）。"""
+    """A turn starts (the frontend starts the Live spinner/timer)."""
 
 
 @dataclass(frozen=True)
 class TurnEnded:
-    """一个 turn 结束（前端收尾：提交流式全文、落定 spinner）。"""
+    """A turn ends (the frontend wraps up: commits the streamed text, settles the spinner)."""
 
 
 WireEvent = (
@@ -114,27 +125,30 @@ WireEvent = (
     | TurnEnded
 )
 
-# 消费端回调：接收一批事件（保证按 send 顺序排列）。
+# Consumer callback: receives a batch of events (guaranteed in send order).
 EventSink = Callable[[list[WireEvent]], None]
 
 
 # ---------------------------------------------------------------------------
-# 通道
+# Channel
 # ---------------------------------------------------------------------------
 
 
 class Wire:
-    """单向事件通道：生产端 send（可多线程），消费端经 sink 收批。
+    """One-way event channel: the producer sends (thread-safe), the consumer receives
+    batches through sink.
 
-    合并语义：send(TextDelta) 时若队尾尚未消费的也是 TextDelta，则原地拼接
-    而不是追加新事件——流式期间 UI 消费不及时也不会积压几百条 delta。
+    Merge semantics: when send(TextDelta) finds an unconsumed TextDelta at the tail, it
+    concatenates in place instead of appending a new event -- so a slow UI during
+    streaming never accumulates hundreds of deltas.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._pending: list[WireEvent] = []
-        # sink：事件批消费端；notify：有新事件时的唤醒钩子（前端把它调度到
-        # 自己的线程再 drain）。两者都为空时事件直接丢弃（fire-and-forget）。
+        # sink: consumes event batches; notify: wake-up hook fired whenever an event
+        # arrives (the frontend schedules its own drain on its thread). With both unset,
+        # events are dropped (fire-and-forget).
         self.sink: EventSink | None = None
         self.notify: Callable[[], None] | None = None
 
@@ -154,28 +168,30 @@ class Wire:
             return
         sink = self.sink
         if sink is not None:
-            # 同步消费：立刻 flush（one-shot / 测试场景）。
+            # Synchronous consumption: flush right away (one-shot / test scenarios).
             batch = self.drain()
             if batch:
                 sink(batch)
 
     def drain(self) -> list[WireEvent]:
-        """原子取走全部待消费事件（保持 send 顺序）。"""
+        """Atomically take every pending event (preserving send order)."""
         with self._lock:
             batch, self._pending = self._pending, []
             return batch
 
 
 # ---------------------------------------------------------------------------
-# 流式行缓冲（消费端用）
+# Streaming line buffer (consumer side)
 # ---------------------------------------------------------------------------
 
 
 class StreamLineBuffer:
-    """把 TextDelta 原文攒成完整行的缓冲——由前端持有，不属于 agent。
+    """Buffer that assembles raw TextDelta text into whole lines -- held by the
+    frontend, not by the agent.
 
-    agent 现在只发原始 delta；行边界是渲染关注点（prompt_toolkit 不能被
-    覆写半行、one-shot 要整行打印），所以挪到消费端。
+    The agent only emits raw deltas now; line boundaries are a rendering concern
+    (prompt_toolkit must not overwrite half a line, one-shot wants whole lines), so
+    that logic moved to the consumer.
     """
 
     def __init__(self, on_line: Callable[[str], None]) -> None:

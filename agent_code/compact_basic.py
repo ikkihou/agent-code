@@ -13,14 +13,15 @@ from typing import Any
 
 
 def compact(messages: list[dict[str, Any]], keep: int = 8) -> list[dict[str, Any]]:
-    """确定性压缩消息历史。不调用LLM
+    """Deterministic compression of the message history. Never calls an LLM.
 
-    返回三段拼接：
-    1. pinned: 前2两条（定义session的任务，不能丢失）
-    2. compressed: 一条概括中间信息的摘要 user message
-    3. working: 最后 keep 条 （最近的交互，保持完整）
+    Returns three concatenated parts:
+    1. pinned: the first 2 messages (they define the session's task; never dropped)
+    2. compressed: one summary user message covering the middle
+    3. working: the last `keep` messages (recent interaction, kept intact)
 
-    如果消息总数 <= keep + 2， 不做压缩，直接返回原列表
+    When the total message count is <= keep + 2, nothing is compressed and the
+    original list is returned as-is.
     """
 
     pin_count = 2
@@ -35,7 +36,7 @@ def compact(messages: list[dict[str, Any]], keep: int = 8) -> list[dict[str, Any
 
 
 def _build_compressed_block(msgs: list[dict[str, Any]]) -> dict[str, Any]:
-    """扫描被压缩的消息，提取结构化统计。"""
+    """Scan the messages being compressed and extract structured statistics."""
     total = len(msgs)
     tool_names: set[str] = set()
     tool_count = 0
@@ -46,7 +47,8 @@ def _build_compressed_block(msgs: list[dict[str, Any]]) -> dict[str, Any]:
 
     for msg in msgs:
         content = msg.get("content")
-        # 识别上一轮 compact 自己写进来的 <compacted-history> 块，单独保留
+        # Detect a <compacted-history> block written by a previous compact pass and
+        # keep it verbatim.
         if isinstance(content, str) and content.startswith("<compacted-history>"):
             previous_summary = content
             continue
@@ -57,13 +59,13 @@ def _build_compressed_block(msgs: list[dict[str, Any]]) -> dict[str, Any]:
                 continue
             btype = block.get("type", "")
             if btype == "tool_use":
-                # assistant 消息里的工具调用请求
+                # A tool-use request inside an assistant message.
                 tool_count += 1
                 name = block.get("name", "")
                 if name:
                     tool_names.add(name)
                 args = block.get("input", {}) or {}
-                # 分类统计文件操作和命令
+                # Bucket file operations and commands separately.
                 if name in ("read_file",) and args.get("path"):
                     files_read.add(str(args["path"]))
                 elif name in ("file_write", "file_edit") and args.get("file_path"):
@@ -72,11 +74,13 @@ def _build_compressed_block(msgs: list[dict[str, Any]]) -> dict[str, Any]:
                     cmd = str(args["command"])
                     commands.append(cmd[:80] + "..." if len(cmd) > 80 else cmd)
             elif btype == "tool_result":
-                # user 消息里的工具结果——不额外统计，tools-used 已经覆盖
+                # Tool results in user messages need no extra stats -- tools-used
+                # already covers them.
                 pass
 
     lines = ["<compacted-history>"]
-    # 把上一轮摘要原文嵌进来——读者能直观看到"这是第 N 轮压缩，前面的事还在"
+    # Embed the previous summary verbatim so a reader can see at a glance that this
+    # is compaction round N and earlier context still exists.
     if previous_summary:
         lines.append("  <previous-summary>")
         for ln in previous_summary.splitlines():

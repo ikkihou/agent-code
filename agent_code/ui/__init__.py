@@ -1,26 +1,30 @@
-"""交互式 REPL 的 UI 构建块。
+"""UI building blocks for the interactive REPL.
 
-scrollback + Live 式 REPL（借鉴 kimi-cli 的终端所有权模型）：
+A scrollback + Live REPL (modelled on kimi-cli's terminal-ownership model):
 
-- pt PromptSession（prompt_async）是终端唯一所有者：输入行 + message 区
-  （Live：spinner / 流式尾部 / 待确认预览）+ bottom_toolbar 状态栏。
-- 输入区带 Frame（show_frame）并与底部对齐：``layout._install_bottom_
-  anchored_layout`` 就地改造布局根——顶部插一个吸收剩余高度的 spacer，
-  buffer 窗口 dont_extend_height，输入框便始终钉在终端底边
-  （与 Claude Code 一致），而不是贴着 scrollback 尾部漂移。
-- 已完成的内容经 ``sys.stdout.write``（在 patch_stdout 内）落到原生终端
-  scrollback——原生滚动/选区/复制，pt 不再管理历史区，也没有全量重设
-  Document 的成本（正是输出面板性能档案里"正解方向"的落地）。
-- wire 事件：worker 线程 send → call_soon_threadsafe 桥 → UI 协程消费。
-  已完成事件立刻提交 scrollback；流式 TextDelta 只保留尾部几行显示在
-  Live 区，turn 结束时整段提交。
+- The pt PromptSession (prompt_async) solely owns the terminal: input line + message
+  area (Live: spinner / streaming tail / pending preview) + bottom_toolbar status bar.
+- The input area has a Frame (show_frame) and is pinned to the bottom:
+  ``layout._install_bottom_anchored_layout`` reshapes the layout root in place -- it
+  inserts a spacer at the top that absorbs the remaining height, sets
+  dont_extend_height on the buffer window, and the input box therefore stays pinned to
+  the bottom edge of the terminal (matching Claude Code) instead of floating after the
+  scrollback tail.
+- Finished content reaches the native terminal scrollback through
+  ``sys.stdout.write`` (inside patch_stdout) -- native scrolling/selection/copy, pt no
+  longer manages a history region, and there is no cost of resetting a whole Document
+  (this is the "right direction" from the output-panel performance notes, implemented).
+- wire events: the worker thread sends -> call_soon_threadsafe bridge -> UI coroutine
+  consumes. Finished events are committed to scrollback immediately; streaming
+  TextDelta keeps only the tail lines visible in the Live area and commits the whole
+  paragraph when the turn ends.
 
-按职责细分的子模块：
-- completer:  slash 命令补全器
-- scrollback: OutputChunk → ANSI → 原生终端 scrollback 的提交路径
-- live:       Live 区状态（spinner / 流式尾部 / 待确认预览）
-- events:     已完成 wire 事件 → OutputChunk 的翻译
-- prompts:    提问（confirm/choice）请求的渲染与答案解析
-- layout:     底部状态栏与"输入区钉底"布局改造
-- shell:      InteractiveShell REPL 主体（线程模型 + 输入循环）
+Sub-modules by responsibility:
+- completer:  slash command completer
+- scrollback: commit path OutputChunk -> ANSI -> native terminal scrollback
+- live:       Live area state (spinner / streaming tail / pending preview)
+- events:     translation of finished wire events -> OutputChunk
+- prompts:    rendering and answer parsing for prompt requests (confirm/choice)
+- layout:     bottom status bar and the "pin the input area to the bottom" reshaping
+- shell:      the InteractiveShell REPL itself (threading model + input loop)
 """

@@ -1,4 +1,4 @@
-"""长期记忆工具：memory_write、memory_recall。"""
+"""Long-term memory tools: memory_write, memory_recall."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from .core import Tool, ToolContext
 
 
 def _memory_write(args: dict[str, Any], ctx: ToolContext) -> str:
-    """写入一条长期记忆——工具函数只做薄包装。"""
+    """Write one long-term memory -- a thin wrapper over the tool function."""
     mem_type = args.get("type", "")
     title = args.get("title", "")
     body = args.get("body", "")
@@ -27,7 +27,7 @@ def _memory_write(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def _memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
-    """关键字搜索长期记忆——工具函数只做薄包装。"""
+    """Keyword search over long-term memory -- a thin wrapper over the tool function."""
     query = args.get("query", "")
     top_k = int(args.get("top_k", 5))
     if not query:
@@ -49,7 +49,7 @@ def _memory_recall(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="memory_write",

@@ -1,18 +1,19 @@
-"""prompt_toolkit ChoiceInput 试验。
+"""An experiment with prompt_toolkit's ChoiceInput.
 
-ChoiceInput().prompt() 会创建真实 Application 并绑定当前终端输出；在
-pytest 下 stdout 被捕获、没有真实 Windows 控制台，因此一跑就抛
-NoConsoleScreenBufferError（"Are you running cmd.exe?"）。模块顶层代码
-在 pytest 收集（import）阶段就会执行，所以交互演示绝不能放在顶层。
+ChoiceInput().prompt() creates a real Application bound to the current terminal
+output; under pytest stdout is captured and there is no real Windows console, so it
+raises NoConsoleScreenBufferError ("Are you running cmd.exe?") immediately. Module-level
+code runs during pytest collection (import), so the interactive demo must never live at
+the top level.
 
-- pytest 收集/运行时只执行下面不碰控制台的构造级断言；
-- 想真机试交互选择，请在真实终端里直接运行本文件：
+- pytest collection/runs only execute the console-free constructor assertions below;
+- to try the interactive picker for real, run this file directly in a real terminal:
       uv run python tests/test_prompt_toolkit.py
-  （方向键/Tab 选择、Enter 确认、Ctrl+C 中断。）
+  (arrow keys/Tab to select, Enter to confirm, Ctrl+C to cancel.)
 
-ChoiceInput 的 default 契约（见其文档字符串）：不传 default 时按第一个
-option 的 value 作为默认选择；该回退发生在 RadioList 构建期，属第三方
-控件内部行为，这里不做断言。
+ChoiceInput's default contract (see its docstring): without a default, the value of the
+first option becomes the default choice; that fallback happens while RadioList is built
+and is third-party widget behavior, so it is not asserted here.
 """
 
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
@@ -27,20 +28,20 @@ DEFAULT = "pizza"
 
 
 def test_choice_input_stores_message_options_default() -> None:
-    """构造 ChoiceInput 不触碰控制台，只把参数原样收进实例。"""
+    """Constructing ChoiceInput never touches the console; it just stores the arguments."""
     picker = ChoiceInput(message=MESSAGE, options=OPTIONS, default=DEFAULT)
 
     assert picker.message == MESSAGE
     assert list(picker.options) == OPTIONS
     assert picker.default == DEFAULT
-    # 每个 option 都是 (value, label) 二元组，value 即 prompt() 的返回值。
+    # Every option is a (value, label) pair; value is what prompt() returns.
     for value, label in picker.options:
         assert isinstance(label, str) and label
     assert picker.options[0][0] == DEFAULT
 
 
 def _demo() -> None:
-    """真实终端交互演示：让用户从菜单里选一道菜并打印结果。"""
+    """Real-terminal interactive demo: let the user pick a dish from the menu and print it."""
     result = ChoiceInput(
         message=MESSAGE,
         options=OPTIONS,

@@ -1,7 +1,8 @@
-"""scrollback+Live 式 REPL 的事件翻译与状态机测试。
+"""Event translation and state-machine tests for the scrollback+Live REPL.
 
-不触碰真实终端：LiveArea / event_to_chunks / 提问状态机都是纯函数或
-可注入驱动的状态对象；run_agent 用假 provider 驱动 wire 事件流。
+Never touches a real terminal: LiveArea / event_to_chunks / the prompt state machine
+are pure functions or injectable state objects, and run_agent is driven by a fake
+provider.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from agent_code.wire import (
 
 
 class _RecordingSink:
-    """同步 wire 消费者：记录收到的全部事件批（send 时立刻 flush）。"""
+    """Synchronous wire consumer: records every received event batch (flushes on send)."""
 
     def __init__(self) -> None:
         self.events: list[Any] = []
@@ -55,7 +56,7 @@ class _RecordingSink:
         self.events.extend(batch)
 
     def texts(self) -> list[str]:
-        """TextDelta 原文流（模拟消费端攒行前的样子）。"""
+        """The raw TextDelta stream (what it looks like before the consumer assembles lines)."""
         return [e.text for e in self.events if isinstance(e, TextDelta)]
 
 
@@ -88,7 +89,7 @@ class _FragmentedProvider:
 
 
 class _SequenceProvider:
-    """依次返回预设的 ModelResponse，用于驱动 run_agent 的多次请求。"""
+    """Returns the preset ModelResponses in order, driving several run_agent requests."""
 
     def __init__(self, responses: list[ModelResponse]) -> None:
         self._responses = list(responses)
@@ -107,19 +108,19 @@ class _SequenceProvider:
         yield ModelStreamEvent(type="completed", response=response)
 
 
-# ---- run_agent → wire 事件流 ------------------------------------------------
+# ---- run_agent -> wire event stream ----------------------------------------
 
 
 def test_run_agent_streaming_reaches_wire_as_text_delta(tmp_path: Path) -> None:
-    final_text = "第一行完整内容\n\n- **能力**：可以理解、生成和处理文本"
+    final_text = "First line complete\n\n- **Ability**: can read, generate and process text"
     provider = _FragmentedProvider(
-        ["第一行", "完整内容\n\n- **能", "力**：可以理解、", "生成和处理文本"],
+        ["First line", " complete\n\n- **Abi", "lity**: can read, ", "generate and process text"],
         final_text,
     )
     wire, sink = _collecting_wire()
 
     result = run_agent(
-        "介绍一下自己",
+        "introduce yourself",
         provider,
         ToolRegistry(),
         RuntimeState(),
@@ -128,7 +129,8 @@ def test_run_agent_streaming_reaches_wire_as_text_delta(tmp_path: Path) -> None:
     )
 
     assert result.final == final_text
-    # 原始 delta 原样上 wire；攒成整行是消费端 StreamLineBuffer 的职责。
+    # Raw deltas go onto the wire unchanged; assembling lines is the consumer's job
+    # (StreamLineBuffer).
     assert "".join(sink.texts()) == final_text
 
     lines: list[str] = []
@@ -136,13 +138,14 @@ def test_run_agent_streaming_reaches_wire_as_text_delta(tmp_path: Path) -> None:
     for text in sink.texts():
         line_buf.feed(text)
     line_buf.finish()
-    assert lines == ["第一行完整内容", "", "- **能力**：可以理解、生成和处理文本"]
+    assert lines == ["First line complete", "", "- **Ability**: can read, generate and process text"]
 
 
 def test_wire_merges_adjacent_text_deltas_in_queue() -> None:
-    """UI 消费不及时时，相邻 TextDelta 在队列内原地合并，不积压成百条事件。"""
+    """When the UI consumes slowly, adjacent TextDeltas merge in place inside the queue
+    instead of piling up hundreds of events."""
     wire = Wire()
-    # 只 notify、不设 sink：模拟 UI 还没来 drain 的异步消费模式。
+    # notify only, no sink: simulates async consumption where the UI has not drained yet.
     wire.notify = lambda: None
 
     for text in ["a", "b", "c"]:
@@ -152,7 +155,7 @@ def test_wire_merges_adjacent_text_deltas_in_queue() -> None:
 
 
 def test_wire_sync_sink_flushes_each_send() -> None:
-    """同步 sink：每次 send 立刻 flush，事件已被消费、不发生合并。"""
+    """Synchronous sink: every send flushes immediately, events are consumed and never merge."""
     wire = Wire()
     batches: list[list[Any]] = []
     wire.sink = batches.append
@@ -167,7 +170,7 @@ def test_wire_sync_sink_flushes_each_send() -> None:
 
 
 def test_run_agent_retries_empty_completion_once(tmp_path: Path) -> None:
-    """空完成（无文本无工具调用）不应直接收尾，而应重试一次。"""
+    """An empty completion (no text, no tool calls) should retry once instead of finishing."""
     provider = _SequenceProvider(
         [
             ModelResponse(),
@@ -192,7 +195,8 @@ def test_run_agent_retries_empty_completion_once(tmp_path: Path) -> None:
 
 
 def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> None:
-    """重试次数耗尽后仍是空响应时，明确标记而不是静默空 final。"""
+    """When retries are exhausted and the response is still empty, mark it explicitly
+    instead of going silent with an empty final."""
     provider = _SequenceProvider(
         [
             ModelResponse(),
@@ -218,11 +222,12 @@ def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> 
 
 
 def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None:
-    """stop_reason == "max_tokens" 时，不应把截断的回复当完整回答收尾，应续写一次。"""
+    """With stop_reason == "max_tokens", a truncated reply must not count as complete;
+    continue once instead."""
     provider = _SequenceProvider(
         [
-            ModelResponse(text="回复被截断", stop_reason="max_tokens"),
-            ModelResponse(text="补充的结尾"),
+            ModelResponse(text="The reply was truncated", stop_reason="max_tokens"),
+            ModelResponse(text="The rest of the ending"),
         ]
     )
     wire, sink = _collecting_wire()
@@ -236,14 +241,15 @@ def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None
         wire=wire,
     )
 
-    assert result.final == "补充的结尾"
+    assert result.final == "The rest of the ending"
     assert any(
         "continue: max_tokens" in e.text for e in sink.events if isinstance(e, Line)
     )
 
 
 def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
-    """final message 缺 text block 时，用实际流过的文本兜底重建 final。"""
+    """When the final message lacks a text block, rebuild final from the text that was
+    actually streamed."""
 
     class _StreamOnlyProvider:
         def complete_stream(
@@ -254,8 +260,8 @@ def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
             *,
             signal: Any = None,
         ):
-            yield ModelStreamEvent(type="text_delta", text="你好")
-            yield ModelStreamEvent(type="text_delta", text="世界\n")
+            yield ModelStreamEvent(type="text_delta", text="hello")
+            yield ModelStreamEvent(type="text_delta", text="world\n")
             yield ModelStreamEvent(type="completed", response=ModelResponse())
 
     wire, sink = _collecting_wire()
@@ -269,33 +275,34 @@ def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
         wire=wire,
     )
 
-    # 兜底重建用的就是流式收到的原始分片，所以保留了末尾换行。
-    assert result.final == "你好世界\n"
-    assert "".join(sink.texts()) == "你好世界\n"
+    # The fallback rebuild uses the raw streamed fragments, so the trailing newline survives.
+    assert result.final == "helloworld\n"
+    assert "".join(sink.texts()) == "helloworld\n"
 
 
-# ---- LiveArea：流式尾部状态机 ------------------------------------------------
+# ---- LiveArea: streaming tail state machine ---------------------------------
 
 
 def test_live_area_commits_closed_paragraphs_incrementally() -> None:
-    """增量提交：空行闭合的段落立刻返回（提交 scrollback），Live 区只留尾段。"""
+    """Incremental commit: a paragraph closed by a blank line is returned at once (to be
+    committed to scrollback) and only the tail paragraph stays in the Live area."""
     live = LiveArea()
-    assert live.feed_stream("第一段第一行\n第一段第二行\n") == []
-    # 空行闭合第一段 → 立刻可提交。
-    assert live.feed_stream("\n") == ["第一段第一行\n第一段第二行\n\n"]
-    # 第二段仍在进行中，不提交。
-    assert live.feed_stream("第二段") == []
-    assert live.feed_stream("内容\n") == []
+    assert live.feed_stream("first para line one\nfirst para line two\n") == []
+    # A blank line closes the first paragraph -- commit it immediately.
+    assert live.feed_stream("\n") == ["first para line one\nfirst para line two\n\n"]
+    # The second paragraph is still in progress, not committed.
+    assert live.feed_stream("second para") == []
+    assert live.feed_stream(" content\n") == []
 
-    # Live 区只显示未闭合的第二段。
+    # The Live area shows only the open second paragraph.
     text = "".join(t for _, t in live.formatted(columns=80, now=0))
-    assert "第二段" in text
-    assert "第一段" not in text
+    assert "second para" in text
+    assert "first para" not in text
 
-    # turn 收尾把未闭合段落（含半行）整段取出。
-    live.feed_stream("尾巴")
-    assert live.flush_paragraph() == "第二段内容\n尾巴\n"
-    assert live.flush_paragraph() == ""  # 幂等：再取为空
+    # At turn end, take the open paragraph (including the partial line) as a whole.
+    live.feed_stream("tail")
+    assert live.flush_paragraph() == "second para content\ntail\n"
+    assert live.flush_paragraph() == ""  # idempotent: a second take yields nothing
 
 
 def test_live_area_reset_stream_clears_paragraph_state() -> None:
@@ -322,23 +329,24 @@ def test_live_area_formatted_renders_spinner_tool_and_preview() -> None:
     assert "⏸ bash echo hi" in text
     assert "streaming tail" in text
 
-    # turn 不活跃时不渲染 spinner。
+    # No spinner is rendered while the turn is inactive.
     live.turn_active = False
     text2 = "".join(t for _, t in live.formatted(columns=40, now=1006.0))
     assert "· 6s" not in text2
 
 
-# ---- event_to_chunks：已完成事件 → scrollback chunk --------------------------
+# ---- event_to_chunks: finished events -> scrollback chunks -------------------
 
 
 def test_event_to_chunks_renders_wire_events() -> None:
-    """REPL 渲染策略：非流式事件全部翻译成 OutputChunk，格式由前端决定。"""
+    """REPL rendering policy: every non-streaming event is translated into an OutputChunk
+    and the frontend decides the format."""
     chunks = event_to_chunks(Line("hello"))
     assert len(chunks) == 1
     assert chunks[0].text == "hello\n"
 
     echo = event_to_chunks(PromptEcho("hi there"))
-    assert echo[0].text == "\n\n> hi there\n\n"  # render_user_prompt 的深灰底块
+    assert echo[0].text == "\n\n> hi there\n\n"  # render_user_prompt's dark-grey block
 
     done = event_to_chunks(ToolCallCompleted(call_id="1", name="read_file"))
     assert done[0].text == "✓ read_file\n"
@@ -353,7 +361,7 @@ def test_event_to_chunks_renders_wire_events() -> None:
     cmd = event_to_chunks(CommandPreview(command="echo hi"))
     assert "Command: echo hi" in cmd[0].text
 
-    # 流式/生命周期事件不是 chunk 翻译的职责。
+    # Streaming/lifecycle events are not chunk translation's concern.
     assert event_to_chunks(TextDelta("half")) == []
     assert event_to_chunks(TurnStarted()) == []
     assert event_to_chunks(TurnEnded()) == []
@@ -370,7 +378,7 @@ def test_render_user_prompt_formats_prompt_blocks() -> None:
     assert chunk.format == "plain"
     assert chunk.text == "\n\n> hello\n\n"
     assert render_user_prompt("first\nsecond").text == "\n\n> first\n> second\n\n"
-    # source 头当前不再渲染，参数仅作兼容保留。
+    # The source header is no longer rendered; the parameter is kept for compatibility only.
     assert render_user_prompt("expanded", source="user /slash").text == "\n\n> expanded\n\n"
     empty = render_user_prompt("")
     assert empty.format == "plain"
@@ -378,7 +386,7 @@ def test_render_user_prompt_formats_prompt_blocks() -> None:
     assert ("ansiwhite bg:#444444", "> hello") in chunk.fragments
 
 
-# ---- 提问请求的渲染与解析 -----------------------------------------------------
+# ---- prompt request rendering and parsing ------------------------------------
 
 
 def test_prompt_request_helpers_parse_confirm_answers() -> None:
@@ -434,7 +442,7 @@ def test_sessions_slash_returns_renderable_message(tmp_path: Path, capsys: Any) 
     assert captured.out == ""
     assert result.handled is True
     assert result.markup is True
-    assert result.message == "[dim]没有找到会话。[/dim]"
+    assert result.message == "[dim]No sessions found.[/dim]"
 
 
 def test_slash_completer_suggests_command_prefixes() -> None:
@@ -444,7 +452,7 @@ def test_slash_completer_suggests_command_prefixes() -> None:
 
     assert [completion.text for completion in completions] == ["/help"]
     assert completions[0].start_position == -3
-    assert str(completions[0].display_meta_text) == "显示所有可用 slash command"
+    assert str(completions[0].display_meta_text) == "show all available slash commands"
 
 
 def test_slash_completer_ignores_non_command_input() -> None:
@@ -454,14 +462,16 @@ def test_slash_completer_ignores_non_command_input() -> None:
     assert list(completer.get_completions(Document("/loop "), CompleteEvent())) == []
 
 
-# ---- 提问状态机（submit_text 的 pending 分支，注入 fake future 驱动）----------
+# ---- prompt state machine (the pending branch of submit_text, driven by a fake future) ----
 
 
 def test_shell_render_message_includes_pending_prompt() -> None:
-    """提问期间 message 渲染必须带上提示符，且绝不能抛异常。
+    """While a prompt is pending, message rendering must include the input prompt and must
+    never raise.
 
-    曾经用 FormattedText.fragments.insert 修改返回值——FormattedText 没有
-    fragments 属性，异常会让 prompt 渲染线程死掉、后续输入永不返回。
+    We once mutated the return value with FormattedText.fragments.insert -- FormattedText
+    has no fragments attribute, the exception killed the prompt render thread, and
+    subsequent input never came back.
     """
     from agent_code.ui.shell import InteractiveShell
 
@@ -477,7 +487,7 @@ def test_shell_render_message_includes_pending_prompt() -> None:
 
 
 def test_shell_submit_text_routes_pending_choice_answer() -> None:
-    """pending choice 提问：回答直接喂给 future，状态机清空。"""
+    """Pending choice prompt: the answer goes straight into the future and the state machine clears."""
     from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
@@ -486,7 +496,7 @@ def test_shell_submit_text_routes_pending_choice_answer() -> None:
         return None
 
     shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
-    shell._commit_now = lambda text: None  # 不碰真实终端
+    shell._commit_now = lambda text: None  # never touch the real terminal
 
     loop = asyncio.new_event_loop()
     try:
@@ -524,19 +534,19 @@ def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
         }
         shell._pending_prompt = dict(entry)
 
-        shell._submit_text("9")  # 非法
+        shell._submit_text("9")  # invalid
 
         assert not future.done()
-        assert shell._pending_prompt == entry  # 保持 pending，等下一次输入
+        assert shell._pending_prompt == entry  # stays pending, waiting for the next input
     finally:
         loop.close()
 
 
-# ---- 布局改造：输入区 Frame + 底部对齐 ---------------------------------------
+# ---- layout reshaping: input area Frame + bottom anchoring --------------------
 
 
 def _build_session() -> Any:
-    """构造带 completer 的 PromptSession（DummyOutput，不触碰真实终端）。"""
+    """Build a PromptSession with a completer (DummyOutput, no real terminal involved)."""
     from prompt_toolkit.input.base import DummyInput
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.shortcuts import PromptSession
@@ -553,10 +563,12 @@ def _build_session() -> Any:
 
 
 def test_bottom_anchored_layout_pins_buffer_window() -> None:
-    """布局改造后：根 HSplit 头部有 spacer，buffer 窗口 dont_extend_height。
+    """After the reshaping: the root HSplit has a spacer at its head and the buffer window
+    has dont_extend_height.
 
-    这正是"输入区钉底"的两个机制：spacer 吸收剩余高度，buffer 窗口停在
-    内容高度被压到底部。
+    These two mechanisms are exactly what pins the input area to the bottom: the spacer
+    absorbs the remaining height and the buffer window stops at its content height and is
+    pushed to the bottom.
     """
     from prompt_toolkit.layout.containers import HSplit, Window
     from prompt_toolkit.layout.controls import BufferControl
@@ -566,8 +578,8 @@ def test_bottom_anchored_layout_pins_buffer_window() -> None:
     session = _build_session()
     root_before = session.layout.container
     assert isinstance(root_before, HSplit)
-    # 布局里有两个 BufferControl 窗口（search 控件是其子类），要按 buffer
-    # 身份挑出 default buffer 的那个——与 _install 的定位逻辑一致。
+    # The layout has two BufferControl windows (the search control is a subclass), so pick
+    # the one whose buffer is the default buffer -- mirroring _install's lookup logic.
     buffer_window = next(
         w
         for w in _all_windows(root_before)
@@ -578,23 +590,25 @@ def test_bottom_anchored_layout_pins_buffer_window() -> None:
     _install_bottom_anchored_layout(session)
 
     root = session.layout.container
-    assert root.children[0] is not buffer_window  # 头部插了 spacer
+    assert root.children[0] is not buffer_window  # a spacer was inserted at the head
     spacer = root.children[0]
     assert isinstance(spacer, Window)
-    assert spacer.height.weight >= 1000  # 压倒性权重，独吞剩余高度
-    # 就地修改：布局树里的 buffer 窗口仍是原对象（Layout focus 栈持有引用）。
+    assert spacer.height.weight >= 1000  # overwhelming weight, takes all remaining height
+    # Modified in place: the buffer window in the layout tree is still the original object
+    # (Layout's focus stack holds the reference).
     assert any(
         w is buffer_window and w.dont_extend_height()
         for w in _all_windows(root)
         if isinstance(w.content, BufferControl)
     )
-    # 其余子项顺序不变（原 children 是改造后 children 的尾缀）。
+    # The other children keep their order (the original children are the tail of the new list).
     original_children = root.children[1:]
     assert all("bottom" not in str(c) or c is not None for c in original_children)
 
 
 def test_bottom_anchored_layout_keeps_focus_on_default_buffer() -> None:
-    """就地改 Window 而不是换包：focus 栈里的 control 引用必须原样保留。"""
+    """Modify the Window in place instead of wrapping it: the control reference held by the
+    focus stack must be preserved."""
     from prompt_toolkit.layout.controls import BufferControl
 
     from agent_code.ui.layout import _install_bottom_anchored_layout
@@ -604,7 +618,7 @@ def test_bottom_anchored_layout_keeps_focus_on_default_buffer() -> None:
 
     _install_bottom_anchored_layout(session)
 
-    # current_control 还是原来那个 BufferControl（default buffer）。
+    # current_control is still that same BufferControl (the default buffer).
     assert isinstance(session.layout.current_control, BufferControl)
     assert session.layout.current_control is control_before
     assert session.layout.current_buffer is session.default_buffer

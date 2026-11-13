@@ -1,4 +1,4 @@
-"""进程/shell 工具：bash、git_status、git_diff。"""
+"""Process/shell tools: bash, git_status, git_diff."""
 
 from __future__ import annotations
 
@@ -10,17 +10,18 @@ from .core import Tool, ToolContext
 
 
 def _git_status(args: dict[str, Any], ctx: ToolContext) -> str:
-    """薄包装 git status——只读、默认 allow。"""
+    """Thin wrapper over git status -- read-only, allowed by default."""
     return _bash_run_sync("git status", ctx.cwd, timeout=10)
 
 
 def _git_diff(args: dict[str, Any], ctx: ToolContext) -> str:
-    """薄包装 git diff——只读、默认 allow。"""
+    """Thin wrapper over git diff -- read-only, allowed by default."""
     return _bash_run_sync("git diff", ctx.cwd, timeout=10)
 
 
 def bash(args: dict[str, Any], ctx: ToolContext) -> str:
-    """执行 shell 命令。前置校验和用户确认在 agent.py 拦截块完成。"""
+    """Run a shell command. Upfront validation and user confirmation happen in
+    agent.py's intercept block."""
     command = args.get("command", "")
     if not command:
         return "error: missing required argument 'command'"
@@ -41,7 +42,7 @@ def bash(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="git_status",

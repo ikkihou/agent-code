@@ -8,13 +8,13 @@ from agent_code.session import Session
 
 def test_transcript_roundtrip(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
-    session.append_transcript(OutputChunk("第一行\n"))
+    session.append_transcript(OutputChunk("first line\n"))
     session.append_transcript(OutputChunk("[bold]> hi[/bold]\n\n", format="rich"))
 
     chunks = session.transcript_chunks
 
     assert chunks == [
-        OutputChunk("第一行\n"),
+        OutputChunk("first line\n"),
         OutputChunk("[bold]> hi[/bold]\n\n", format="rich"),
     ]
 
@@ -29,7 +29,7 @@ def test_transcript_skips_empty_and_bad_lines(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
     session.append_transcript(OutputChunk(""))
     session.append_transcript(OutputChunk("kept\n"))
-    # 手写一行坏 JSON，验证读取时跳过而不是抛异常。
+    # Hand-write a bad JSON line to verify reads skip it instead of raising.
     with session.transcript_path.open("a", encoding="utf-8") as f:
         f.write("{not valid json}\n")
 

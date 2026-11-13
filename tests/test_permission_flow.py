@@ -1,6 +1,8 @@
-"""tool_execution 模块的直接单元测试：权限流转、确认分发、plan 边界与并行分组。
+"""Direct unit tests for the tool_execution module: permission flow, confirmation
+routing, the plan boundary and parallel grouping.
 
-全部走纯函数/假 asker，不碰真实用户文件，也不发网络请求。
+Everything goes through pure functions / a fake asker; no real user files and no network
+requests.
 """
 
 from __future__ import annotations
@@ -80,12 +82,14 @@ def test_execute_one_tool_call_allow_success(tmp_path):
     assert block["is_error"] is False
     assert block["content"] == "ok"
     assert block["tool_use_id"] == "call-echo"
-    # 工具层必须发 ToolCallStarted 展示事件（前端渲染 tool_call 行的依据）
+    # The tool layer must emit the ToolCallStarted display event (the basis for the
+    # frontend's tool_call line)
     assert any(isinstance(e, ToolCallStarted) and e.name == "echo" for e in events)
 
 
 def test_execute_one_tool_call_bash_confirmation_sends_command_preview(tmp_path):
-    """ask 模式 bash：确认前必须发 CommandPreview（前端渲染命令行的依据）。"""
+    """ask-mode bash: CommandPreview must be emitted before confirmation (the basis for the
+    frontend's command line)."""
     reg = _registry(_tool("bash"))
     state = RuntimeState(asker=lambda request: True)
     wire, events = _collecting_wire()
@@ -99,7 +103,8 @@ def test_execute_one_tool_call_bash_confirmation_sends_command_preview(tmp_path)
 
 
 def test_execute_one_tool_call_edit_confirmation_sends_diff_preview(tmp_path):
-    """ask 模式 file_edit：确认前必须发 DiffPreview（前端渲染 diff 的依据）。"""
+    """ask-mode file_edit: DiffPreview must be emitted before confirmation (the basis for
+    the frontend's diff rendering)."""
     p = tmp_path / "a.txt"
     p.write_text("hello\n", encoding="utf-8")
     ctx = ToolContext(cwd=tmp_path)
@@ -129,7 +134,7 @@ def test_execute_one_tool_call_denies_dangerous_bash(tmp_path):
     assert "Dangerous command blocked" in block["content"]
 
 
-# ---- execute_one_tool_call：文件写前置校验 ---------------------------------
+# ---- execute_one_tool_call: file-write preflight ----------------------------
 
 
 def test_execute_one_tool_call_file_edit_requires_read_first(tmp_path):
@@ -149,9 +154,9 @@ def test_execute_one_tool_call_edit_rejected_by_user(tmp_path):
     p = tmp_path / "a.txt"
     p.write_text("hello", encoding="utf-8")
     ctx = ToolContext(cwd=tmp_path)
-    ctx.read_state.record(p, "hello")  # 标记已读，跳过读前校验
+    ctx.read_state.record(p, "hello")  # mark as read to skip the read-before-edit check
     reg = _registry(_tool("file_edit"))
-    state = RuntimeState(asker=lambda request: False)  # 拒绝所有 confirm
+    state = RuntimeState(asker=lambda request: False)  # reject every confirm
     block, _ = _run(
         _call("file_edit", file_path="a.txt", old_string="hello", new_string="hi"),
         ctx,
@@ -162,7 +167,7 @@ def test_execute_one_tool_call_edit_rejected_by_user(tmp_path):
     assert "error: edit rejected by user" in block["content"]
 
 
-# ---- execute_one_tool_call：ask 分发 ---------------------------------------
+# ---- execute_one_tool_call: ask dispatch -----------------------------------
 
 
 def test_execute_one_tool_call_bash_rejected_by_user(tmp_path):
@@ -177,7 +182,7 @@ def test_execute_one_tool_call_bash_rejected_by_user(tmp_path):
 
 def test_execute_one_tool_call_ask_user_question_intercepted(tmp_path):
     reg = _registry()
-    state = RuntimeState(asker=lambda request: 1)  # 选第 1 项（choice 请求按索引返回）
+    state = RuntimeState(asker=lambda request: 1)  # pick item 1 (choice requests return an index)
     block, _ = _run(
         _call("ask_user_question", prompt="Pick one", options=["Option A", "Option B"]),
         ToolContext(cwd=tmp_path),
@@ -217,9 +222,9 @@ def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):
     calls = [_call("read_file"), _call("exit_plan_mode", plan_summary="my plan")]
     blocks = execute_plan_boundary_calls(calls, ToolContext(cwd=tmp_path), state, reg, wire)
     assert blocks is not None
-    # 非 exit_plan_mode 的同轮工具被跳过，返回 error block
+    # Same-turn tools other than exit_plan_mode are skipped and get an error block
     assert blocks[0]["is_error"] is True
     assert "Skipped because exit_plan_mode" in blocks[0]["content"]
-    # exit_plan_mode 本身执行，批准后模式切到 acceptEdits
+    # exit_plan_mode itself runs; approval switches the mode to acceptEdits
     assert blocks[1]["content"] == "approved"
     assert state.permission_mode == "acceptEdits"

@@ -9,16 +9,16 @@ from .bash_runner import MINIMAL_ENV
 
 
 def start_background(command: str, cwd: Path) -> dict:
-    """在后台启动 shell 命令，stdout/stderr 流式写入 .bg/<id>.out/.err。
-    立即返回结构化信息，不等待命令结束。"""
+    """Start a shell command in the background, streaming stdout/stderr to
+    .bg/<id>.out/.err. Returns structured info immediately without waiting for exit."""
     bg_id = f"bg-{uuid.uuid4().hex[:8]}"
     bg_dir = cwd / ".bg"
     bg_dir.mkdir(parents=True, exist_ok=True)
     out_path = bg_dir / f"{bg_id}.out"
     err_path = bg_dir / f"{bg_id}.err"
 
-    # 显式 UTF-8：默认编码在 Windows 上是 GBK，子进程输出的 UTF-8 字节会被
-    # 写坏（或直接抛 UnicodeEncodeError），后续 cat 读出来也是乱的。
+    # Explicit UTF-8: the default encoding is GBK on Windows, so the child's UTF-8
+    # bytes get corrupted (or raise UnicodeEncodeError) and a later cat shows garbage.
     out_f = open(str(out_path), "w", encoding="utf-8", errors="replace")
     err_f = open(str(err_path), "w", encoding="utf-8", errors="replace")
 
@@ -33,7 +33,7 @@ def start_background(command: str, cwd: Path) -> dict:
     )
 
     def _wait_and_close() -> None:
-        """等子进程结束，关闭文件描述符。在 daemon 线程里跑。"""
+        """Wait for the child process to finish, then close the file handles. Runs on a daemon thread."""
         proc.wait()
         out_f.close()
         err_f.close()

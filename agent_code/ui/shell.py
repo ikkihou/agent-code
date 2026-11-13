@@ -1,8 +1,9 @@
-"""InteractiveShell：scrollback+Live 式 REPL 主体。
+"""InteractiveShell: the scrollback+Live REPL itself.
 
-线程模型与终端所有权模型见包文档（ui/__init__.py）。本模块只保留有状态编排：worker 线程
-（turn 执行 / cron 分发）、UI 协程（事件消费 / spinner / 提问）、
-输入提交与按键绑定。纯渲染与解析逻辑在兄弟模块中。
+See the package docstring (ui/__init__.py) for the threading and terminal-ownership
+model. This module keeps only stateful orchestration: the worker thread (turn
+execution / cron dispatch), the UI coroutine (event consumption / spinner / prompts),
+input submission and key bindings. Pure rendering and parsing live in sibling modules.
 """
 
 from __future__ import annotations
@@ -51,11 +52,11 @@ PendingPrompt = dict[str, Any]
 
 
 class InteractiveShell:
-    """scrollback+Live 式 REPL。
+    """The scrollback+Live REPL.
 
-    线程模型：主线程跑 asyncio 事件循环（prompt_async + 事件消费协程）；
-    worker 线程跑 run_agent / cron 处理，经 wire（sink → call_soon_
-    threadsafe 桥）与 ``_job_queue`` 通信。
+    Threading model: the main thread runs the asyncio event loop (prompt_async + the
+    event-consuming coroutine); the worker thread runs run_agent / cron handling and
+    communicates through wire (sink -> call_soon_threadsafe bridge) and ``_job_queue``.
     """
 
     def __init__(
@@ -80,21 +81,21 @@ class InteractiveShell:
         self._busy = threading.Event()
         self._turn_wire: Wire | None = None
 
-        # UI 协程消费的事件队列（worker 经 call_soon_threadsafe 投递）。
+        # Event queue consumed by the UI coroutine (the worker posts via call_soon_threadsafe).
         self._event_queue: asyncio.Queue[WireEvent] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._session: PromptSession[str] | None = None
         self._live = LiveArea()
         self._live_dirty = asyncio.Event()
-        # pending 提问（confirm/choice）状态机：UI 线程写，worker 等待。
+        # Pending prompt (confirm/choice) state machine: the UI thread writes, the worker waits.
         self._pending_prompt: PendingPrompt | None = None
         self._exit_requested = False
-        # 初始 transcript（resume 重放）：启动后先提交到 scrollback。
+        # Initial transcript (resume replay): committed to scrollback right after startup.
         self._initial_chunks: list[OutputChunk] = list(initial_transcript or [])
         if initial_output:
             self._initial_chunks.insert(0, OutputChunk(initial_output))
 
-    # ---- worker 线程侧：turn 执行与 cron ------------------------------------
+    # ---- worker thread side: turn execution and cron --------------------------
 
     def _work_loop(self) -> None:
         while True:
@@ -118,9 +119,9 @@ class InteractiveShell:
                     wire.sink = self._worker_sink
                     self._worker_sink([TurnStarted()])
                     self._run_turn(text, wire)
-                except Exception as e:  # provider/工具异常别让 worker 静默死掉
-                    # 带上 traceback：只有 str(e) 时无法定位是哪条路径抛的
-                    # （编码类错误尤其明显——报错文案里看不出调用栈）。
+                except Exception as e:  # never let a provider/tool error kill the worker silently
+                    # Include the traceback: str(e) alone cannot tell which path raised
+                    # (encoding errors especially -- the message shows no stack).
                     detail = "".join(traceback.format_exception(type(e), e, e.__traceback__))
                     self._worker_sink([Line(f"[error] {e}\n{detail}", markup=True)])
                 finally:
@@ -131,16 +132,16 @@ class InteractiveShell:
             while not self._state.input_queue.empty():
                 self._job_queue.put(self._state.input_queue.get())
 
-            # cron 到点 prompt：与用户输入一样走 slash 分发或作为新一轮 turn。
-            # worker 在 get(timeout=1.0) 上空闲轮询，cron 不依赖用户输入触发。
+            # Cron-due prompt: goes through slash dispatch like user input, or runs as a new turn.
+            # The worker idles on get(timeout=1.0), so cron does not depend on user input to fire.
             if self._drain_pending is not None:
                 for prompt in self._drain_pending():
                     self._handle_cron_prompt(prompt)
 
     def _worker_sink(self, batch: list[WireEvent]) -> None:
-        """worker 线程的 wire sink：把事件批投递到 UI 事件循环。
+        """The worker thread's wire sink: posts event batches to the UI event loop.
 
-        同步 sink 模式：run_agent 每次 send 都 flush 一个批到这里。
+        Synchronous sink mode: run_agent flushes one batch here on every send.
         """
         loop = self._loop
         if loop is None:
@@ -153,10 +154,11 @@ class InteractiveShell:
         self._live_dirty.set()
 
     def _handle_cron_prompt(self, text: str) -> None:
-        """worker 线程处理 cron 到点 prompt：slash 就地分发，普通 prompt 作为新一轮 turn。"""
+        """Handle a cron-due prompt on the worker thread: slash commands dispatch in place,
+        anything else becomes a new turn."""
         text = text.strip()
         if not text or text == "/exit":
-            return  # cron 到点 prompt 不触发应用退出
+            return  # a cron-due prompt must not trigger application exit
         if text.startswith("/"):
             result = dispatch_slash(text, self._make_slash_context())
             if result.handled and result.message:
@@ -168,14 +170,16 @@ class InteractiveShell:
         self._worker_sink([PromptEcho(text)])
         self._job_queue.put(text)
 
-    # ---- UI 协程：事件消费 + Live 渲染 + scrollback 提交 ---------------------
+    # ---- UI coroutine: event consumption + Live rendering + scrollback commits -----
 
     async def _consume_events(self) -> None:
-        """UI 事件消费协程：已完成事件提交 scrollback，流式事件更新 Live 区。"""
+        """UI event-consuming coroutine: commit finished events to scrollback, update the
+        Live area for streaming events."""
         while True:
             await self._live_dirty.wait()
             self._live_dirty.clear()
-            # 一次取空：已完成事件合并提交，减少 scrollback 重绘次数。
+            # Drain in one go: finished events merge into a single commit, reducing
+            # scrollback redraws.
             batch: list[WireEvent] = []
             while not self._event_queue.empty():
                 batch.append(self._event_queue.get_nowait())
@@ -185,7 +189,8 @@ class InteractiveShell:
             commit: list[OutputChunk] = []
             for event in batch:
                 if isinstance(event, TextDelta):
-                    # 增量提交：已闭合的段落立刻进 scrollback，Live 区只留尾段。
+                    # Incremental commit: a closed paragraph goes to scrollback at once and
+                    # only the tail paragraph stays in the Live area.
                     for paragraph in self._live.feed_stream(event.text):
                         commit.append(OutputChunk(paragraph))
                     continue
@@ -196,7 +201,7 @@ class InteractiveShell:
                     self._live.active_tool = None
                     continue
                 if isinstance(event, TurnEnded):
-                    # 收尾：未闭合段落整段提交（通常只有最后几行）。
+                    # Wrap-up: commit the whole open paragraph (usually just the last few lines).
                     tail = self._live.flush_paragraph()
                     self._live.turn_active = False
                     self._live.active_tool = None
@@ -213,7 +218,7 @@ class InteractiveShell:
                 if preview is not None:
                     self._live.pending_preview = preview
                     continue
-                # 其余都是"已完成"事实 → scrollback。
+                # Everything else is a "finished" fact -> scrollback.
                 commit.extend(event_to_chunks(event))
 
             if commit:
@@ -226,21 +231,23 @@ class InteractiveShell:
             app.invalidate()
 
     async def _animate_spinner(self) -> None:
-        """turn 活跃期间周期性刷新 spinner 与计时。"""
+        """Periodically refresh the spinner and its timer while a turn is active."""
         while True:
             await asyncio.sleep(0.12)
             if self._live.turn_active:
                 self._live.spinner_frame += 1
                 self._invalidate()
 
-    # ---- 提问（asker 路径）---------------------------------------------------
+    # ---- prompts (asker path) -------------------------------------------------
 
     async def _ask_in_app(self, request: PromptRequest) -> Any:
-        """在 UI 协程内发起提问：问题与提示符都挂进 Live 区，等 worker 回答。
+        """Ask a question from inside the UI coroutine: both the question and the input
+        prompt hang in the Live area while the worker waits for the answer.
 
-        不写 stdout：StdoutProxy 的 run_in_terminal 会 detach 输入，与正在
-        运行的 prompt_async 抢输入流（实测会把后续输入吃掉、prompt 永不
-        返回）。问题正文放 Live 区（prompt message），同理可见且零竞争。
+        Nothing is written to stdout: the StdoutProxy's run_in_terminal detaches input and
+        races the running prompt_async over the input stream (observed to swallow
+        subsequent input so the prompt never returns). Keeping the question body in the
+        Live area (prompt message) is equally visible and races with nothing.
         """
         future: asyncio.Future[Any] = self._loop.create_future()  # type: ignore[union-attr]
         self._pending_prompt = {"request": request, "future": future}
@@ -253,16 +260,18 @@ class InteractiveShell:
             self._invalidate()
 
     def _terminal_asker(self, func: PromptFallback | PromptRequest) -> Any:
-        """worker 线程里的提问入口：结构化请求走 app 内提问，否则退回 run_in_terminal。"""
+        """Asking entry point on the worker thread: structured requests go through the in-app
+        asker, everything else falls back to run_in_terminal."""
         if isinstance(func, dict):
             return asyncio.run_coroutine_threadsafe(self._ask_in_app(func), self._loop).result()
-        # run_in_terminal 本身返回 coroutine，无需再包一层 async 函数。
+        # run_in_terminal already returns a coroutine, no need to wrap it in another async fn.
         return asyncio.run_coroutine_threadsafe(run_in_terminal(func), self._loop).result()
 
-    # ---- 输入提交（UI 线程）---------------------------------------------------
+    # ---- input submission (UI thread) ---------------------------------------
 
     def _submit_text(self, text: str) -> None:
-        """统一输入入口：有 pending 提问时先喂给提问状态机，否则作为新输入提交。"""
+        """Single input entry point: feed a pending prompt state machine first, otherwise
+        submit as new input."""
         text = text.strip()
         if self._pending_prompt is not None:
             entry = self._pending_prompt
@@ -298,7 +307,7 @@ class InteractiveShell:
 
         if text == "/exit":
             self._exit_requested = True
-            raise EOFError  # 跳出 _submit_text，由 prompt 循环捕获并退出
+            raise EOFError  # break out of _submit_text; the prompt loop catches it and exits
 
         if text.startswith("/"):
             self._route_slash_command(text)
@@ -307,12 +316,13 @@ class InteractiveShell:
         self._echo_user_prompt(text)
         if self._busy.is_set():
             self._state.input_queue.put(text)
-            self._commit_now("[queued] turn 结束后处理\n")
+            self._commit_now("[queued] will run after the current turn\n")
         else:
             self._job_queue.put(text)
 
     def _route_slash_command(self, text: str) -> bool:
-        """slash 分发：命中则就地提交结果，should_query 的展开 prompt 入队。返回是否已处理。"""
+        """Slash dispatch: commit the result in place when handled, queue the expanded prompt
+        when should_query is set. Returns whether it was handled."""
         result = dispatch_slash(text, self._make_slash_context())
         if not result.handled:
             return False
@@ -330,17 +340,17 @@ class InteractiveShell:
         self._commit_chunks([render_user_prompt(text)])
 
     def _commit_now(self, text: str) -> None:
-        """（UI 线程）提交一行纯文本到 scrollback。"""
+        """(UI thread) Commit one plain-text line to scrollback."""
         self._commit_chunks([OutputChunk(text)])
 
     def _commit_chunks(self, chunks: list[OutputChunk]) -> None:
-        """（UI 线程）提交 chunks：scrollback + session 转录边车。"""
+        """(UI thread) Commit chunks: scrollback + the session transcript sidecar."""
         for chunk in chunks:
             if self._on_transcript is not None:
                 self._on_transcript(chunk)
             _commit_chunk(chunk)
 
-    # ---- 主入口 ---------------------------------------------------------------
+    # ---- main entry ----------------------------------------------------------
 
     async def _run_async(self) -> None:
         app_session = get_app_session()
@@ -348,7 +358,8 @@ class InteractiveShell:
         style = build_style()
         self._loop = asyncio.get_running_loop()
 
-        # resume 重放 / header：prompt 启动前直接写终端（无 app，直打）。
+        # Resume replay / header: written straight to the terminal before the prompt starts
+        # (no app yet, direct write).
         for chunk in self._initial_chunks:
             _commit_chunk(chunk)
 
@@ -361,13 +372,15 @@ class InteractiveShell:
             complete_while_typing=True,
             style=style,
             key_bindings=self._build_key_bindings(),
-            # 输入区四周画框（┌─┐│└─┘），与 scrollback 视觉分区。
+            # Draw a frame around the input area (┌─┐│└─┘) to separate it from the scrollback.
             show_frame=True,
-            # 默认 8：为补全菜单预留 8 行——单行输入框下撑出大片空白，
-            # 加 frame 后尤其难看。补全菜单出现时布局会临时加高，无需预占。
+            # Default is 8: reserving 8 rows for the completion menu leaves a large blank
+            # area under a single-line input, especially ugly once the frame is drawn. The
+            # layout grows temporarily when the menu appears, so no reservation is needed.
             reserve_space_for_menu=0,
-            # 显式绑定当前 AppSession 的输入输出：不传的话 PromptSession 会
-            # 按默认控件造一套 Win32 控制台输入，pipe/测试替身全部失效。
+            # Explicitly bind the current AppSession's input/output: without this,
+            # PromptSession builds its own Win32 console input from default widgets and
+            # pipes/test doubles stop working.
             input=app_session.input,
             output=output,
         )
@@ -382,7 +395,7 @@ class InteractiveShell:
         spinner_task = asyncio.create_task(self._animate_spinner())
 
         try:
-            # patch_stdout：兜底接住任何绕过 wire 的 print（工具/hook 泄漏）。
+            # patch_stdout: a backstop for any print that bypasses wire (a leaking tool/hook).
             with patch_stdout(raw=False):
                 while True:
                     try:
@@ -395,7 +408,7 @@ class InteractiveShell:
             spinner_task.cancel()
             self._state.asker = None
 
-    # ---- prompt message（Live 区）渲染 ----------------------------------------
+    # ---- prompt message (Live area) rendering ---------------------------------
 
     def _render_message(self) -> FormattedText:
         columns = 80
@@ -403,22 +416,23 @@ class InteractiveShell:
         if app is not None:
             columns = app.output.get_size().columns
         fragments: list[tuple[str, str]] = []
-        # pending 提问：输入提示符挂在 Live 区顶部（问题正文也在 Live 区，
-        # 见 _ask_in_app——不写 stdout，避免与 prompt 抢输入）。
+        # Pending prompt: the input prompt hangs at the top of the Live area (the question
+        # body is there too, see _ask_in_app -- nothing is written to stdout, so nothing
+        # races the prompt over input).
         if self._pending_prompt is not None:
             request = self._pending_prompt["request"]
             fragments.append(("class:preview", prompt_for_request(request) + "\n"))
         fragments.extend(self._live.formatted(columns, time.monotonic()))
         return FormattedText(fragments)
 
-    # ---- 按键 ------------------------------------------------------------------
+    # ---- keys ----------------------------------------------------------------
 
     def _build_key_bindings(self) -> KeyBindings:
         kb = KeyBindings()
 
         @kb.add("escape")
         def _(event: Any) -> None:
-            # Provider 会观察该信号并主动关闭正在读取的 HTTP stream。
+            # The provider watches this signal and actively closes the HTTP stream it is reading.
             self._state.abort_event.set()
 
         @kb.add("s-tab")
@@ -429,7 +443,7 @@ class InteractiveShell:
         @kb.add("c-c")
         def _(event: Any) -> None:
             if self._busy.is_set():
-                # turn 进行中：Ctrl+C 等同 ESC（中止 turn），不退出。
+                # Turn in flight: Ctrl+C behaves like ESC (abort the turn) and does not exit.
                 self._state.abort_event.set()
             else:
                 event.app.exit(exception=EOFError)

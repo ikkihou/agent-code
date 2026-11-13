@@ -1,8 +1,9 @@
-"""工具包公开 API。
+"""Public API of the tools package.
 
-保持与重构前 `tools.py` 相同的导出面，`from .tools import ...` 调用点零改动：
-- `ToolContext` / `ToolRegistry`（agent.py、cron_tools.py、slash.py、测试）
-- `default_tools()`（cli.py）
+Keeps the same export surface as the pre-refactor `tools.py`, so every
+`from .tools import ...` call site stays untouched:
+- `ToolContext` / `ToolRegistry` (agent.py, cron_tools.py, slash.py, tests)
+- `default_tools()` (cli.py)
 """
 
 from .core import Tool, ToolContext, ToolFunc, ToolRegistry

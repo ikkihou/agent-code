@@ -31,7 +31,8 @@ from .tool_execution import (
 from .tools import ToolContext, ToolRegistry
 from .wire import Line, TextDelta, Wire
 
-# 只读工具并行批的 worker 数。只读调用并发安全；写工具自成串行组，不受此限。
+# Worker count for the parallel read-only tool batch. Read-only calls are safe to run
+# concurrently; write tools form their own serial batch and are not affected.
 _PARALLEL_READONLY_WORKERS = 4
 
 
@@ -51,8 +52,8 @@ _SYSTEM_CORE = (
 
 
 def build_system_prompt(cwd: Path) -> str:
-    """组装 system prompt：核心指南 + AGENT.md + MEMORY.md 索引。
-    注入顺序：core prompt → 项目规则 → 跨 session 记忆索引。"""
+    """Assemble the system prompt: core guidance + AGENT.md + the MEMORY.md index.
+    Injection order: core prompt -> project rules -> cross-session memory index."""
     from .memdir.store import load_index as load_memory_index
 
     parts: list[str] = [_SYSTEM_CORE]
@@ -67,7 +68,8 @@ def build_system_prompt(cwd: Path) -> str:
     return "\n\n".join(parts)
 
 
-# 把内部 ModelResponse 还原成 Anthropic Messages API 的 assistant content blocks格式
+# Convert the internal ModelResponse back into Anthropic Messages API assistant
+# content blocks.
 def _assistant_message(response: ModelResponse) -> dict[str, Any]:
     if response.assistant_content:
         return {"role": "assistant", "content": response.assistant_content}
@@ -98,16 +100,16 @@ def run_agent(  ## AGENT LOOP
     system_prompt: str | None = None,
     wire: Wire | None = None,
 ) -> AgentResult:
-    ## 解析 cwd
+    ## Resolve the cwd
     resolved_cwd = cwd or Path.cwd()
-    ## 构建工具上下文
+    ## Build the tool context
     ctx = ToolContext(
         cwd=resolved_cwd,
         skip_policy=SkipPolicy.default(gitignore=load_gitignore(resolved_cwd)),
         state=state,
     )
 
-    ## 加载历史对话
+    ## Load the conversation history
     if session and session.history:
         messages = list(session.history)
         messages.append({"role": "user", "content": prompt})
@@ -117,17 +119,19 @@ def run_agent(  ## AGENT LOOP
     if session:
         session.append_messages([messages[-1]])
 
-    # 事件通道：wire 是 loop 与前端之间的唯一边界。未提供时用一个空通道，
-    # 事件自然落空（fire-and-forget），loop 对"有没有人在听"无感知。
+    # Event channel: wire is the only boundary between the loop and the frontend. When
+    # none is supplied, use an empty channel whose events simply go nowhere
+    # (fire-and-forget); the loop has no notion of whether anyone is listening.
     if wire is None:
         wire = Wire()
 
     def emit(text: str, *, markup: bool = False) -> None:
-        """通知事件发射：一行完整文本（不带行尾换行）。
+        """Emit a notification event: one complete line of text (no trailing newline).
 
-        markup=True 表示 text 是 Rich markup，由前端各自渲染；trace 恒记
-        传入原文。trace 仍由 run_agent 维护——它是 AgentResult 的一部分，
-        供测试与 --resume 审计，不属于事件流。
+        markup=True means text is Rich markup for each frontend to render; trace always
+        records the original text. trace is still maintained by run_agent -- it is part
+        of AgentResult, used by tests and --resume auditing, and is not part of the
+        event stream.
         """
         trace.append(text)
         wire.send(Line(text, markup=markup))
@@ -141,7 +145,8 @@ def run_agent(  ## AGENT LOOP
     response: ModelResponse | None = None
 
     def continue_with(reason: str, prompt: str) -> None:
-        """追加一条 continue 用户消息；调用点紧跟一个裸 continue 回到 loop 顶。"""
+        """Append a continue user message; the call site is followed by a bare continue
+        back to the top of the loop."""
         nonlocal continuation_count
         continuation_count += 1
         emit(f"continue: {reason}")
@@ -150,7 +155,8 @@ def run_agent(  ## AGENT LOOP
             session.append_messages(messages[-2:])
 
     for step in range(max_steps):
-        # 用户可能在工具执行期间按下 ESC。请求前检查可避免再多发一轮模型请求。
+        # The user may press ESC while a tool runs. Checking before the request avoids
+        # sending one more model request.
         if state.abort_event.is_set():
             return interrupted_result()
 
@@ -170,8 +176,8 @@ def run_agent(  ## AGENT LOOP
             ):
                 if event.type == "text_delta" and event.text:
                     streamed_parts.append(event.text)
-                    # 原始 delta 直接上 wire；行缓冲是前端渲染关注点，
-                    # 由消费端用 StreamLineBuffer 攒行。
+                    # Raw deltas go straight onto the wire; line buffering is a frontend
+                    # rendering concern, left to the consumer via StreamLineBuffer.
                     wire.send(TextDelta(text=event.text))
                 elif event.type == "completed":
                     response = event.response
@@ -191,8 +197,9 @@ def run_agent(  ## AGENT LOOP
 
         ## 3(1). tool call or end execution
         if not response.tool_calls:
-            # 上游 final message 偶尔会缺 text block（但流式时明明有输出）。
-            # 用实际流过的文本兜底，避免 final 变成空字符串。
+            # The upstream final message occasionally lacks its text block (even though
+            # streaming clearly produced output). Fall back to the text actually streamed
+            # so final never turns into an empty string.
             final = response.text or "".join(streamed_parts) or ""
             if state.permission_mode == "plan" and final.strip():
                 if approve_plan(state, final):
@@ -208,9 +215,10 @@ def run_agent(  ## AGENT LOOP
                     session.append_messages(messages[-2:])
                 continue
 
-            # max_tokens 截断续写：上游在 token 预算内没把话说完（stop_reason ==
-            # "max_tokens"，回答断在句中），是"final 不完整"的主要来源。追加一条
-            # continue 让模型接着写，避免长回答被硬截断。
+            # max_tokens continuation: the upstream ran out of token budget mid-sentence
+            # (stop_reason == "max_tokens"), the main source of "incomplete final".
+            # Append a continue message so the model keeps writing instead of the long
+            # answer being hard-truncated.
             if response.stop_reason == "max_tokens" and continuation_count < 2:
                 continue_with(
                     "max_tokens reached — asking the model to continue",
@@ -222,8 +230,9 @@ def run_agent(  ## AGENT LOOP
                 )
                 continue
 
-            # 空完成重试：既没文本也没工具调用，多半是上游偶发空响应。
-            # 别就这样收尾（会看到 "final:" 后面什么都没有），给一次续写机会。
+            # Empty-completion retry: neither text nor tool calls usually means a
+            # transient empty upstream response. Do not finish here (the user would see
+            # nothing after "final:"); give it one more chance to answer.
             if not final.strip() and continuation_count < 2:
                 continue_with(
                     "empty response — asking the model to retry",
@@ -250,7 +259,7 @@ def run_agent(  ## AGENT LOOP
                         break
             if forced is not None:
                 continue_with(forced, f"continue: {forced}")
-                continue  # 回到 loop 顶，再跑一轮
+                continue  # Back to the top of the loop for one more round.
             if streamed_parts:
                 trace.append(f"final: {final}")
             else:
@@ -275,8 +284,9 @@ def run_agent(  ## AGENT LOOP
                         execute_one_tool_call(batch[0], ctx, state, tools, wire)
                     )
                 else:
-                    # 只读组并行。ex.map 按输入顺序返回结果，
-                    # 所以 tool_result 顺序天然对齐 tool_use 顺序——这是必须守的协议约束。
+                    # Parallel read-only group. ex.map returns results in input order, so
+                    # tool_result order lines up with tool_use order for free -- a protocol
+                    # constraint we must preserve.
                     with ThreadPoolExecutor(max_workers=_PARALLEL_READONLY_WORKERS) as ex:
                         results = list(
                             ex.map(

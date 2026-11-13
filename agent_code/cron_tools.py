@@ -7,14 +7,15 @@ from .tools import ToolContext
 
 
 def _get_scheduler(ctx: ToolContext) -> CronScheduler:
-    """REPL 里复用运行中的 scheduler（挂 RuntimeState 上）；one-shot 临时读写 cron.json。"""
+    """Reuse the running scheduler in the REPL (held on RuntimeState); in one-shot
+    mode, read/write cron.json on the fly."""
     if ctx.state is not None and ctx.state.scheduler is not None:
         return ctx.state.scheduler
     return CronScheduler(ctx.cwd)
 
 
 def cron_create(args: dict[str, Any], ctx: ToolContext) -> str:
-    """创建一条 cron job——工具函数只做薄包装。"""
+    """Create a cron job -- a thin wrapper over the tool function."""
     scheduler = _get_scheduler(ctx)
     slash = args.get("slash", "")
     every_seconds = int(args.get("every_seconds", 0))
@@ -28,7 +29,7 @@ def cron_create(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def cron_list(args: dict[str, Any], ctx: ToolContext) -> str:
-    """列出当前所有 cron job。"""
+    """List all current cron jobs."""
     scheduler = _get_scheduler(ctx)
     jobs = scheduler.list_jobs()
     if not jobs:
@@ -44,7 +45,7 @@ def cron_list(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def cron_cancel(args: dict[str, Any], ctx: ToolContext) -> str:
-    """取消一条 cron job。"""
+    """Cancel one cron job."""
     scheduler = _get_scheduler(ctx)
     jid = args.get("id", "")
     if not jid:

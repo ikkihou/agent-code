@@ -1,8 +1,8 @@
-"""已完成内容 → 原生终端 scrollback 的提交路径。
+"""Commit path from finished content to the native terminal scrollback.
 
-OutputChunk 先经 Rich 渲染成 ANSI，再走 ``sys.stdout.write``（在
-patch_stdout 内）落到 prompt 上方的 scrollback——原生滚动/选区/复制，
-pt 不再管理历史区。
+OutputChunk is rendered to ANSI by Rich and then written with ``sys.stdout.write``
+(inside patch_stdout) into the scrollback above the prompt -- native
+scrolling/selection/copy, with pt no longer managing a history region.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ _ansi_console = Console(
 
 
 def _chunk_fragments(chunk: OutputChunk) -> StyleAndTextTuples:
-    """OutputChunk → (样式串, 文本) 片段（样式串走 Rich 词表）。"""
+    """OutputChunk -> (style string, text) fragments (style strings use Rich's vocabulary)."""
     if chunk.fragments:
         return list(chunk.fragments)
     if chunk.format == "rich":
@@ -34,10 +34,11 @@ def _chunk_fragments(chunk: OutputChunk) -> StyleAndTextTuples:
 
 
 def _chunk_to_ansi(chunk: OutputChunk) -> str:
-    """OutputChunk → ANSI 字符串。
+    """OutputChunk -> ANSI string.
 
-    TranscriptLexer 那套 pt 片段翻译已随输出面板一起退役；这里把片段还原成
-    Rich Text 再渲染成 ANSI——颜色表与 pt 内联样式串同源（命名色/hex 通用）。
+    The TranscriptLexer fragment translation was retired along with the output panel;
+    here the fragments are rebuilt into a Rich Text and rendered to ANSI -- the color
+    table matches pt inline style strings (named colors and hex work on both sides).
     """
     text = Text()
     for style, fragment in _chunk_fragments(chunk):
@@ -48,16 +49,16 @@ def _chunk_to_ansi(chunk: OutputChunk) -> str:
 
 
 def _commit_chunk(chunk: OutputChunk) -> None:
-    """把 OutputChunk 打到 prompt 上方的终端 scrollback。
+    """Write an OutputChunk into the terminal scrollback above the prompt.
 
-    走 ``sys.stdout.write``：``patch_stdout`` 把 stdout 换成了 StdoutProxy，
-    它用自带 flush 线程经 run_in_terminal 绘制到 prompt 上方——这是唯一
-    thread-safe 且不会与 prompt_async 抢输入的提交路径。
+    Uses ``sys.stdout.write``: ``patch_stdout`` replaces stdout with a StdoutProxy that
+    draws above the prompt through run_in_terminal on its own flush thread -- the only
+    thread-safe commit path that does not fight prompt_async over input.
 
-    不要用 pt 的 ``print_formatted_text``：app 运行时它会走
-    ``loop.call_soon_threadsafe(run_in_terminal(...))`` 且调用方无法等待，
-    在"提交完立刻进下一轮 prompt_async"的循环里会和 prompt 的输入
-    detach/attach 竞争，表现为后续输入全部失效。
+    Do not use pt's ``print_formatted_text``: while an app is running it goes through
+    ``loop.call_soon_threadsafe(run_in_terminal(...))`` and the caller cannot wait, so in
+    a loop of "commit, then immediately await the next prompt_async" it races the
+    prompt's input detach/attach and all subsequent input stops working.
     """
     sys.stdout.write(_chunk_to_ansi(chunk))
     sys.stdout.flush()

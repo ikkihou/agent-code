@@ -1,4 +1,4 @@
-"""已完成 wire 事件 → OutputChunk 的翻译（着色在这里决定）。"""
+"""Translation of finished wire events into OutputChunks (coloring is decided here)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ StyleAndText = tuple[str, str]
 
 
 def event_to_chunks(event: WireEvent) -> list[OutputChunk]:
-    """把一个已完成 wire 事件翻译成 OutputChunk 列表（着色在这里决定）。"""
+    """Translate one finished wire event into a list of OutputChunks (coloring decided here)."""
     if isinstance(event, Line):
         return [OutputChunk(event.text + "\n", format="rich" if event.markup else "plain")]
     if isinstance(event, PromptEcho):
@@ -46,8 +46,10 @@ def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
     if not normalized.strip():
         return OutputChunk("")
     body = "\n".join(f"> {line}" for line in normalized.splitlines())
-    # 白字深灰底反白高亮（source 头当前不再渲染，参数仅作兼容保留）。
-    # scrollback 模式下不做逐行背景补位（原 BufferControl 的专属技巧）。
+    # Reversed highlight: white text on dark grey (the source header is no longer rendered;
+    # the parameter is kept for compatibility only).
+    # In scrollback mode there is no per-line background padding (a trick specific to the
+    # old BufferControl).
     style = "ansiwhite bg:#444444"
     fragments: tuple[StyleAndText, ...] = (("", "\n\n"), (style, body), ("", "\n\n"))
     return OutputChunk("\n\n" + body + "\n\n", fragments=fragments)

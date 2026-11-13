@@ -10,8 +10,8 @@ from .runtime import RuntimeState
 
 @dataclass
 class SlashContext:
-    """slash handler 接收的运行时上下文。不暴露 provider、session 内部状态，，
-    只给handler它需要的只读信息。
+    """Runtime context handed to slash handlers. Never exposes provider or session
+    internals; gives a handler only the read-only information it needs.
     """
 
     cwd: Path
@@ -24,8 +24,9 @@ class SlashContext:
 
 
 class SlashResult:
-    """slash command 执行结果。handled=True 表示已处理， CLI 不再把输入当普通 prompt。
-    should_query=True 时 CLI 把 prompt 字段作为新的 user 信息喂给模型。
+    """Result of running a slash command. handled=True means it was consumed and the
+    CLI must not treat the input as a normal prompt. should_query=True makes the CLI
+    feed the prompt field to the model as a new user message.
     """
 
     def __init__(
@@ -54,7 +55,7 @@ class SlashCommand:
 
 
 class SlashRegistry:
-    """命令名 → handler 的注册表，仿 tools/core.py 的 ToolRegistry。"""
+    """Registry mapping command name -> handler, modelled on tools/core.py's ToolRegistry."""
 
     def __init__(self) -> None:
         self._commands: dict[str, SlashCommand] = {}
@@ -95,18 +96,19 @@ def dispatch_slash(line: str, ctx: SlashContext) -> SlashResult:
 
 
 def _cmd_help(_args: list[str], ctx: SlashContext) -> SlashResult:
-    """列出所有已注册 slash command。"""
+    """List every registered slash command."""
     registry = ctx.registry or default_slash_registry()
-    lines = ["[bold]可用命令：[/bold]"]
+    lines = ["[bold]Available commands:[/bold]"]
     for command in registry.commands():
         lines.append(f"  [bold]/{command.name}[/bold]  {command.description}")
-    # 不调用模型——纯本地控制命令
+    # Never calls the model -- a purely local control command.
     return SlashResult(handled=True, message="\n".join(lines), markup=True)
 
 
 def _cmd_model(args: list[str], ctx: SlashContext) -> SlashResult:
-    """显示或切换当前模型。不传参打印当前值；传参时只打印提示，
-    告诉用户当前 CLI 实现不支持运行时热切换 provider。"""
+    """Show or switch the current model. With no argument it prints the current values;
+    with an argument it only prints a notice, because the current CLI implementation
+    does not support hot-swapping the provider at runtime."""
     if not args:
         return SlashResult(
             handled=True,
@@ -114,12 +116,12 @@ def _cmd_model(args: list[str], ctx: SlashContext) -> SlashResult:
         )
     target = args[0]
     if ctx.state is not None:
-        ctx.state.model = target  # 下一轮 run_turn 按 state.model 重建 provider
-    return SlashResult(handled=True, message=f"model → {target}（下一轮生效，当前轮不变）")
+        ctx.state.model = target  # the next run_turn rebuilds the provider from state.model
+    return SlashResult(handled=True, message=f"model → {target} (applies next turn, not this one)")
 
 
 def _cmd_context(_args: list[str], ctx: SlashContext) -> SlashResult:
-    """打印当前 session 和权限模式。"""
+    """Print the current session and permission mode."""
     session = ctx.session_id or "(none)"
     return SlashResult(
         handled=True,
@@ -128,7 +130,7 @@ def _cmd_context(_args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
-    """显示权限模式。v1 不在 REPL 内热切换运行态。"""
+    """Show the permission mode. v1 does not hot-swap runtime state from the REPL."""
     modes = ["default", "acceptEdits", "plan"]
     if not args:
         return SlashResult(
@@ -142,7 +144,7 @@ def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
     ctx.state.permission_mode = target
     return SlashResult(
         handled=True,
-        message=f"Agent 权限已切换至 {target}",
+        message=f"Agent permission switched to {target}",
     )
 
 
@@ -153,16 +155,16 @@ def _cmd_sessions(args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
-    """本地 /loop add：直接调 cron_create 的函数逻辑，不用绕模型。"""
+    """Local /loop add: calls cron_create's function directly instead of going through the model."""
     from .cron_tools import cron_create
     from .tools import ToolContext
 
     if not args:
         return SlashResult(
             handled=True,
-            message="用法: /loop add <slash或prompt> --every <60s|5m|2h> --label <标签>",
+            message="Usage: /loop add <slash-or-prompt> --every <60s|5m|2h> --label <label>",
         )
-    # 简单解析：参数以 -- 开头的是选项，其余拼成 slash
+    # Simple parse: arguments starting with -- are options, the rest form the slash.
     slash_parts: list[str] = []
     every_seconds: int | None = None
     label = ""
@@ -181,7 +183,7 @@ def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
             except (ValueError, IndexError):
                 return SlashResult(
                     handled=True,
-                    message="--every 需要整数秒，或 60s / 5m / 2h 这种格式",
+                    message="--every needs whole seconds, or a form like 60s / 5m / 2h",
                 )
             i += 2
         elif args[i] == "--label" and i + 1 < len(args):
@@ -193,12 +195,12 @@ def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
     slash = " ".join(slash_parts)
     if not slash:
         return SlashResult(
-            handled=True, message="用法: /loop add <slash或prompt> --every <60s|5m|2h>"
+            handled=True, message="Usage: /loop add <slash-or-prompt> --every <60s|5m|2h>"
         )
     if every_seconds is None:
         return SlashResult(
             handled=True,
-            message="缺少 --every。用法: /loop add <slash或prompt> --every <60s|5m|2h>",
+            message="Missing --every. Usage: /loop add <slash-or-prompt> --every <60s|5m|2h>",
         )
     tool_ctx = ToolContext(cwd=ctx.cwd, state=ctx.state)
     msg = cron_create({"slash": slash, "every_seconds": every_seconds, "label": label}, tool_ctx)
@@ -219,18 +221,22 @@ def _cmd_loop_cancel(args: list[str], ctx: SlashContext) -> SlashResult:
     from .tools import ToolContext
 
     if not args:
-        return SlashResult(handled=True, message="用法: /loop cancel <id>")
+        return SlashResult(handled=True, message="Usage: /loop cancel <id>")
     tool_ctx = ToolContext(cwd=ctx.cwd, state=ctx.state)
     msg = cron_cancel({"id": args[0]}, tool_ctx)
     return SlashResult(handled=True, message=msg)
 
 
 def _cmd_loop(args: list[str], ctx: SlashContext) -> SlashResult:
-    """管理 cron 定时任务：/loop add/list/cancel。"""
+    """Manage cron jobs: /loop add/list/cancel."""
     if not args:
         return SlashResult(
             handled=True,
-            message="用法: /loop add <slash或prompt> --every <60s|5m|2h> --label <标签>\n      /loop list\n      /loop cancel <id>",
+            message=(
+                "Usage: /loop add <slash-or-prompt> --every <60s|5m|2h> --label <label>\n"
+                "      /loop list\n"
+                "      /loop cancel <id>"
+            ),
         )
     subcommand = args[0]
     rest = args[1:]
@@ -251,13 +257,16 @@ def _cmd_todo(_args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def default_slash_registry() -> SlashRegistry:
-    """构建并注册内置 slash 命令。调用方（cli.py）每次运行建一份，注入到 SlashContext。"""
+    """Build and register the built-in slash commands. The caller (cli.py) builds one per
+    run and injects it into SlashContext."""
     registry = SlashRegistry()
-    registry.register("help", "显示所有可用 slash command", _cmd_help)
-    registry.register("model", "显示当前模型/provider", _cmd_model)
-    registry.register("context", "显示当前 session、cwd、权限模式", _cmd_context)
-    registry.register("permissions", "显示权限模式 (default/acceptEdits/plan)", _cmd_permissions)
-    registry.register("sessions", "显示当前路径下所有的会话记录", _cmd_sessions)
-    registry.register("loop", "管理 cron 定时任务: add/list/cancel", _cmd_loop)
-    registry.register("todo", "显示当前 todo 列表", _cmd_todo)
+    registry.register("help", "show all available slash commands", _cmd_help)
+    registry.register("model", "show the current model/provider", _cmd_model)
+    registry.register("context", "show the current session, cwd and permission mode", _cmd_context)
+    registry.register(
+        "permissions", "show the permission mode (default/acceptEdits/plan)", _cmd_permissions
+    )
+    registry.register("sessions", "list all session records under the current path", _cmd_sessions)
+    registry.register("loop", "manage cron jobs: add/list/cancel", _cmd_loop)
+    registry.register("todo", "show the current todo list", _cmd_todo)
     return registry

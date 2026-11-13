@@ -1,4 +1,4 @@
-"""底部状态栏与"输入区 Frame + 底部对齐"布局改造。"""
+"""Bottom status bar and the "input area Frame + bottom anchoring" layout reshaping."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from ..runtime import RuntimeState
 
 
 def bottom_toolbar(state: RuntimeState) -> str:
-    """底部状态栏——当前模式 + 模型。"""
+    """Bottom status bar: current mode + model."""
     mode = {"default": "default", "acceptEdits": "accept edits", "plan": "plan"}.get(
         state.permission_mode, state.permission_mode
     )
@@ -25,46 +25,52 @@ def bottom_toolbar(state: RuntimeState) -> str:
 
 
 def build_style() -> Style:
-    """REPL 样式表：spinner / 待确认预览 / 状态栏 / Frame 边框。"""
+    """REPL stylesheet: spinner / pending preview / status bar / Frame border."""
     return Style.from_dict(
         {
             "spinner": "bold ansibrightcyan",
             "preview": "ansiyellow",
             "bottom-toolbar": "bg:#222222 ansiwhite",
-            # Frame 边框：暗灰蓝，低调但能与 scrollback 内容区分开。
+            # Frame border: muted slate blue, understated but distinct from scrollback content.
             "frame.border": "#556677",
         }
     )
 
 
 def _install_bottom_anchored_layout(session: PromptSession[str]) -> None:
-    """把 PromptSession 的布局改成"输入区钉在终端底部"。
+    """Reshape the PromptSession layout so the "input area is pinned to the terminal bottom".
 
-    pt 默认把渲染区（光标到屏底的全部行）整体交给 prompt 布局，且输入
-    buffer 窗口会吸收所有剩余高度——表现为输入框贴着 scrollback 尾部、
-    下方大片留白。改法：在布局根 HSplit 头部插一个 spacer（weight 极大、
-    preferred=0 的弹性窗口，吸收全部剩余高度），再给 buffer 窗口打上
-    dont_extend_height——它就停在内容高度（message 区 + 输入行），被
-    spacer 压到最底。其余子项（校验栏 / bottom_toolbar 等）顺序不变。
+    By default pt hands the whole render region (everything from the cursor down to the
+    screen bottom) to the prompt layout, and the input buffer window absorbs all
+    remaining height -- which puts the input box right after the scrollback tail with a
+    large blank area below. The fix: insert a spacer at the head of the layout root
+    HSplit (a flexible window with a huge weight and preferred=0 that absorbs all the
+    remaining height), then set dont_extend_height on the buffer window -- it stops at
+    its content height (message area + input line) and gets pushed to the bottom by the
+    spacer. The other children (validation toolbar / bottom_toolbar, ...) keep their
+    order.
 
-    就地改动原 Window 对象（不换新实例）：Layout 的 focus 栈、visible_
-    windows 都持有原引用，换包一层会让这些引用脱链。
+    The original Window objects are modified in place (no new instances): Layout's focus
+    stack and visible_windows hold the original references, and wrapping them would
+    break those links.
     """
-    root = session.layout.container  # 布局根 HSplit（_Split）
+    root = session.layout.container  # layout root HSplit (_Split)
     buffer_window = next(
         w
         for w in _iter_windows(root)
         if isinstance(w.content, BufferControl) and w.content.buffer is session.default_buffer
     )
     buffer_window.dont_extend_height = to_filter(True)
-    # spacer：preferred=0 不参与首选高度分配，max 无上限 + weight 压倒性
-    # 大 → "增长到 max" 阶段的剩余高度全归它，把兄弟子项挤到底部。
+    # spacer: preferred=0 keeps it out of preferred-height allocation; unbounded max
+    # plus an overwhelming weight -> every remaining pixel in the "grow to max" phase
+    # goes to it, squeezing its siblings to the bottom.
     spacer = Window(width=Dimension(preferred=0), height=Dimension(weight=1000))
     root.children.insert(0, spacer)
 
 
 def _iter_windows(root: Any) -> Iterator[Any]:
-    """深度优先遍历布局树，产出所有 Window（含 floats 与条件分支）。"""
+    """Depth-first walk of the layout tree, yielding every Window (floats and
+    conditional branches included)."""
     stack: list[Any] = [root]
     while stack:
         node = stack.pop()

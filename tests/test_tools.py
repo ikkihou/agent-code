@@ -1,4 +1,5 @@
-"""tools/ 包重构的回归测试：锁定组装结果与公开 API。"""
+"""Regression tests for the tools/ package refactor: lock down the assembled registry and
+the public API."""
 
 from __future__ import annotations
 
@@ -75,7 +76,8 @@ def test_tool_registry_run_unknown_tool() -> None:
 
 
 def test_imports_have_no_circular_dependency() -> None:
-    # cron_tools → tools 方向必须先能加载；若 tools 包在加载期 import cron_tools 会失败。
+    # The cron_tools -> tools direction must load first; if the tools package imported
+    # cron_tools at import time this would fail.
     import agent_code.agent
     import agent_code.cli
     import agent_code.cron_tools
@@ -87,16 +89,16 @@ def test_imports_have_no_circular_dependency() -> None:
     assert agent_code.slash is not None
 
 
-# ---- 子进程输出解码（Windows GBK 回归）--------------------------------------
+# ---- subprocess output decoding (Windows GBK regression) --------------------
 
 
 def test_decode_subprocess_output_prefers_utf8() -> None:
-    # UTF-8 中文必须原样还原，不能按系统编码（GBK）解。
+    # UTF-8 CJK must round-trip as-is, not be decoded with the system encoding (GBK).
     assert decode_subprocess_output("中文输出".encode("utf-8")) == "中文输出"
 
 
 def test_decode_subprocess_output_falls_back_to_system_encoding(monkeypatch) -> None:
-    # 中文 Windows 上系统命令（dir 等）吐 GBK：UTF-8 解不开时应回退而不是崩。
+    # System commands (dir etc.) emit GBK on Chinese Windows: fall back instead of crashing.
     import agent_code.fs_safety as fs
 
     monkeypatch.setattr(fs.locale, "getpreferredencoding", lambda *a: "gbk")
@@ -104,7 +106,8 @@ def test_decode_subprocess_output_falls_back_to_system_encoding(monkeypatch) -> 
 
 
 def test_decode_subprocess_output_replaces_indecodable_bytes() -> None:
-    # 两种编码都解不开时用替换字符兜底，绝不抛 UnicodeDecodeError。
+    # When neither encoding works, fall back to replacement characters; never raise
+    # UnicodeDecodeError.
     out = decode_subprocess_output(b"\x94\x94\xff")
     assert isinstance(out, str)
 
@@ -114,14 +117,14 @@ def test_decode_subprocess_output_handles_empty() -> None:
     assert decode_subprocess_output(b"") == ""
 
 
-# ---- GBK 源文件的读/改（中文 Windows 常见）---------------------------------
+# ---- reading/editing GBK source files (common on Chinese Windows) -----------
 
 
 def test_read_text_file_decodes_gbk_source(tmp_path) -> None:
     from agent_code.fs_safety import read_text_file
 
     p = tmp_path / "src.py"
-    # newline="" 阻止 Windows 把 \n 转成 \r\n，断言才稳定。
+    # newline="" stops Windows turning \n into \r\n so the assertions stay stable.
     p.write_text("# 中文注释\n", encoding="gbk", newline="")
 
     text, encoding = read_text_file(p)
@@ -131,7 +134,7 @@ def test_read_text_file_decodes_gbk_source(tmp_path) -> None:
 
 
 def test_file_edit_preserves_gbk_encoding(tmp_path) -> None:
-    """编辑 GBK 源文件后必须仍是 GBK，不能被静默改写成 UTF-8。"""
+    """A GBK source file must stay GBK after an edit; it must not be silently rewritten as UTF-8."""
     from agent_code.fs_safety import read_text_file
     from agent_code.tools.edit import file_edit
 
@@ -146,7 +149,8 @@ def test_file_edit_preserves_gbk_encoding(tmp_path) -> None:
     )
 
     assert "Edited" in out
-    # 中文原样保留、且能用 GBK 严格解码回来（说明写回没改成 UTF-8）。
+    # The CJK text is preserved and still decodes strictly as GBK (so the write-back did
+    # not switch to UTF-8).
     assert p.read_bytes().decode("gbk") == "# 中文注释\nprint(2)\n"
 
 

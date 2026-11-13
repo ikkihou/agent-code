@@ -1,7 +1,8 @@
-"""提问（confirm/choice）请求的渲染与答案解析。
+"""Rendering and answer parsing for prompt (confirm/choice) requests.
 
-纯函数集合：把 worker 的结构化 PromptRequest 变成 Live 区预览文本 /
-输入提示符，并把用户输入解析回结构化答案。
+A set of pure functions: they turn the worker's structured PromptRequest into Live
+area preview text / an input prompt, and parse the user's input back into a structured
+answer.
 """
 
 from __future__ import annotations

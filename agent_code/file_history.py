@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def backup(cwd: Path, path: Path, old_content: str) -> Path | None:
-    """文件写入内容前，将器备份到.agent/history/<rel>/<ts>"""
+    """Back up the pre-write content of a file to .agent/history/<rel>/<ts>."""
     try:
         rel = path.resolve().relative_to(cwd.resolve())
     except ValueError:

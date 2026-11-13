@@ -5,10 +5,12 @@
 @Version :   1.0
 @Contact :   paulbao@mail.ecust.edu.cn
 
-session.py的功能：
-1. 创建会话
-2. 管理已有会话
-3. 读/写消息历史
+Session persistence.
+
+What session.py does:
+1. Create a session
+2. Manage existing sessions
+3. Read/write the message history
 """
 
 # here put the import lib
@@ -28,7 +30,7 @@ SessionRenderable = str | Table
 
 
 def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
-    """返回 session_id、user/assistant 消息数和文件修改时间。"""
+    """Return (session_id, user/assistant message count, file mtime) per session."""
     sessions_dir = _session_dir(cwd)
     summaries: list[tuple[str, int, float]] = []
 
@@ -60,12 +62,12 @@ def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
 def _sessions_renderable(cwd: Path) -> SessionRenderable:
     summaries = _session_summaries(cwd)
     if not summaries:
-        return "[dim]没有找到会话。[/dim]"
+        return "[dim]No sessions found.[/dim]"
 
     table = Table(title="Sessions")
     table.add_column("session_id")
-    table.add_column("消息数", justify="right")
-    table.add_column("最后更新时间")
+    table.add_column("messages", justify="right")
+    table.add_column("last updated")
     for session_id, message_count, modified_at in summaries:
         updated = (
             datetime.fromtimestamp(modified_at)
@@ -123,7 +125,7 @@ class Session:
 
     @property
     def history(self) -> list[dict[str, Any]]:
-        """解析jsonl文件，返回messages列表"""
+        """Parse the jsonl file and return the list of messages."""
         messages: list[dict[str, Any]] = []
         if not self.file_path.exists:
             return messages
@@ -155,18 +157,21 @@ class Session:
 
     @property
     def transcript_path(self) -> Path:
-        """渲染转录边车文件：与 session 文件同目录的 <sid>.transcript.jsonl。
+        """Path of the rendered transcript sidecar file: <sid>.transcript.jsonl, in the
+        same directory as the session file.
 
-        用 with_name 而非 with_suffix——多段后缀在 Python 3.12 的 with_suffix
-        下会抛 ValueError。
+        Uses with_name rather than with_suffix -- multi-part suffixes raise
+        ValueError under Python 3.12's with_suffix.
         """
         return self.file_path.with_name(self.file_path.stem + ".transcript.jsonl")
 
     def append_transcript(self, chunk: OutputChunk) -> None:
-        """把一条已渲染到输出面板的 OutputChunk 追加进转录文件。
+        """Append one OutputChunk already rendered to the output panel to the transcript
+        file.
 
-        片段（fragments）非空时一并持久化，resume 重放时才能还原当时的样式
-        （灰色 prompt 块等）；"rich" 格式存 markup 原文。
+        Non-empty fragments are persisted too, so a resume replay can restore the
+        original styling (grey prompt blocks and so on); format "rich" stores the raw
+        markup text.
         """
         if not chunk.text:
             return
@@ -180,7 +185,8 @@ class Session:
 
     @property
     def transcript_chunks(self) -> list[OutputChunk]:
-        """读回历史渲染转录，用于 resume 时重建输出面板。文件缺失返回空列表。"""
+        """Read back the historical render transcript, used to rebuild the output panel
+        on resume. Returns an empty list when the file is missing."""
         chunks: list[OutputChunk] = []
         if not self.transcript_path.exists():
             return chunks

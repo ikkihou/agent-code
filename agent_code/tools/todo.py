@@ -1,4 +1,4 @@
-"""任务清单工具：todo_write、todo_read。"""
+"""Task list tools: todo_write, todo_read."""
 
 from __future__ import annotations
 
@@ -36,7 +36,8 @@ def todo_write(args: dict[str, Any], ctx: ToolContext) -> str:
     has_verify = any(any(k in t.content.lower() for k in kws) for t in items)
     if completed >= 3 and not has_verify:
         lines.append(
-            "提示：关掉了 3+ 个任务但没有验证步骤，建议先加一个测试/验证项再收尾。"
+            "Hint: 3+ tasks were closed without a verification step; add a test/verification "
+            "item before wrapping up."
         )
     return "\n".join(lines)
 
@@ -47,7 +48,7 @@ def todo_read(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="todo_write",

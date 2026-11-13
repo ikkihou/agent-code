@@ -1,4 +1,4 @@
-"""文件读取/搜索工具：read_file、list_files、glob、grep。"""
+"""File read/search tools: read_file, list_files, glob, grep."""
 
 from __future__ import annotations
 
@@ -28,12 +28,13 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
         path = resolve_in_cwd(ctx.cwd, path_str)
         ensure_text_file(path)
         ensure_within_size(path)
-        # 源文件可能是 GBK（中文 Windows 常见）：按候选编码容错读，避免
-        # 严格 UTF-8 抛 UnicodeDecodeError，也避免 errors="replace" 把中文变乱码。
+        # Source files may be GBK (common on Chinese Windows): read tolerantly over the
+        # candidate encodings to avoid a strict-UTF-8 UnicodeDecodeError, and avoid
+        # errors="replace" turning CJK text into garbage.
         text, _ = read_text_file(path)
     except (FileNotFoundError, IsADirectoryError, ValueError) as exc:
         return f"error: {exc}"
-    # 记录"模型看到的版本"，给 Day 4 read-before-edit 留底。
+    # Record the version the model has seen: the basis for read-before-edit checks.
     ctx.read_state.record(path, text)
     return truncate_output(text)
 
@@ -69,7 +70,7 @@ def glob(args: dict[str, Any], ctx: ToolContext) -> str:
             matches.append(path)
     except NotImplementedError as exc:
         return f"error: {exc}"
-    # 按 mtime 倒序，让"最近改过的文件"排在前面。
+    # Sort by descending mtime so recently modified files come first.
     matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     matches = matches[:200]
 
@@ -90,7 +91,8 @@ def grep(args: dict[str, Any], ctx: ToolContext) -> str:
     except ValueError as exc:
         return f"error: {exc}"
 
-    # 系统装了 ripgrep 就走它，速度差一个数量级；否则退化纯 Python。
+    # Use ripgrep when the system has it -- an order of magnitude faster; otherwise
+    # fall back to pure Python.
     if shutil.which("rg"):
         return _grep_ripgrep(pattern, base, glob_arg, ignore_case, ctx)
     return _grep_python(pattern, base, glob_arg, ignore_case, ctx)
@@ -103,7 +105,8 @@ def _grep_ripgrep(
     ignore_case: bool,
     ctx: ToolContext,
 ) -> str:
-    # ripgrep 自带 .gitignore 解析和 VCS 目录跳过，我们只需要追加自定义 skip。
+    # ripgrep parses .gitignore and skips VCS directories itself; we only append the
+    # custom skip patterns.
     args: list[str] = ["rg", "--line-number", "--no-heading", "--max-columns", "500"]
     if ignore_case:
         args.append("-i")
@@ -112,17 +115,19 @@ def _grep_ripgrep(
     if glob_arg:
         args.extend(["--glob", glob_arg])
     args.append(pattern)
-    # rg 必须收绝对路径才能让 --glob 的相对规则可预测；
-    # 但输出给模型前要把每行的绝对前缀切回相对路径，省 token、和 _grep_python 保持一致。
+    # rg needs absolute paths for --glob's relative rules to be predictable; but
+    # before returning to the model we strip the absolute prefix from every line to
+    # save tokens and stay consistent with _grep_python.
     args.append(str(base))
     try:
-        # 不用 text=True：那会按系统默认编码（Windows 上是 GBK）解码，
-        # 遇到 UTF-8 内容直接抛 UnicodeDecodeError。统一按 UTF-8 读字节后自行解码。
+        # No text=True: that decodes with the system default (GBK on Windows) and a
+        # UnicodeDecodeError on UTF-8 content. Read bytes and decode ourselves.
         proc = subprocess.run(args, capture_output=True, timeout=30)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return f"error: {exc}"
 
-    # ripgrep 没匹配会返回 exit code 1，这不是错；真错才看 stderr。
+    # ripgrep exits with code 1 when nothing matches; that is not an error. Only
+    # stderr signals a real failure.
     if proc.returncode not in (0, 1):
         stderr_text = decode_subprocess_output(proc.stderr)
         return f"error: rg: {stderr_text.strip() or proc.returncode}"
@@ -131,8 +136,9 @@ def _grep_ripgrep(
 
 
 def _relativize_rg_output(stdout: str, cwd: Path) -> str:
-    # rg 每行形如 "/abs/path:lineno:content"。命中 cwd 前缀的就切成相对路径，
-    # 不命中（罕见）原样保留，避免吞掉模型可能想看到的诊断信息。
+    # rg emits lines like "/abs/path:lineno:content". Lines under the cwd prefix are
+    # rewritten to relative paths; the rest (rare) are kept as-is so no diagnostic
+    # information the model might need gets swallowed.
     cwd_prefix = f"{cwd}/"
     lines = [
         line[len(cwd_prefix) :] if line.startswith(cwd_prefix) else line
@@ -221,7 +227,7 @@ def project_tree(args: dict[str, Any], ctx: ToolContext) -> str:
 
 
 def tools() -> list[Tool]:
-    """本模块工具的注册元数据——与实现就近存放。"""
+    """Registration metadata for this module's tools -- kept next to the implementation."""
     return [
         Tool(
             name="read_file",
