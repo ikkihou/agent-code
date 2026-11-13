@@ -38,7 +38,12 @@ from ..wire import (
 )
 from .completer import SlashCompleter
 from .events import event_to_chunks, render_user_prompt
-from .layout import _install_bottom_anchored_layout, bottom_toolbar, build_style
+from .layout import (
+    _install_bottom_anchored_layout,
+    _strip_frame_side_borders,
+    bottom_toolbar,
+    build_style,
+)
 from .live import LiveArea, _preview_lines
 from .prompts import (
     parse_choice_index,
@@ -372,12 +377,18 @@ class InteractiveShell:
             complete_while_typing=True,
             style=style,
             key_bindings=self._build_key_bindings(),
-            # Draw a frame around the input area (┌─┐│└─┘) to separate it from the scrollback.
-            show_frame=True,
+            # Soft-wrapped input lines align under the text, past the '> ' prefix
+            # (the default is no indentation in single-line mode).
+            prompt_continuation=lambda width, line_number, wrap_count: " " * width,
             # Default is 8: reserving 8 rows for the completion menu leaves a large blank
             # area under a single-line input, especially ugly once the frame is drawn. The
             # layout grows temporarily when the menu appears, so no reservation is needed.
             reserve_space_for_menu=0,
+            # Erase the prompt UI when a submission completes. With the default (False)
+            # the renderer keeps the finished layout on screen -- the typed line -- and the
+            # styled echo committed right after would show it a second time. Erasing first
+            # leaves the echo as the only copy.
+            erase_when_done=True,
             # Explicitly bind the current AppSession's input/output: without this,
             # PromptSession builds its own Win32 console input from default widgets and
             # pipes/test doubles stop working.
@@ -386,6 +397,7 @@ class InteractiveShell:
         )
         self._session = session
         _install_bottom_anchored_layout(session)
+        _strip_frame_side_borders(session)
 
         worker = threading.Thread(target=self._work_loop, daemon=True)
         worker.start()
@@ -399,7 +411,11 @@ class InteractiveShell:
             with patch_stdout(raw=False):
                 while True:
                     try:
-                        text = await session.prompt_async()
+                        # show_frame must be passed HERE, not to the constructor:
+                        # prompt_async(show_frame=False) is the default parameter value
+                        # (not None), so every call overwrites the session attribute with
+                        # False. Passing True each round keeps the frame on.
+                        text = await session.prompt_async(show_frame=True)
                         self._submit_text(text)
                     except (EOFError, KeyboardInterrupt):
                         break
@@ -423,6 +439,14 @@ class InteractiveShell:
             request = self._pending_prompt["request"]
             fragments.append(("class:preview", prompt_for_request(request) + "\n"))
         fragments.extend(self._live.formatted(columns, time.monotonic()))
+        # '>' prompt on the input line itself: a message fragment WITHOUT a trailing
+        # newline lands on the same line as the input. The Live fragments above all end
+        # with '\n' except an open stream tail (stream_pending) -- force a '\n' there so
+        # the prompt never concatenates onto unfinished body text (the tail is committed
+        # to scrollback at turn end anyway, so the visual line break is transient).
+        if fragments and not fragments[-1][1].endswith("\n"):
+            fragments.append(("", "\n"))
+        fragments.append(("class:prompt", "> "))
         return FormattedText(fragments)
 
     # ---- keys ----------------------------------------------------------------

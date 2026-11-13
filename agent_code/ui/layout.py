@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 from prompt_toolkit.filters import to_filter
-from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.containers import HSplit, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.shortcuts import PromptSession
 from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets.base import Border
 
 from ..runtime import RuntimeState
 
@@ -66,6 +67,52 @@ def _install_bottom_anchored_layout(session: PromptSession[str]) -> None:
     # goes to it, squeezing its siblings to the bottom.
     spacer = Window(width=Dimension(preferred=0), height=Dimension(weight=1000))
     root.children.insert(0, spacer)
+
+
+def _strip_frame_side_borders(session: PromptSession[str]) -> None:
+    """Remove the Frame's left/right vertical borders, keeping only the horizontal
+    rules (top ┌──┐ / bottom └──┘, no │ columns).
+
+    pt's ``show_frame=True`` wraps the input in ``Frame``: an HSplit of
+    [top rule, VSplit(│ body │), bottom rule]. We want the rules (they separate the
+    input area from scrollback) but not the side columns -- the Live area is
+    full-width text, so bars only indent it. The middle VSplit is
+    [Window(│), DynamicContainer(body), Window(│)]; collapsing the two border
+    windows to zero width removes the columns while leaving the body (and thus the
+    input buffer window) untouched, so Layout's focus references stay valid.
+
+    The Frame split is located by shape, not position, so this works whether or
+    not any spacer has been inserted into the layout root already -- and whether
+    ``show_frame`` is currently True or False: pt builds the Frame branch into the
+    layout as the ConditionalContainer's content regardless of the filter value, so
+    the collapse sticks even though ``show_frame`` is only turned on per
+    ``prompt_async(show_frame=True)`` call.
+    """
+    for split in _iter_containers(session.layout.container):
+        if not isinstance(split, HSplit) or len(split.children) != 3:
+            continue
+        middle = split.children[1]
+        if not (isinstance(middle, VSplit) and len(middle.children) == 3):
+            continue
+        left, _body, right = middle.children
+        if _is_vertical_bar(left) and _is_vertical_bar(right):
+            left.width = Dimension.exact(0)
+            right.width = Dimension.exact(0)
+            return
+
+
+def _is_vertical_bar(container: Any) -> bool:
+    """True for Frame's 1-column vertical-border fill windows."""
+    return isinstance(container, Window) and container.char == Border.VERTICAL
+
+
+def _iter_containers(root: Any) -> Iterator[Any]:
+    """Depth-first walk yielding every container node (floats included)."""
+    stack: list[Any] = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(node.get_children())
 
 
 def _iter_windows(root: Any) -> Iterator[Any]:

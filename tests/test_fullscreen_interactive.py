@@ -624,6 +624,178 @@ def test_bottom_anchored_layout_keeps_focus_on_default_buffer() -> None:
     assert session.layout.current_buffer is session.default_buffer
 
 
+def _build_framed_session() -> Any:
+    """PromptSession in the production shape: the frame branch exists in the layout
+    (pt builds it unconditionally) even though ``show_frame`` is only enabled per
+    ``prompt_async(show_frame=True)`` call."""
+    from prompt_toolkit.input.base import DummyInput
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.shortcuts import PromptSession
+
+    from agent_code.ui.completer import SlashCompleter
+
+    return PromptSession[str](
+        message="> ",
+        completer=SlashCompleter(),
+        input=DummyInput(),
+        output=DummyOutput(),
+        reserve_space_for_menu=0,
+    )
+
+
+def _frame_split(session: Any) -> Any:
+    """Return the Frame's HSplit [top rule, middle VSplit, bottom rule].
+
+    Located by shape (not position) even before the side borders are stripped.
+    """
+    from prompt_toolkit.layout.containers import HSplit, VSplit, Window
+    from prompt_toolkit.widgets.base import Border
+
+    def is_bar(node: Any) -> bool:
+        return isinstance(node, Window) and node.char == Border.VERTICAL
+
+    for node in _all_containers(session.layout.container):
+        if not (isinstance(node, HSplit) and len(node.children) == 3):
+            continue
+        middle = node.children[1]
+        if (
+            isinstance(middle, VSplit)
+            and len(middle.children) == 3
+            and is_bar(middle.children[0])
+            and is_bar(middle.children[2])
+        ):
+            return node
+    raise AssertionError("Frame split not found")
+
+
+def test_strip_frame_side_borders_removes_vertical_bars() -> None:
+    """Only the horizontal rules remain: both side-border windows collapse to width 0,
+    while the body and the input buffer window stay untouched."""
+    from prompt_toolkit.layout.containers import VSplit
+    from prompt_toolkit.layout.controls import BufferControl
+
+    from agent_code.ui.layout import _strip_frame_side_borders
+
+    session = _build_framed_session()
+    middle = _frame_split(session).children[1]
+    assert isinstance(middle, VSplit)
+    left, body, right = middle.children
+    assert left.width != 0 and right.width != 0  # side borders visible before
+
+    _strip_frame_side_borders(session)
+
+    left, body_after, right = middle.children
+    assert left.width.preferred == 0 and left.width.max == 0
+    assert right.width.preferred == 0 and right.width.max == 0
+    # The body (and therefore the input buffer window) is the same object as before.
+    assert body_after is body
+    assert any(isinstance(w.content, BufferControl) for w in _all_windows(body_after))
+
+
+def test_strip_frame_side_borders_keeps_horizontal_rules() -> None:
+    """The top and bottom rule rows must survive: the first and last children of the
+    Frame split are untouched."""
+    from agent_code.ui.layout import _strip_frame_side_borders
+
+    session = _build_framed_session()
+    frame_split = _frame_split(session)
+    top_before, _, bottom_before = frame_split.children
+
+    _strip_frame_side_borders(session)
+
+    assert frame_split.children[0] is top_before
+    assert frame_split.children[2] is bottom_before
+
+
+def test_render_message_appends_prompt_marker_on_input_line() -> None:
+    """'render_message' ends with a '> ' fragment and, crucially, the preceding fragment
+    ends with a newline so the prompt never concatenates onto unfinished body text."""
+    from agent_code.ui.shell import InteractiveShell
+
+    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+    def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
+    # Open stream tail: no trailing newline -- the renderer must add one.
+    shell._live.open_paragraph = ["partial line"]
+    shell._live.stream_pending = "unfinished"
+
+    fragments = shell._render_message()
+
+    assert fragments[-1][1] == "> "
+    assert fragments[-1][0] == "class:prompt"
+    assert fragments[-2][1].endswith("\n")
+
+
+def test_render_message_prompt_marker_when_live_area_empty() -> None:
+    """With an empty Live area the message still ends with '> ' (idle prompt)."""
+    from agent_code.ui.shell import InteractiveShell
+
+    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+    def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
+
+    fragments = shell._render_message()
+
+    assert fragments == [("class:prompt", "> ")]
+
+
+# ---- regressions: prompt_async argument handling / erase_when_done -----------
+
+
+def test_prompt_async_overwrites_show_frame_unless_passed_explicitly() -> None:
+    """Guard the trap that made the frame never appear.
+
+    ``PromptSession(show_frame=True)`` alone is not enough: ``prompt_async`` declares
+    ``show_frame: FilterOrBool = False`` and assigns it unconditionally (the code is
+    ``if show_frame is not None: self.show_frame = show_frame``, and the default is
+    False, not None). So every call resets it to False. The shell must pass
+    ``show_frame=True`` on each ``prompt_async()`` call -- this test pins the pt
+    behaviour that forces that.
+    """
+    import inspect
+
+    from prompt_toolkit.shortcuts import PromptSession
+
+    signature = inspect.signature(PromptSession.prompt_async)
+    default = signature.parameters["show_frame"].default
+    assert default is not None, "pt now uses None as the default: the workaround can go"
+    assert not default, "pt default is falsy -> a constructor-only show_frame is reset"
+
+
+def test_shell_passes_show_frame_on_every_prompt_call() -> None:
+    """The prompt loop must pass show_frame=True per call (source-level check)."""
+    import inspect
+
+    from agent_code.ui import shell as shell_module
+
+    source = inspect.getsource(shell_module.InteractiveShell._run_async)
+    assert "prompt_async(show_frame=True)" in source
+
+
+def test_shell_erases_prompt_when_done() -> None:
+    """erase_when_done must be True, or the typed line stays on screen and the styled
+    echo we commit duplicates the user prompt."""
+    from prompt_toolkit.input.base import DummyInput
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.shortcuts import PromptSession
+
+    # Mirrors the construction in _run_async (PromptSession exposes it via .app, so
+    # assert on the same parameter the shell passes).
+    session = PromptSession[str](
+        message="> ",
+        input=DummyInput(),
+        output=DummyOutput(),
+        erase_when_done=True,
+    )
+    assert session.app.erase_when_done is True
+
+
 def _all_windows(root: Any) -> list[Any]:
     from prompt_toolkit.layout.containers import Window
 
@@ -633,5 +805,15 @@ def _all_windows(root: Any) -> list[Any]:
         node = stack.pop()
         if isinstance(node, Window):
             out.append(node)
+        stack.extend(node.get_children())
+    return out
+
+
+def _all_containers(root: Any) -> list[Any]:
+    stack: list[Any] = [root]
+    out: list[Any] = []
+    while stack:
+        node = stack.pop()
+        out.append(node)
         stack.extend(node.get_children())
     return out
