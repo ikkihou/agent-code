@@ -39,7 +39,8 @@ from ..wire import (
 from .completer import SlashCompleter
 from .events import event_to_chunks, render_user_prompt
 from .layout import (
-    _install_bottom_anchored_layout,
+    _collapse_input_height,
+    _install_live_area_window,
     _strip_frame_side_borders,
     bottom_toolbar,
     build_style,
@@ -369,7 +370,11 @@ class InteractiveShell:
             _commit_chunk(chunk)
 
         session = PromptSession[str](
-            message=self._render_message,
+            # Only the input prompt lives in `message`: pt renders it INSIDE the frame,
+            # and the frame is there to delimit the input line alone. The Live area
+            # (spinner / streaming tail / pending question) gets its own window above
+            # the frame -- see _install_live_area_window.
+            message=lambda: FormattedText([("class:prompt", "> ")]),
             bottom_toolbar=lambda: FormattedText(
                 [("class:bottom-toolbar", bottom_toolbar(self._state))]
             ),
@@ -396,8 +401,9 @@ class InteractiveShell:
             output=output,
         )
         self._session = session
-        _install_bottom_anchored_layout(session)
+        _collapse_input_height(session)
         _strip_frame_side_borders(session)
+        self._install_live_window(session)
 
         worker = threading.Thread(target=self._work_loop, daemon=True)
         worker.start()
@@ -424,9 +430,19 @@ class InteractiveShell:
             spinner_task.cancel()
             self._state.asker = None
 
-    # ---- prompt message (Live area) rendering ---------------------------------
+    # ---- Live area rendering (own window, above the input frame) --------------
 
-    def _render_message(self) -> FormattedText:
+    def _install_live_window(self, session: PromptSession[str]) -> None:
+        """Put the Live area in its own window right above the input frame."""
+        _install_live_area_window(session, self._render_live)
+
+    def _render_live(self) -> FormattedText:
+        """Render the Live area: spinner / pending question / streaming tail.
+
+        Rendered as its own layout window above the input frame, NOT as the prompt
+        ``message`` -- with message-based rendering all of this would appear inside
+        the frame, next to the input line.
+        """
         columns = 80
         app = get_app_or_none()
         if app is not None:
@@ -439,14 +455,13 @@ class InteractiveShell:
             request = self._pending_prompt["request"]
             fragments.append(("class:preview", prompt_for_request(request) + "\n"))
         fragments.extend(self._live.formatted(columns, time.monotonic()))
-        # '>' prompt on the input line itself: a message fragment WITHOUT a trailing
-        # newline lands on the same line as the input. The Live fragments above all end
-        # with '\n' except an open stream tail (stream_pending) -- force a '\n' there so
-        # the prompt never concatenates onto unfinished body text (the tail is committed
-        # to scrollback at turn end anyway, so the visual line break is transient).
-        if fragments and not fragments[-1][1].endswith("\n"):
-            fragments.append(("", "\n"))
-        fragments.append(("class:prompt", "> "))
+        # Drop the trailing newline: the window's preferred height is derived from the
+        # content, and a final empty line would reserve a blank row while nothing is
+        # in progress.
+        while fragments and not fragments[-1][1].strip():
+            fragments.pop()
+        if fragments:
+            fragments[-1] = (fragments[-1][0], fragments[-1][1].rstrip("\n"))
         return FormattedText(fragments)
 
     # ---- keys ----------------------------------------------------------------

@@ -465,8 +465,8 @@ def test_slash_completer_ignores_non_command_input() -> None:
 # ---- prompt state machine (the pending branch of submit_text, driven by a fake future) ----
 
 
-def test_shell_render_message_includes_pending_prompt() -> None:
-    """While a prompt is pending, message rendering must include the input prompt and must
+def test_shell_render_live_includes_pending_prompt() -> None:
+    """While a prompt is pending, Live-area rendering must include the input prompt and must
     never raise.
 
     We once mutated the return value with FormattedText.fragments.insert -- FormattedText
@@ -482,7 +482,7 @@ def test_shell_render_message_includes_pending_prompt() -> None:
         "future": None,
     }
 
-    text = "".join(t for _, t in shell._render_message())
+    text = "".join(t for _, t in shell._render_live())
     assert "Confirm [y/N]:" in text
 
 
@@ -542,86 +542,7 @@ def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
         loop.close()
 
 
-# ---- layout reshaping: input area Frame + bottom anchoring --------------------
-
-
-def _build_session() -> Any:
-    """Build a PromptSession with a completer (DummyOutput, no real terminal involved)."""
-    from prompt_toolkit.input.base import DummyInput
-    from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.shortcuts import PromptSession
-
-    from agent_code.ui.completer import SlashCompleter
-
-    return PromptSession[str](
-        message="> ",
-        completer=SlashCompleter(),
-        complete_while_typing=True,
-        input=DummyInput(),
-        output=DummyOutput(),
-    )
-
-
-def test_bottom_anchored_layout_pins_buffer_window() -> None:
-    """After the reshaping: the root HSplit has a spacer at its head and the buffer window
-    has dont_extend_height.
-
-    These two mechanisms are exactly what pins the input area to the bottom: the spacer
-    absorbs the remaining height and the buffer window stops at its content height and is
-    pushed to the bottom.
-    """
-    from prompt_toolkit.layout.containers import HSplit, Window
-    from prompt_toolkit.layout.controls import BufferControl
-
-    from agent_code.ui.layout import _install_bottom_anchored_layout
-
-    session = _build_session()
-    root_before = session.layout.container
-    assert isinstance(root_before, HSplit)
-    # The layout has two BufferControl windows (the search control is a subclass), so pick
-    # the one whose buffer is the default buffer -- mirroring _install's lookup logic.
-    buffer_window = next(
-        w
-        for w in _all_windows(root_before)
-        if isinstance(w.content, BufferControl) and w.content.buffer is session.default_buffer
-    )
-    assert not buffer_window.dont_extend_height()
-
-    _install_bottom_anchored_layout(session)
-
-    root = session.layout.container
-    assert root.children[0] is not buffer_window  # a spacer was inserted at the head
-    spacer = root.children[0]
-    assert isinstance(spacer, Window)
-    assert spacer.height.weight >= 1000  # overwhelming weight, takes all remaining height
-    # Modified in place: the buffer window in the layout tree is still the original object
-    # (Layout's focus stack holds the reference).
-    assert any(
-        w is buffer_window and w.dont_extend_height()
-        for w in _all_windows(root)
-        if isinstance(w.content, BufferControl)
-    )
-    # The other children keep their order (the original children are the tail of the new list).
-    original_children = root.children[1:]
-    assert all("bottom" not in str(c) or c is not None for c in original_children)
-
-
-def test_bottom_anchored_layout_keeps_focus_on_default_buffer() -> None:
-    """Modify the Window in place instead of wrapping it: the control reference held by the
-    focus stack must be preserved."""
-    from prompt_toolkit.layout.controls import BufferControl
-
-    from agent_code.ui.layout import _install_bottom_anchored_layout
-
-    session = _build_session()
-    control_before = session.layout.current_control
-
-    _install_bottom_anchored_layout(session)
-
-    # current_control is still that same BufferControl (the default buffer).
-    assert isinstance(session.layout.current_control, BufferControl)
-    assert session.layout.current_control is control_before
-    assert session.layout.current_buffer is session.default_buffer
+# ---- layout reshaping: input area Frame ---------------------------------------
 
 
 def _build_framed_session() -> Any:
@@ -668,6 +589,55 @@ def _frame_split(session: Any) -> Any:
     raise AssertionError("Frame split not found")
 
 
+def _default_buffer_window(session: Any) -> Any:
+    """The Window holding the input buffer (the layout has several BufferControls)."""
+    from prompt_toolkit.layout.controls import BufferControl
+
+    return next(
+        w
+        for w in _all_windows(session.layout.container)
+        if isinstance(w.content, BufferControl) and w.content.buffer is session.default_buffer
+    )
+
+
+def test_collapse_input_height_stops_at_content() -> None:
+    """The input area must not absorb the rest of the screen: with a bare Dimension() the
+    buffer window stretches to the bottom_toolbar, the frame encloses a tall empty box,
+    and run_in_terminal commits land inside it instead of scrolling above the prompt."""
+    from agent_code.ui.layout import _collapse_input_height
+
+    session = _build_framed_session()
+    buffer_window = _default_buffer_window(session)
+    assert not buffer_window.dont_extend_height()
+
+    _collapse_input_height(session)
+
+    assert buffer_window.dont_extend_height()
+    # In place: the focus stack keeps its reference, so the same object must be in the tree.
+    assert _default_buffer_window(session) is buffer_window
+
+
+def test_collapse_input_height_reserves_rows_only_while_menu_is_open() -> None:
+    """The completion menu is a Float inside the input window, so a one-row body would
+    clip it away. The height is dynamic: MENU_ROWS while completions are pending, 0
+    otherwise -- rows are taken only while the menu is actually up."""
+    from agent_code.ui.layout import MENU_ROWS, _collapse_input_height
+
+    session = _build_framed_session()
+    _collapse_input_height(session)
+    buffer_window = _default_buffer_window(session)
+
+    assert buffer_window.height().min == 0
+
+    session.default_buffer.complete_state = object()  # any non-None completion state
+    try:
+        assert buffer_window.height().min == MENU_ROWS
+    finally:
+        session.default_buffer.complete_state = None
+
+    assert buffer_window.height().min == 0
+
+
 def test_strip_frame_side_borders_removes_vertical_bars() -> None:
     """Only the horizontal rules remain: both side-border windows collapse to width 0,
     while the body and the input buffer window stay untouched."""
@@ -707,9 +677,10 @@ def test_strip_frame_side_borders_keeps_horizontal_rules() -> None:
     assert frame_split.children[2] is bottom_before
 
 
-def test_render_message_appends_prompt_marker_on_input_line() -> None:
-    """'render_message' ends with a '> ' fragment and, crucially, the preceding fragment
-    ends with a newline so the prompt never concatenates onto unfinished body text."""
+def test_render_live_excludes_prompt_marker_and_live_content() -> None:
+    """The Live area window shows in-progress content only: no '> ' marker (the input
+    prompt belongs to the frame's message), and no trailing blank line (which would
+    reserve a row while idle)."""
     from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
@@ -718,19 +689,20 @@ def test_render_message_appends_prompt_marker_on_input_line() -> None:
         return None
 
     shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
-    # Open stream tail: no trailing newline -- the renderer must add one.
-    shell._live.open_paragraph = ["partial line"]
-    shell._live.stream_pending = "unfinished"
+    shell._live.open_paragraph = ["streamed line"]
+    shell._live.stream_pending = "partial"
 
-    fragments = shell._render_message()
+    fragments = shell._render_live()
+    text = "".join(t for _, t in fragments)
 
-    assert fragments[-1][1] == "> "
-    assert fragments[-1][0] == "class:prompt"
-    assert fragments[-2][1].endswith("\n")
+    assert ">" not in text
+    assert "streamed line" in text
+    assert not fragments[-1][1].endswith("\n")
 
 
-def test_render_message_prompt_marker_when_live_area_empty() -> None:
-    """With an empty Live area the message still ends with '> ' (idle prompt)."""
+def test_render_live_is_empty_when_idle() -> None:
+    """Idle: nothing in progress -> no fragments at all, so the Live window's preferred
+    height is zero and it occupies no rows."""
     from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
@@ -740,9 +712,33 @@ def test_render_message_prompt_marker_when_live_area_empty() -> None:
 
     shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
 
-    fragments = shell._render_message()
+    assert shell._render_live() == []
 
-    assert fragments == [("class:prompt", "> ")]
+
+def test_live_window_is_above_the_input_frame() -> None:
+    """The Live area must be a sibling of the frame branch placed immediately above it --
+    not part of the prompt message, which pt renders inside the frame."""
+    from agent_code.ui.layout import _install_live_area_window
+
+    session = _build_framed_session()
+    from agent_code.ui.layout import _find_frame_split
+
+    frame_split = _find_frame_split(session)
+    assert frame_split is not None
+    root_before = session.layout.container
+
+    live_window = _install_live_area_window(session, lambda: [("", "live")])
+
+    root = session.layout.container
+    assert root is root_before
+    live_index = root.children.index(live_window)
+    frame_index = next(
+        i
+        for i, child in enumerate(root.children)
+        if any(node is frame_split for node in _all_containers(child))
+    )
+    assert live_index == frame_index - 1  # immediately above the frame
+    assert live_window.dont_extend_height()  # content height, not the full width
 
 
 # ---- regressions: prompt_async argument handling / erase_when_done -----------
