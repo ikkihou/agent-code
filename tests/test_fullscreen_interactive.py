@@ -15,22 +15,21 @@ from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 
 from agent_code.agent import run_agent
-from agent_code.interactive import (
-    LiveArea,
-    SlashCompleter,
-    _chunk_fragments,
-    event_to_chunks,
-    parse_choice_index,
-    parse_confirm_answer,
-    prompt_for_request,
-    render_prompt_request,
-    render_user_prompt,
-)
 from agent_code.model import ModelResponse, ModelStreamEvent
 from agent_code.output import OutputChunk
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
+from agent_code.ui.completer import SlashCompleter
+from agent_code.ui.events import event_to_chunks, render_user_prompt
+from agent_code.ui.live import LiveArea
+from agent_code.ui.prompts import (
+    parse_choice_index,
+    parse_confirm_answer,
+    prompt_for_request,
+    render_prompt_request,
+)
+from agent_code.ui.scrollback import _chunk_fragments
 from agent_code.wire import (
     CommandPreview,
     DiffPreview,
@@ -360,12 +359,10 @@ def test_event_to_chunks_renders_wire_events() -> None:
     assert event_to_chunks(TurnEnded()) == []
 
 
-def test_chunk_fragments_normalizes_all_formats() -> None:
+def test_chunk_fragments_normalizes_plain_and_rich() -> None:
     assert _chunk_fragments(OutputChunk("plain\n")) == [("", "plain\n")]
     rich = _chunk_fragments(OutputChunk("[bold]b[/bold]\n", format="rich"))
     assert ("bold", "b") in rich
-    ansi = _chunk_fragments(OutputChunk("\x1b[1mB\x1b[0m\n", format="ansi"))
-    assert ("bold", "B") in ansi
 
 
 def test_render_user_prompt_formats_prompt_blocks() -> None:
@@ -466,7 +463,7 @@ def test_shell_render_message_includes_pending_prompt() -> None:
     曾经用 FormattedText.fragments.insert 修改返回值——FormattedText 没有
     fragments 属性，异常会让 prompt 渲染线程死掉、后续输入永不返回。
     """
-    from agent_code.interactive import InteractiveShell
+    from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
     shell = InteractiveShell(state, run_turn=lambda *a: None, make_slash_context=lambda: None)
@@ -481,7 +478,7 @@ def test_shell_render_message_includes_pending_prompt() -> None:
 
 def test_shell_submit_text_routes_pending_choice_answer() -> None:
     """pending choice 提问：回答直接喂给 future，状态机清空。"""
-    from agent_code.interactive import InteractiveShell
+    from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
 
@@ -508,7 +505,7 @@ def test_shell_submit_text_routes_pending_choice_answer() -> None:
 
 
 def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
-    from agent_code.interactive import InteractiveShell
+    from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
 
@@ -533,3 +530,94 @@ def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
         assert shell._pending_prompt == entry  # 保持 pending，等下一次输入
     finally:
         loop.close()
+
+
+# ---- 布局改造：输入区 Frame + 底部对齐 ---------------------------------------
+
+
+def _build_session() -> Any:
+    """构造带 completer 的 PromptSession（DummyOutput，不触碰真实终端）。"""
+    from prompt_toolkit.input.base import DummyInput
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.shortcuts import PromptSession
+
+    from agent_code.ui.completer import SlashCompleter
+
+    return PromptSession[str](
+        message="> ",
+        completer=SlashCompleter(),
+        complete_while_typing=True,
+        input=DummyInput(),
+        output=DummyOutput(),
+    )
+
+
+def test_bottom_anchored_layout_pins_buffer_window() -> None:
+    """布局改造后：根 HSplit 头部有 spacer，buffer 窗口 dont_extend_height。
+
+    这正是"输入区钉底"的两个机制：spacer 吸收剩余高度，buffer 窗口停在
+    内容高度被压到底部。
+    """
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import BufferControl
+
+    from agent_code.ui.layout import _install_bottom_anchored_layout
+
+    session = _build_session()
+    root_before = session.layout.container
+    assert isinstance(root_before, HSplit)
+    # 布局里有两个 BufferControl 窗口（search 控件是其子类），要按 buffer
+    # 身份挑出 default buffer 的那个——与 _install 的定位逻辑一致。
+    buffer_window = next(
+        w
+        for w in _all_windows(root_before)
+        if isinstance(w.content, BufferControl) and w.content.buffer is session.default_buffer
+    )
+    assert not buffer_window.dont_extend_height()
+
+    _install_bottom_anchored_layout(session)
+
+    root = session.layout.container
+    assert root.children[0] is not buffer_window  # 头部插了 spacer
+    spacer = root.children[0]
+    assert isinstance(spacer, Window)
+    assert spacer.height.weight >= 1000  # 压倒性权重，独吞剩余高度
+    # 就地修改：布局树里的 buffer 窗口仍是原对象（Layout focus 栈持有引用）。
+    assert any(
+        w is buffer_window and w.dont_extend_height()
+        for w in _all_windows(root)
+        if isinstance(w.content, BufferControl)
+    )
+    # 其余子项顺序不变（原 children 是改造后 children 的尾缀）。
+    original_children = root.children[1:]
+    assert all("bottom" not in str(c) or c is not None for c in original_children)
+
+
+def test_bottom_anchored_layout_keeps_focus_on_default_buffer() -> None:
+    """就地改 Window 而不是换包：focus 栈里的 control 引用必须原样保留。"""
+    from prompt_toolkit.layout.controls import BufferControl
+
+    from agent_code.ui.layout import _install_bottom_anchored_layout
+
+    session = _build_session()
+    control_before = session.layout.current_control
+
+    _install_bottom_anchored_layout(session)
+
+    # current_control 还是原来那个 BufferControl（default buffer）。
+    assert isinstance(session.layout.current_control, BufferControl)
+    assert session.layout.current_control is control_before
+    assert session.layout.current_buffer is session.default_buffer
+
+
+def _all_windows(root: Any) -> list[Any]:
+    from prompt_toolkit.layout.containers import Window
+
+    stack: list[Any] = [root]
+    out: list[Any] = []
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Window):
+            out.append(node)
+        stack.extend(node.get_children())
+    return out

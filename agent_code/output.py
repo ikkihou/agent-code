@@ -2,9 +2,8 @@
 
 OutputChunk 是所有前端（one-shot 直打 / REPL 面板 / session 转录持久化）共享的
 唯一输出单元：纯文本 + 可选样式片段。样式片段直接使用 prompt_toolkit 的内联
-样式串（"bold yellow"、"bg:#444444"）——live 路径不再经过 ANSI：Rich 只负责
+样式串（"bold yellow"、"bg:#444444"）——输出路径不经过 ANSI：Rich 只负责
 把 markup 文本解析成带样式信息的 Text，翻译成片段后由各前端自行渲染。
-"ansi" 格式仅为回放旧版 transcript 记录保留。
 """
 
 # here put the import lib
@@ -14,12 +13,11 @@ from dataclasses import dataclass
 from io import StringIO
 from typing import Callable, Literal
 
-from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.styles.style import parse_color
 from rich.color import Color
 from rich.console import Console
 
-OutputFormat = Literal["plain", "ansi", "rich"]
+OutputFormat = Literal["plain", "rich"]
 
 # (样式串, 文本) 片段；样式串用 prompt_toolkit 内联样式词表，如 "bold yellow"。
 StyleAndText = tuple[str, str]
@@ -37,8 +35,7 @@ class OutputChunk:
     - text 永远是无 ANSI 纯文本（持久化、剪贴板复制、纯文本消费方都用它）；
     - fragments 非空时即为最终样式，前端直接采用，不再做任何解析；
     - format == "rich" 表示 text 是 Rich markup（如 ``[bold]x[/bold]``），
-      由前端渲染：REPL 转片段、one-shot 交给 Rich；
-    - format == "ansi" 表示 text 内嵌 ANSI 转义，仅旧 transcript 回放出现。
+      由前端渲染：REPL 转片段、one-shot 交给 Rich。
     """
 
     text: str
@@ -150,9 +147,6 @@ def chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
         return list(chunk.fragments)
     if chunk.format == "rich":
         return rich_markup_fragments(chunk.text)
-    if chunk.format == "ansi":
-        # 旧版 transcript 记录回放：ANSI 字符串解析回片段。
-        return [(style, text) for style, text, *_ in ANSI(chunk.text).__pt_formatted_text__()]
     if chunk.text:
         return [("", chunk.text)]
     return []

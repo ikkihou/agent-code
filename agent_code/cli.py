@@ -19,13 +19,13 @@ import typer
 from rich.console import Console
 
 from .agent import build_system_prompt, run_agent
-from .interactive import run_interactive_shell
 from .model import create_provider
 from .runtime import RuntimeState
 from .scheduler import CronScheduler
 from .session import Session
 from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
+from .ui.shell import run_interactive_shell
 from .wire import (
     CommandPreview,
     DiffPreview,

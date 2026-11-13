@@ -166,7 +166,7 @@ class Session:
         """把一条已渲染到输出面板的 OutputChunk 追加进转录文件。
 
         片段（fragments）非空时一并持久化，resume 重放时才能还原当时的样式
-        （灰色 prompt 块等）；"rich" 格式存 markup 原文，"ansi" 为旧版记录。
+        （灰色 prompt 块等）；"rich" 格式存 markup 原文。
         """
         if not chunk.text:
             return

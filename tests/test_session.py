@@ -9,13 +9,13 @@ from agent_code.session import Session
 def test_transcript_roundtrip(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
     session.append_transcript(OutputChunk("第一行\n"))
-    session.append_transcript(OutputChunk("\x1b[97;48;5;238m> hi\x1b[0m\n\n", format="ansi"))
+    session.append_transcript(OutputChunk("[bold]> hi[/bold]\n\n", format="rich"))
 
     chunks = session.transcript_chunks
 
     assert chunks == [
         OutputChunk("第一行\n"),
-        OutputChunk("\x1b[97;48;5;238m> hi\x1b[0m\n\n", format="ansi"),
+        OutputChunk("[bold]> hi[/bold]\n\n", format="rich"),
     ]
 
 
