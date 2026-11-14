@@ -35,6 +35,7 @@ from .wire import (
     ToolCallCompleted,
     ToolCallStarted,
     Wire,
+    WireEvent,
 )
 
 console = Console()
@@ -107,7 +108,7 @@ class _ConsoleWireSink:
     each event batch immediately.
     """
 
-    def send(self, events: list[object]) -> None:
+    def send(self, events: list[WireEvent]) -> None:
         for event in events:
             if isinstance(event, TextDelta):
                 console.print(event.text, markup=False, highlight=False, end="")
@@ -118,12 +119,16 @@ class _ConsoleWireSink:
             elif isinstance(event, ToolCallStarted):
                 console.print(f"tool_call: {event.name} {event.args_preview}")
             elif isinstance(event, ToolCallCompleted):
-                console.print(f"✓ {event.name}" + (" (error)" if event.is_error else ""))
+                console.print(
+                    f"✓ {event.name}" + (" (error)" if event.is_error else "")
+                )
             elif isinstance(event, DiffPreview):
                 console.print(f"\nDiff for {event.path}:", markup=True)
                 from .prompt_ui import render_diff
 
-                console.print(render_diff(event.old, event.new, event.path), markup=True)
+                console.print(
+                    render_diff(event.old, event.new, event.path), markup=True
+                )
             elif isinstance(event, CommandPreview):
                 console.print(f"\nCommand: {event.command}", markup=True)
 
@@ -147,8 +152,12 @@ def main_command(
         "--permission-mode",
         help="Permission mode: default, acceptEdits, plan",
     ),
-    resume: str | None = typer.Option(None, "--resume", help="resume the given session id"),
-    continue_: bool = typer.Option(False, "--continue", "-c", help="resume the latest session in cwd"),
+    resume: str | None = typer.Option(
+        None, "--resume", help="resume the given session id"
+    ),
+    continue_: bool = typer.Option(
+        False, "--continue", "-c", help="resume the latest session in cwd"
+    ),
 ) -> None:
 
     # Resolve cwd once at startup so the whole run shares one working directory.
@@ -238,7 +247,10 @@ def main_command(
         session = Session.create(resolved_cwd)
 
     state = RuntimeState(
-        permission_mode=permission_mode, model=model, provider=provider, scheduler=scheduler
+        permission_mode=permission_mode,
+        model=model,
+        provider=provider,
+        scheduler=scheduler,
     )
     tools = default_tools()
 
