@@ -15,7 +15,6 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "pyperclip>=1.11.0",
     "rich>=15.0.0",
-    "ruff>=0.16.0",
     "typer>=0.26.7",
 ]
 
@@ -43,4 +42,4 @@ line-length = 100
 quote-style = "double"
 
 [dependency-groups]
-dev = ["pytest>=9.1.0"]
+dev = ["pyright>=1.1.414", "pytest>=9.1.0", "ruff>=0.16.0"]
