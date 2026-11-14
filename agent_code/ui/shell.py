@@ -133,7 +133,6 @@ class InteractiveShell:
         self._live_dirty = asyncio.Event()
         # Pending prompt (confirm/choice) state machine: the UI thread writes, the worker waits.
         self._pending_prompt: PendingPrompt | None = None
-        self._exit_requested = False
         # Initial transcript (resume replay): committed to scrollback right after startup.
         self._initial_chunks: list[OutputChunk] = list(initial_transcript or [])
         if initial_output:
@@ -349,10 +348,6 @@ class InteractiveShell:
         if not text:
             return
 
-        if text == "/exit":
-            self._exit_requested = True
-            raise EOFError  # break out of _submit_text; the prompt loop catches it and exits
-
         if text.startswith("/"):
             self._route_slash_command(text)
             return
@@ -378,6 +373,8 @@ class InteractiveShell:
         if result.should_query:
             self._echo_user_prompt(result.prompt)
             self._job_queue.put(result.prompt)
+        if result.should_exit:
+            raise EOFError
         return True
 
     def _echo_user_prompt(self, text: str) -> None:

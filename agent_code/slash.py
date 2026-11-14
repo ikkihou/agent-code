@@ -36,12 +36,14 @@ class SlashResult:
         prompt: str = "",
         message: Any = "",
         markup: bool = False,
+        should_exit: bool = False,
     ) -> None:
         self.handled = handled
         self.should_query = should_query
         self.prompt = prompt
         self.message = message
         self.markup = markup
+        self.should_exit = should_exit
 
 
 SlashHandler = Callable[[list[str], SlashContext], SlashResult]
@@ -60,7 +62,7 @@ class SlashRegistry:
     def __init__(self) -> None:
         self._commands: dict[str, SlashCommand] = {}
 
-    def register(self, name: str, description: str, handler: SlashHandler) -> None:
+    def register(self, name: str, description: str, handler: SlashHandler | None) -> None:
         self._commands[name] = SlashCommand(name, description, handler)
 
     def commands(self) -> list[SlashCommand]:
@@ -256,6 +258,10 @@ def _cmd_todo(_args: list[str], ctx: SlashContext) -> SlashResult:
     return SlashResult(handled=True, message=body)
 
 
+def _cmd_exit(_args: list[str], ctx: SlashContext) -> SlashResult:
+    return SlashResult(handled=True, should_exit=True)
+
+
 def default_slash_registry() -> SlashRegistry:
     """Build and register the built-in slash commands. The caller (cli.py) builds one per
     run and injects it into SlashContext."""
@@ -269,4 +275,5 @@ def default_slash_registry() -> SlashRegistry:
     registry.register("sessions", "list all session records under the current path", _cmd_sessions)
     registry.register("loop", "manage cron jobs: add/list/cancel", _cmd_loop)
     registry.register("todo", "show the current todo list", _cmd_todo)
+    registry.register("exit", "quit current session", _cmd_exit)
     return registry
