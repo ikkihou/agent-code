@@ -29,6 +29,16 @@ from .output import OutputChunk
 SessionRenderable = str | Table
 
 
+def _is_session_file(path: Path) -> bool:
+    """True for a real session file, false for a rendered transcript sidecar.
+
+    The transcript is named ``<session_id>.transcript.jsonl`` and lives next to
+    ``<session_id>.jsonl``; a bare ``*.jsonl`` glob would treat it as a session and
+    ``Session.history`` would fail on its missing ``role`` field.
+    """
+    return not path.name.endswith(".transcript.jsonl")
+
+
 def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
     """Return (session_id, user/assistant message count, file mtime) per session."""
     sessions_dir = _session_dir(cwd)
@@ -38,6 +48,8 @@ def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
         return summaries
 
     for file_path in sessions_dir.rglob("*.jsonl"):
+        if not _is_session_file(file_path):
+            continue
         message_count = 0
         try:
             for line in file_path.read_text(encoding="utf-8").splitlines():
@@ -109,7 +121,9 @@ class Session:
     @classmethod
     def load_latest(cls, cwd: Path) -> "Session" | None:
         sessions_dir = _session_dir(cwd)
-        jsonl_files = list(sessions_dir.glob("*.jsonl"))
+        jsonl_files = [
+            path for path in sessions_dir.glob("*.jsonl") if _is_session_file(path)
+        ]
         if not jsonl_files:
             return None
         latest = max(jsonl_files, key=lambda p: p.stat().st_mtime)

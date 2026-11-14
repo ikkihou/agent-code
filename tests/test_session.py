@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from agent_code.output import OutputChunk
@@ -69,3 +70,28 @@ def test_resumed_session_reads_existing_transcript(tmp_path: Path) -> None:
     assert resumed is not None
     assert resumed.resumed is True
     assert resumed.transcript_chunks == [OutputChunk("hello\n")]
+
+
+def test_load_latest_ignores_newer_transcript_sidecar(tmp_path: Path) -> None:
+    """A transcript sidecar is not a session, even when its mtime is newer."""
+    from agent_code.session import _session_summaries
+
+    session = Session.create(tmp_path)
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    session.append_messages(messages)
+    session.append_transcript(OutputChunk("\n\n> hello\n"))
+
+    now = os.stat(session.transcript_path).st_mtime
+    os.utime(session.file_path, (now - 10, now - 10))
+    os.utime(session.transcript_path, (now + 10, now + 10))
+
+    latest = Session.load_latest(tmp_path)
+
+    assert latest is not None
+    assert latest.session_id == session.session_id
+    assert latest.file_path == session.file_path
+    assert latest.history == messages
+    assert [summary[0] for summary in _session_summaries(tmp_path)] == [session.session_id]
