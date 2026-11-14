@@ -11,9 +11,10 @@ A scrollback + Live REPL (modelled on kimi-cli's terminal-ownership model):
   pins the input window to its content height, so the input box sits right under the
   scrollback tail and scrolls with it. It is deliberately NOT pinned to the bottom
   edge -- a full-height layout leaves no scroll space above, so content committed with
-  ``run_in_terminal`` would be drawn on top of the prompt instead of scrolling up. The
-  only exception is the completion menu, which needs rows inside the input window: the
-  height becomes dynamic and takes ``layout.MENU_ROWS`` rows only while the menu is open.
+  ``run_in_terminal`` would be drawn on top of the prompt instead of scrolling up.
+  Completion menus float just below the frame, and a dynamic spacer window between the
+  frame and the status bar (``layout._install_menu_spacer``) reserves their rows only
+  while the menu is open, so the input window never grows.
 - In-progress output does not live in the prompt frame: ``layout._install_live_area_window``
   puts it in its own window between the scrollback tail and the frame, so a submitted
   prompt's spinner and streamed text appear above the input box and move up into the

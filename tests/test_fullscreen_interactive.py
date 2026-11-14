@@ -577,11 +577,71 @@ def test_slash_completer_suggests_command_prefixes() -> None:
     assert str(completions[0].display_meta_text) == "show all available slash commands"
 
 
+def test_slash_completer_is_case_insensitive_and_contains() -> None:
+    completer = SlashCompleter()
+
+    assert [
+        completion.text
+        for completion in completer.get_completions(Document("/ELP"), CompleteEvent())
+    ] == ["/help"]
+
+
 def test_slash_completer_ignores_non_command_input() -> None:
     completer = SlashCompleter()
 
     assert list(completer.get_completions(Document("hello"), CompleteEvent())) == []
     assert list(completer.get_completions(Document("/loop "), CompleteEvent())) == []
+
+
+def test_backspace_reopens_slash_completion() -> None:
+    """complete_while_typing only fires on inserts; our backspace binding must re-run it."""
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.shortcuts import PromptSession
+
+    from agent_code.ui.shell import InteractiveShell
+
+    async def check() -> None:
+        state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+        def noop(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+        kb = shell._build_key_bindings()
+        with create_pipe_input() as pipe:
+            session = PromptSession(
+                completer=SlashCompleter(),
+                complete_while_typing=True,
+                key_bindings=kb,
+                input=pipe,
+                output=DummyOutput(),
+                multiline=True,
+                reserve_space_for_menu=0,
+            )
+            task = asyncio.create_task(session.prompt_async(show_frame=True))
+            await asyncio.sleep(0.05)
+            pipe.send_text("/helx")
+            await asyncio.sleep(0.3)
+            assert session.default_buffer.complete_state is None
+
+            pipe.send_text("\x7f")  # backspace -> /hel
+            for _ in range(20):
+                if session.default_buffer.complete_state is not None:
+                    break
+                await asyncio.sleep(0.02)
+            complete_state = session.default_buffer.complete_state
+            assert complete_state is not None
+            assert [completion.text for completion in complete_state.completions] == [
+                "/help"
+            ]
+
+            pipe.send_text("\r")
+            await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(check())
 
 
 # ---- prompt state machine (the pending branch of submit_text, driven by a fake future) ----
@@ -835,25 +895,121 @@ def test_bottom_toolbar_only_shows_mode_and_model() -> None:
     assert bottom_toolbar(state) == " plan · mock "
 
 
-def test_collapse_input_height_reserves_rows_only_while_menu_is_open() -> None:
-    """The completion menu is a Float inside the input window, so a one-row body would
-    clip it away. The height is dynamic: MENU_ROWS while completions are pending, 0
-    otherwise -- rows are taken only while the menu is actually up."""
-    from agent_code.ui.layout import MENU_ROWS, _collapse_input_height
+def test_collapse_input_height_never_reserves_menu_rows() -> None:
+    """The menu is a Float below the frame, so it never grows the input window."""
+    from agent_code.ui.layout import _collapse_input_height
 
     session = _build_framed_session()
     _collapse_input_height(session)
     buffer_window = _default_buffer_window(session)
 
-    assert buffer_window.height().min == 0
+    assert buffer_window.height.min == 0
 
     session.default_buffer.complete_state = object()  # any non-None completion state
     try:
-        assert buffer_window.height().min == MENU_ROWS
+        assert buffer_window.height.min == 0
     finally:
         session.default_buffer.complete_state = None
 
-    assert buffer_window.height().min == 0
+
+def test_completion_menu_floats_anchor_below_frame() -> None:
+    from prompt_toolkit.layout.containers import FloatContainer
+    from prompt_toolkit.layout.menus import (
+        CompletionsMenu,
+        MultiColumnCompletionsMenu,
+    )
+
+    from agent_code.ui.layout import (
+        _CompletionMenuFloat,
+        _relocate_completion_menus,
+    )
+
+    session = _build_framed_session()
+    _relocate_completion_menus(session)
+
+    seen: set[int] = set()
+    floats = []
+    for node in _all_containers(session.layout.container):
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if not isinstance(node, FloatContainer):
+            continue
+        floats.extend(
+            float_
+            for float_ in node.floats
+            if isinstance(float_.content, (CompletionsMenu, MultiColumnCompletionsMenu))
+        )
+    assert len(floats) == 2
+    for float_ in floats:
+        assert isinstance(float_, _CompletionMenuFloat)
+        assert float_.xcursor is True
+        assert float_.ycursor is False
+        # No render has happened yet, so the body-height fallback is one row, and the
+        # menu top lands just below the frame's bottom rule (body + 1).
+        assert float_.top == 2
+
+    # The dynamic top offset follows the actual input-window body height.
+    input_window = _default_buffer_window(session)
+    input_window.render_info = SimpleNamespace(window_height=3)
+    for float_ in floats:
+        assert float_.top == 4
+
+
+def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
+    """A spacer between the frame and the status bar grows with the menu, then collapses."""
+    import asyncio
+
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.shortcuts import PromptSession
+
+    from agent_code.ui.completer import SlashCompleter
+    from agent_code.ui.layout import _frame_branch_index, _relocate_completion_menus
+    from agent_code.ui.shell import InteractiveShell
+
+    async def check() -> None:
+        state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+        def noop(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+        kb = shell._build_key_bindings()
+        with create_pipe_input() as pipe:
+            session = PromptSession(
+                completer=SlashCompleter(),
+                complete_while_typing=True,
+                key_bindings=kb,
+                input=pipe,
+                output=DummyOutput(),
+                multiline=True,
+                reserve_space_for_menu=0,
+                bottom_toolbar=lambda: " STATUS ",
+            )
+            _relocate_completion_menus(session)
+            root = session.layout.container
+            spacer = root.children[_frame_branch_index(session) + 1]
+            assert callable(spacer.height)
+
+            task = asyncio.create_task(session.prompt_async(show_frame=True))
+            await asyncio.sleep(0.1)
+            # Closed: no rows reserved.
+            assert spacer.height().min == 0
+
+            pipe.send_text("/")
+            for _ in range(40):
+                if session.default_buffer.complete_state is not None:
+                    break
+                await asyncio.sleep(0.02)
+            await asyncio.sleep(0.1)
+            # Open: the spacer takes the menu's rows (7 slash commands).
+            assert spacer.height().min > 0
+
+            pipe.send_text("\r")
+            await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(check())
 
 
 def test_strip_frame_side_borders_removes_vertical_bars() -> None:

@@ -100,7 +100,12 @@ trace（`AgentResult.trace`）仍由 `run_agent` 维护，是结果对象的一�
 ### REPL 模式（`ui/shell.py::InteractiveShell`）
 
 **输入层**：`PromptSession(multiline=True)`——buffer 可含换行，frame 高度随行数增长
-（`_collapse_input_height` 不限制最大高度，只在补全菜单打开时临时让出 `MENU_ROWS` 行）。
+（`_collapse_input_height` 把输入 window 钉到内容高度、`min=0`，不限制最大高度）。补全菜单
+是浮在 frame 下方的 Float（`layout._relocate_completion_menus` 把内置 `CompletionsMenu` /
+`MultiColumnCompletionsMenu` 替换为 `_CompletionMenuFloat`，动态 `top` 锚定到 frame
+底边之下），同时 `_install_menu_spacer` 在 frame 与 status bar 之间插入一个**动态 spacer**，
+其高度跟随菜单所需行数（关闭时为 0），把 status bar 往下推——因此菜单不占输入 window 的行、
+不撑大 frame，也不遮挡 status bar，后续新增 slash command 会自动撑开。
 Enter（ControlM）提交；Ctrl+J、Alt+Enter（多数终端编码为 `Esc, Enter`）、Esc+Enter 插入
 换行。Shift+Enter 依赖 `shell.py::_install_shift_enter_mapping()`：import 时把
 `ANSI_SEQUENCES` 里的三个扩展序列（kitty CSI-u `\x1b[13;2u`、kitty legacy

@@ -21,9 +21,11 @@ class SlashCompleter(Completer):
         ):
             return
 
-        prefix = text_before_cursor[1:]
+        prefix = text_before_cursor[1:].casefold()
         for command in self._registry.commands():
-            if command.name.startswith(prefix):
+            # Case-insensitive contains matching keeps the menu useful while the user
+            # is in an intermediate state (e.g. /elp -> /help) instead of going empty.
+            if prefix in command.name.casefold():
                 yield Completion(
                     f"/{command.name}",
                     start_position=-len(text_before_cursor),

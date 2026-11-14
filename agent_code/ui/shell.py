@@ -17,9 +17,11 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app_or_none, get_app_session
+from prompt_toolkit.filters import emacs_insert_mode, has_selection, vi_insert_mode
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
@@ -43,6 +45,7 @@ from .events import event_to_chunks, render_user_prompt
 from .layout import (
     _collapse_input_height,
     _install_live_area_window,
+    _relocate_completion_menus,
     _strip_frame_side_borders,
     bottom_toolbar,
     build_style,
@@ -78,6 +81,18 @@ def _install_shift_enter_mapping() -> None:
 _install_shift_enter_mapping()
 
 PendingPrompt = dict[str, Any]
+_INSERT_MODE = vi_insert_mode | emacs_insert_mode
+
+
+def _restart_completion(buffer: Any) -> None:
+    """Re-run completion after a deletion.
+
+    ``complete_while_typing`` only fires on ``insert_text``; deletions change the
+    document without firing that event. ``start_completion`` schedules the same async
+    completion coroutine the typing path uses, so the UI is not blocked.
+    """
+    if buffer.complete_while_typing():
+        buffer.start_completion()
 
 
 class InteractiveShell:
@@ -435,6 +450,7 @@ class InteractiveShell:
         session.app.timeoutlen = 0.2
         _collapse_input_height(session)
         _strip_frame_side_borders(session)
+        _relocate_completion_menus(session)
         self._install_live_window(session)
 
         worker = threading.Thread(target=self._work_loop, daemon=True)
@@ -515,6 +531,24 @@ class InteractiveShell:
         def _(event: Any) -> None:
             # Ordinary Enter (ControlM) submits.
             event.current_buffer.validate_and_handle()
+
+        # Deletions do not fire Buffer.on_text_insert, so complete_while_typing never
+        # reopens the slash menu after a backspace. Bind the common deletion keys to
+        # delete first, then schedule the same async completion path typing uses.
+        @kb.add("backspace", filter=_INSERT_MODE & ~has_selection)
+        def _(event: Any) -> None:
+            get_by_name("backward-delete-char").handler(event)
+            _restart_completion(event.current_buffer)
+
+        @kb.add("delete", filter=_INSERT_MODE & ~has_selection)
+        def _(event: Any) -> None:
+            get_by_name("delete-char").handler(event)
+            _restart_completion(event.current_buffer)
+
+        @kb.add("c-w", filter=_INSERT_MODE & ~has_selection)
+        def _(event: Any) -> None:
+            get_by_name("unix-word-rubout").handler(event)
+            _restart_completion(event.current_buffer)
 
         @kb.add("escape", "enter")
         @kb.add("c-j")
