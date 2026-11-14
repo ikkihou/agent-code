@@ -43,12 +43,16 @@ class OutputChunk:
       as-is with no further parsing;
     - format == "rich" means text is Rich markup (e.g. ``[bold]x[/bold]``) to be
       rendered by the frontend: the REPL converts it to fragments, one-shot hands
-      it to Rich.
+      it to Rich;
+    - full_width means the styled content should be padded to the terminal width at
+      render/commit time. The stored text/fragments stay unpadded so transcripts do
+      not bake in one terminal's width.
     """
 
     text: str
     format: OutputFormat = "plain"
     fragments: tuple[StyleAndText, ...] = ()
+    full_width: bool = False
 
 
 # ---------------------------------------------------------------------------

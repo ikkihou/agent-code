@@ -315,7 +315,8 @@ def test_live_area_reset_stream_clears_paragraph_state() -> None:
     assert live.flush_paragraph() == ""
 
 
-def test_live_area_formatted_renders_spinner_tool_and_preview() -> None:
+def test_live_area_formatted_renders_gap_spinner_tool_and_preview() -> None:
+    """The Live window starts with one blank gap line, then the spinner."""
     live = LiveArea()
     live.turn_active = True
     live.turn_started_at = 1000.0
@@ -324,15 +325,18 @@ def test_live_area_formatted_renders_spinner_tool_and_preview() -> None:
     live.feed_stream("streaming tail")
 
     fragments = live.formatted(columns=40, now=1005.0)
+    assert fragments[0] == ("", "\n")  # exactly one blank separator line
+    assert fragments[1][0] == "class:spinner"
     text = "".join(t for _, t in fragments)
     assert "bash · 5s" in text
     assert "⏸ bash echo hi" in text
     assert "streaming tail" in text
 
-    # No spinner is rendered while the turn is inactive.
+    # No spinner or gap is rendered while the turn is inactive.
     live.turn_active = False
     text2 = "".join(t for _, t in live.formatted(columns=40, now=1006.0))
     assert "· 6s" not in text2
+    assert not text2.startswith("\n")
 
 
 # ---- event_to_chunks: finished events -> scrollback chunks -------------------
@@ -346,7 +350,7 @@ def test_event_to_chunks_renders_wire_events() -> None:
     assert chunks[0].text == "hello\n"
 
     echo = event_to_chunks(PromptEcho("hi there"))
-    assert echo[0].text == "\n\n> hi there\n\n"  # render_user_prompt's dark-grey block
+    assert echo[0].text == "\n\n> hi there\n"  # render_user_prompt's dark-grey block
 
     done = event_to_chunks(ToolCallCompleted(call_id="1", name="read_file"))
     assert done[0].text == "✓ read_file\n"
@@ -376,14 +380,132 @@ def test_chunk_fragments_normalizes_plain_and_rich() -> None:
 def test_render_user_prompt_formats_prompt_blocks() -> None:
     chunk = render_user_prompt("hello")
     assert chunk.format == "plain"
-    assert chunk.text == "\n\n> hello\n\n"
-    assert render_user_prompt("first\nsecond").text == "\n\n> first\n> second\n\n"
+    assert chunk.full_width is True
+    assert chunk.text == "\n\n> hello\n"
+    assert render_user_prompt("first\nsecond").text == "\n\n> first\n> second\n"
     # The source header is no longer rendered; the parameter is kept for compatibility only.
-    assert render_user_prompt("expanded", source="user /slash").text == "\n\n> expanded\n\n"
+    assert render_user_prompt("expanded", source="user /slash").text == "\n\n> expanded\n"
     empty = render_user_prompt("")
     assert empty.format == "plain"
     assert empty.text == ""
-    assert ("ansiwhite bg:#444444", "> hello") in chunk.fragments
+    assert ("bold ansiwhite bg:#444444", "> hello") in chunk.fragments
+    assert chunk.fragments[-1] == ("", "\n")
+
+
+def test_prompt_echo_and_live_spinner_have_exactly_one_blank_gap() -> None:
+    """Prompt echo ends with one newline; the Live area adds one blank line."""
+    chunk = render_user_prompt("hello")
+    assert chunk.text.endswith("\n") and not chunk.text.endswith("\n\n")
+
+    live = LiveArea()
+    live.turn_active = True
+    live.turn_started_at = 1000.0
+    fragments = live.formatted(columns=80, now=1001.0)
+    assert fragments[0] == ("", "\n")
+
+
+def test_scrollback_prompt_style_is_translated_for_rich() -> None:
+    """The submitted-prompt background must survive the pt -> Rich style translation.
+
+    The old implementation fed "ansiwhite bg:#444444" straight into rich.text.Text;
+    Rich silently ignored both tokens, so the block had no background.
+    """
+    from agent_code.ui.scrollback import _chunk_to_ansi, _rich_style
+
+    assert _rich_style("bold ansiwhite bg:#444444") == "bold white on #444444"
+    ansi = _chunk_to_ansi(render_user_prompt("hello"), columns=40)
+    assert "48;2;68;68;68" in ansi  # truecolor background #444444
+    assert "> hello" + " " * (40 - len("> hello")) in ansi  # padded bar
+
+    # >80 columns is the regression case for the offscreen Console's width=4096.
+    wide = _chunk_to_ansi(render_user_prompt("hello"), columns=132)
+    assert "> hello" + " " * (132 - len("> hello")) in wide
+
+    # Legacy transcript records (before the style change) must render too.
+    legacy = OutputChunk(
+        "\n\n> hi\n\n",
+        fragments=(("ansiwhite bg:#444444", "> hi"),),
+        full_width=True,
+    )
+    legacy_ansi = _chunk_to_ansi(legacy, columns=40)
+    assert "48;2;68;68;68" in legacy_ansi
+    assert "> hi" + " " * (40 - len("> hi")) in legacy_ansi
+
+
+def test_pad_full_width_accumulates_across_fragments() -> None:
+    """Multiple styled fragments on one visual line produce one padded line."""
+    from agent_code.ui.scrollback import _pad_full_width
+
+    padded = _pad_full_width(
+        [("bold", "> "), ("ansiwhite bg:#444444", "hello"), ("", "\n")],
+        columns=20,
+    )
+    text = "".join(part for _, part in padded)
+    assert text == "> hello" + " " * (20 - len("> hello")) + "\n"
+    assert text.count("\n") == 1
+
+
+def test_pad_full_width_expands_tabs_and_skips_overwide_lines() -> None:
+    """Tabs count as real columns; over-wide lines are left alone."""
+    from agent_code.ui.scrollback import _pad_full_width
+
+    tabbed = _pad_full_width([("style", "a\tb\n")], columns=20)
+    tab_text = "".join(part for _, part in tabbed)
+    assert "\t" not in tab_text
+    assert tab_text == "a       b" + " " * (20 - len("a       b")) + "\n"
+
+    wide = _pad_full_width([("style", "x" * 30 + "\n")], columns=20)
+    assert "".join(part for _, part in wide) == "x" * 30 + "\n"
+
+
+def test_commit_chunk_through_patch_stdout_preserves_ansi() -> None:
+    """The real StdoutProxy path must not replace ESC with '?' (P0 regression)."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input.base import DummyInput
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    from agent_code.ui.scrollback import _commit_chunk
+
+    class _RecordingOutput(DummyOutput):
+        def __init__(self) -> None:
+            self.raw_chunks: list[str] = []
+            self.written_chunks: list[str] = []
+
+        def write_raw(self, data: str) -> None:
+            self.raw_chunks.append(data)
+
+        def write(self, data: str) -> None:
+            # Mirror Vt100_Output.write: the non-raw StdoutProxy path escapes ESC.
+            self.written_chunks.append(data.replace("\x1b", "?"))
+
+        def flush(self) -> None:
+            pass
+
+    output = _RecordingOutput()
+    with create_app_session(input=DummyInput(), output=output):
+        with patch_stdout(raw=True):
+            _commit_chunk(render_user_prompt("hello"), columns=40)
+
+    raw = "".join(output.raw_chunks)
+    assert "\x1b[1;37;48;2;68;68;68m" in raw
+    assert "?[" not in raw
+    assert output.written_chunks == []
+
+
+def test_transcript_prompt_style_survives_resume(tmp_path: Path) -> None:
+    """Transcript fragments round-trip through JSONL and still render on replay."""
+    from agent_code.session import Session
+    from agent_code.ui.scrollback import _chunk_to_ansi
+
+    session = Session.create(tmp_path)
+    session.append_transcript(render_user_prompt("hello"))
+    resumed = Session.load_by_id(tmp_path, session.session_id)
+
+    assert resumed is not None
+    ansi = _chunk_to_ansi(resumed.transcript_chunks[0], columns=40)
+    assert "48;2;68;68;68" in ansi
+    assert "> hello" + " " * (40 - len("> hello")) in ansi
 
 
 # ---- prompt request rendering and parsing ------------------------------------
@@ -545,7 +667,7 @@ def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
 # ---- layout reshaping: input area Frame ---------------------------------------
 
 
-def _build_framed_session() -> Any:
+def _build_framed_session(multiline: bool = False) -> Any:
     """PromptSession in the production shape: the frame branch exists in the layout
     (pt builds it unconditionally) even though ``show_frame`` is only enabled per
     ``prompt_async(show_frame=True)`` call."""
@@ -561,6 +683,7 @@ def _build_framed_session() -> Any:
         input=DummyInput(),
         output=DummyOutput(),
         reserve_space_for_menu=0,
+        multiline=multiline,
     )
 
 
@@ -615,6 +738,101 @@ def test_collapse_input_height_stops_at_content() -> None:
     assert buffer_window.dont_extend_height()
     # In place: the focus stack keeps its reference, so the same object must be in the tree.
     assert _default_buffer_window(session) is buffer_window
+
+
+def test_collapse_input_height_grows_with_multiline_content() -> None:
+    """The input frame must grow with the buffer instead of staying one line high."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.input.base import DummyInput
+    from prompt_toolkit.output import DummyOutput
+
+    from agent_code.ui.layout import _collapse_input_height
+
+    async def check() -> None:
+        with create_app_session(input=DummyInput(), output=DummyOutput()):
+            session = _build_framed_session(multiline=True)
+            set_app(session.app)
+            _collapse_input_height(session)
+            buffer_window = _default_buffer_window(session)
+
+            assert buffer_window.preferred_height(80, 24).preferred == 1
+            session.default_buffer.text = "line one\nline two\nline three"
+            assert buffer_window.preferred_height(80, 24).preferred == 3
+
+    asyncio.run(check())
+
+
+def test_multiline_key_bindings_insert_newline_and_enter_submits() -> None:
+    """Alt+Enter / Ctrl+J insert a newline; Enter submits the whole prompt."""
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.keys import Keys
+
+    from agent_code.ui.shell import InteractiveShell
+
+    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+    def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+    kb = shell._build_key_bindings()
+
+    def binding_for(*keys: Any) -> Any:
+        return next(b for b in kb.bindings if b.keys == keys).handler
+
+    accepted: list[str] = []
+
+    def accept(buffer: Buffer) -> bool:
+        accepted.append(buffer.text)
+        return False
+
+    buffer = Buffer(accept_handler=accept)
+    buffer.text = "line one"
+    buffer.cursor_position = len(buffer.text)
+    event = SimpleNamespace(current_buffer=buffer)
+
+    binding_for(Keys.Escape, Keys.ControlM)(event)
+    assert buffer.text == "line one\n"
+    binding_for(Keys.ControlJ)(event)
+    assert buffer.text == "line one\n\n"
+    assert accepted == []
+
+    binding_for(Keys.ControlM)(event)
+    assert accepted == ["line one\n\n"]
+
+
+def test_shift_enter_sequences_map_to_control_j() -> None:
+    """Standard Shift+Enter encodings must surface as ControlJ, not ControlM."""
+    from prompt_toolkit.input.vt100_parser import Vt100Parser
+    from prompt_toolkit.keys import Keys
+
+    from agent_code.ui import shell as shell_module  # noqa: F401 - installs the mapping
+
+    def parse(sequence: str) -> list[Any]:
+        keys: list[Any] = []
+        parser = Vt100Parser(keys.append)
+        parser.feed(sequence)
+        parser.flush()
+        return [key.key for key in keys]
+
+    assert parse("\r") == [Keys.ControlM]
+    assert parse("\n") == [Keys.ControlJ]
+    for sequence in (
+        "\x1b[13;2u",  # kitty CSI-u
+        "\x1b[27;2;13u",  # kitty legacy
+        "\x1b[27;2;13~",  # xterm modifyOtherKeys
+    ):
+        assert parse(sequence) == [Keys.ControlJ]
+
+
+def test_bottom_toolbar_only_shows_mode_and_model() -> None:
+    from agent_code.runtime import TodoItem
+    from agent_code.ui.layout import bottom_toolbar
+
+    state = RuntimeState(permission_mode="plan", model="mock")
+    state.todo_store = [TodoItem(content="task", status="in_progress", active_form="working")]
+    assert bottom_toolbar(state) == " plan · mock "
 
 
 def test_collapse_input_height_reserves_rows_only_while_menu_is_open() -> None:
@@ -772,6 +990,26 @@ def test_shell_passes_show_frame_on_every_prompt_call() -> None:
 
     source = inspect.getsource(shell_module.InteractiveShell._run_async)
     assert "prompt_async(show_frame=True)" in source
+
+
+def test_shell_uses_raw_patch_stdout() -> None:
+    """raw=True is required or StdoutProxy turns ANSI ESC into literal '?'."""
+    import inspect
+
+    from agent_code.ui import shell as shell_module
+
+    source = inspect.getsource(shell_module.InteractiveShell._run_async)
+    assert "patch_stdout(raw=True)" in source
+
+
+def test_shell_uses_multiline_prompt_layout() -> None:
+    """The production PromptSession must be multiline so the frame can grow."""
+    import inspect
+
+    from agent_code.ui import shell as shell_module
+
+    source = inspect.getsource(shell_module.InteractiveShell._run_async)
+    assert "multiline=True" in source
 
 
 def test_shell_erases_prompt_when_done() -> None:

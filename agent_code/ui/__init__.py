@@ -17,7 +17,8 @@ A scrollback + Live REPL (modelled on kimi-cli's terminal-ownership model):
 - In-progress output does not live in the prompt frame: ``layout._install_live_area_window``
   puts it in its own window between the scrollback tail and the frame, so a submitted
   prompt's spinner and streamed text appear above the input box and move up into the
-  scrollback as they finish.
+  scrollback as they finish. The Live window top starts with one blank separator line,
+  then the spinner, so there is exactly one gap below the submitted prompt.
 - Finished content reaches the native terminal scrollback through
   ``sys.stdout.write`` (inside patch_stdout) -- native scrolling/selection/copy, pt no
   longer manages a history region, and there is no cost of resetting a whole Document

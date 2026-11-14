@@ -1,5 +1,10 @@
 """Live area state: the worker produces events, the UI consumes them and renders them
-into the prompt's message area."""
+into the dedicated Live window above the input frame.
+
+The Live window sits directly under the native scrollback tail, so the spinner belongs
+at its top: the submitted prompt is the last committed scrollback line and the spinner
+appears immediately below it in the repaintable region. A blank separator line is part
+of the Live area, not the prompt echo, so the gap is exactly one line."""
 
 from __future__ import annotations
 
@@ -15,12 +20,13 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 class LiveArea:
-    """Render state for "in progress" content: spinner line + streaming tail + active or
-    pending tool.
+    """Render state for "in progress" content: spinner, streaming tail, pending preview
+    and the active tool.
 
     Holds state and plain-text lines only; coloring is assembled on the fly in
     ``formatted()``. All writes happen on the UI event loop (the worker posts through a
-    queue), so no locking is needed.
+    queue), so no locking is needed. The spinner follows a leading blank separator
+    line, which supplies the gap below the submitted prompt.
 
     Commit strategy for streaming content (incremental, same as kimi): split on **blank
     lines**; a closed paragraph is committed to scrollback immediately and the Live area
@@ -75,10 +81,17 @@ class LiveArea:
         self.open_paragraph = []
 
     def formatted(self, columns: int, now: float) -> FormattedText:
-        """Render the Live area as the prompt message's formatted text (uncommitted
-        content only)."""
+        """Render the Live window's formatted text (uncommitted content only).
+
+        The first fragment is a blank line, then the spinner. This blank is the exact
+        gap between the submitted prompt (scrollback) and the spinner (Live); the prompt
+        echo itself ends with a single newline, not a blank line.
+        """
         out: list[tuple[str, str]] = []
         if self.turn_active:
+            # The prompt echo ends with one newline; this leading newline is the single
+            # blank separator line between that prompt and the spinner.
+            out.append(("", "\n"))
             spinner = SPINNER_FRAMES[self.spinner_frame % len(SPINNER_FRAMES)]
             elapsed = max(0, int(now - self.turn_started_at))
             line = f"{spinner} "

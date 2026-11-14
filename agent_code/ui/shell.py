@@ -18,7 +18,9 @@ from typing import Any, Callable
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app_or_none, get_app_session
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
 
@@ -53,6 +55,27 @@ from .prompts import (
     render_prompt_request,
 )
 from .scrollback import _commit_chunk
+
+# Shift+Enter encodings used by the common extended protocols. prompt_toolkit has no
+# kitty protocol support and maps the xterm modifyOtherKeys sequence to ControlM, which
+# is indistinguishable from Enter. The ANSI parser reads this dict when it feeds input,
+# so overriding these entries makes the sequences surface as ControlJ (the existing
+# c-j binding inserts a newline). This is intentionally a module-level, idempotent
+# install: every REPL in the process must see the same mapping.
+_SHIFT_ENTER_SEQUENCES = (
+    "\x1b[13;2u",  # kitty CSI-u
+    "\x1b[27;2;13u",  # kitty legacy
+    "\x1b[27;2;13~",  # xterm modifyOtherKeys
+)
+
+
+def _install_shift_enter_mapping() -> None:
+    """Map standard Shift+Enter sequences to ControlJ (newline in this app)."""
+    for sequence in _SHIFT_ENTER_SEQUENCES:
+        ANSI_SEQUENCES[sequence] = Keys.ControlJ
+
+
+_install_shift_enter_mapping()
 
 PendingPrompt = dict[str, Any]
 
@@ -380,27 +403,36 @@ class InteractiveShell:
             ),
             completer=SlashCompleter(self._slash_registry),
             complete_while_typing=True,
+            # Multiline layout: the buffer can contain newlines, and the input frame
+            # grows with them. Enter submits; Shift+Enter, Alt+Enter/Esc+Enter and
+            # Ctrl+J insert newlines. Shift+Enter is covered by the ANSI_SEQUENCES
+            # patch above.
+            multiline=True,
             style=style,
             key_bindings=self._build_key_bindings(),
             # Soft-wrapped input lines align under the text, past the '> ' prefix
             # (the default is no indentation in single-line mode).
             prompt_continuation=lambda width, line_number, wrap_count: " " * width,
-            # Default is 8: reserving 8 rows for the completion menu leaves a large blank
-            # area under a single-line input, especially ugly once the frame is drawn. The
-            # layout grows temporarily when the menu appears, so no reservation is needed.
+            # Default is 8: reserving 8 rows for the completion menu leaves a large
+            # blank area under a single-line input, especially ugly once the frame is
+            # drawn. The layout grows temporarily when the menu appears, so no
+            # reservation is needed.
             reserve_space_for_menu=0,
-            # Erase the prompt UI when a submission completes. With the default (False)
-            # the renderer keeps the finished layout on screen -- the typed line -- and the
-            # styled echo committed right after would show it a second time. Erasing first
-            # leaves the echo as the only copy.
+            # Erase the prompt UI when a submission completes. With the default
+            # (False) the renderer keeps the finished layout on screen -- the typed
+            # line -- and the styled echo committed right after would show it a second
+            # time. Erasing first leaves the echo as the only copy.
             erase_when_done=True,
             # Explicitly bind the current AppSession's input/output: without this,
-            # PromptSession builds its own Win32 console input from default widgets and
-            # pipes/test doubles stop working.
+            # PromptSession builds its own Win32 console input from default widgets
+            # and pipes/test doubles stop working.
             input=app_session.input,
             output=output,
         )
         self._session = session
+        # Escape is both "abort" and the prefix of Esc+Enter. Keep the prefix timeout
+        # short so a plain Escape still aborts promptly.
+        session.app.timeoutlen = 0.2
         _collapse_input_height(session)
         _strip_frame_side_borders(session)
         self._install_live_window(session)
@@ -414,7 +446,9 @@ class InteractiveShell:
 
         try:
             # patch_stdout: a backstop for any print that bypasses wire (a leaking tool/hook).
-            with patch_stdout(raw=False):
+            # raw=True is required: the proxy's default write() replaces every ESC with
+            # "?", which would turn our ANSI-styled scrollback chunks into "?[...m" text.
+            with patch_stdout(raw=True):
                 while True:
                     try:
                         # show_frame must be passed HERE, not to the constructor:
@@ -441,7 +475,8 @@ class InteractiveShell:
 
         Rendered as its own layout window above the input frame, NOT as the prompt
         ``message`` -- with message-based rendering all of this would appear inside
-        the frame, next to the input line.
+        the frame, next to the input line. The Live window is directly below the
+        scrollback tail, so the spinner sits immediately under the submitted prompt.
         """
         columns = 80
         app = get_app_or_none()
@@ -471,8 +506,23 @@ class InteractiveShell:
 
         @kb.add("escape")
         def _(event: Any) -> None:
-            # The provider watches this signal and actively closes the HTTP stream it is reading.
+            # The provider watches this signal and actively closes the HTTP stream it is
+            # reading. Esc+Enter is a longer match handled below; session.app.timeoutlen
+            # keeps a plain Escape from feeling delayed.
             self._state.abort_event.set()
+
+        @kb.add("enter")
+        def _(event: Any) -> None:
+            # Ordinary Enter (ControlM) submits.
+            event.current_buffer.validate_and_handle()
+
+        @kb.add("escape", "enter")
+        @kb.add("c-j")
+        def _(event: Any) -> None:
+            # Shift+Enter sequences are remapped to ControlJ by
+            # _install_shift_enter_mapping; Alt+Enter (often sent as Esc, Enter) and
+            # Ctrl+J are explicit fallbacks. copy_margin=False keeps newlines predictable.
+            event.current_buffer.newline(copy_margin=False)
 
         @kb.add("s-tab")
         def _(event: Any) -> None:

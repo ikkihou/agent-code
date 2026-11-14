@@ -46,10 +46,12 @@ def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
     if not normalized.strip():
         return OutputChunk("")
     body = "\n".join(f"> {line}" for line in normalized.splitlines())
-    # Reversed highlight: white text on dark grey (the source header is no longer rendered;
-    # the parameter is kept for compatibility only).
-    # In scrollback mode there is no per-line background padding (a trick specific to the
-    # old BufferControl).
-    style = "ansiwhite bg:#444444"
-    fragments: tuple[StyleAndText, ...] = (("", "\n\n"), (style, body), ("", "\n\n"))
-    return OutputChunk("\n\n" + body + "\n\n", fragments=fragments)
+    # Bold white on dark grey, padded to the terminal width by the scrollback commit
+    # path. Fragments use prompt_toolkit's inline vocabulary; ui/scrollback.py
+    # translates them to Rich before emitting ANSI. The prompt echo ends with a single
+    # newline: the Live area adds the blank separator line before its spinner, so the
+    # visual gap is exactly one line. The source header is no longer rendered; the
+    # parameter is kept for compatibility only.
+    style = "bold ansiwhite bg:#444444"
+    fragments: tuple[StyleAndText, ...] = (("", "\n\n"), (style, body), ("", "\n"))
+    return OutputChunk("\n\n" + body + "\n", fragments=fragments, full_width=True)

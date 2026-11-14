@@ -178,6 +178,10 @@ class Session:
         record: dict[str, Any] = {"text": chunk.text, "format": chunk.format}
         if chunk.fragments:
             record["fragments"] = [[style, text] for style, text in chunk.fragments]
+        if chunk.full_width:
+            # Persist the intent, not the padded line: resume uses the current terminal
+            # width, and transcript files stay independent of one terminal's columns.
+            record["full_width"] = True
         with open(self.transcript_path, "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -199,6 +203,11 @@ class Session:
             except json.JSONDecodeError:
                 continue
             fragments = data.get("fragments")
+            full_width = bool(data.get("full_width", False))
+            if not full_width and fragments:
+                # Transcripts written before the flag existed used this background for
+                # submitted prompts; infer it so older files also replay as full-width.
+                full_width = any("bg:#444444" in str(style) for style, _ in fragments)
             chunks.append(
                 OutputChunk(
                     data.get("text", ""),
@@ -208,6 +217,7 @@ class Session:
                         if fragments
                         else ()
                     ),
+                    full_width=full_width,
                 )
             )
         return chunks

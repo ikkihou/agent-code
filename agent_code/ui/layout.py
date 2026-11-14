@@ -21,13 +21,11 @@ MENU_ROWS = 8
 
 
 def bottom_toolbar(state: RuntimeState) -> str:
-    """Bottom status bar: current mode + model."""
+    """Bottom status bar: current mode + model only."""
     mode = {"default": "default", "acceptEdits": "accept edits", "plan": "plan"}.get(
         state.permission_mode, state.permission_mode
     )
-    active = next((t.active_form for t in state.todo_store if t.status == "in_progress"), "")
-    todo = f" · {active}" if active else ""
-    return f" {mode} · {state.model}{todo} "
+    return f" {mode} · {state.model} "
 
 
 def build_style() -> Style:

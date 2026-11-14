@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent_code.output import OutputChunk
@@ -10,13 +11,36 @@ def test_transcript_roundtrip(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
     session.append_transcript(OutputChunk("first line\n"))
     session.append_transcript(OutputChunk("[bold]> hi[/bold]\n\n", format="rich"))
+    # Prompt echoes carry style fragments; resume replay must get them back intact.
+    styled = OutputChunk(
+        "\n\n> styled\n",
+        fragments=(("bold ansiwhite bg:#444444", "> styled"),),
+        full_width=True,
+    )
+    session.append_transcript(styled)
 
     chunks = session.transcript_chunks
 
     assert chunks == [
         OutputChunk("first line\n"),
         OutputChunk("[bold]> hi[/bold]\n\n", format="rich"),
+        styled,
     ]
+
+
+def test_transcript_infers_full_width_for_legacy_prompt(tmp_path: Path) -> None:
+    """Older transcript files predate full_width; infer it from the prompt background."""
+    session = Session.create(tmp_path)
+    legacy = {
+        "text": "\n\n> old\n\n",
+        "format": "plain",
+        "fragments": [["ansiwhite bg:#444444", "> old"]],
+    }
+    with session.transcript_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(legacy) + "\n")
+
+    chunk = session.transcript_chunks[0]
+    assert chunk.full_width is True
 
 
 def test_transcript_empty_when_missing(tmp_path: Path) -> None:

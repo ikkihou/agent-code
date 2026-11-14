@@ -7,10 +7,13 @@ scrolling/selection/copy, with pt no longer managing a history region.
 
 from __future__ import annotations
 
+import shutil
 import sys
 from io import StringIO
 
+from prompt_toolkit.application.current import get_app_or_none, get_app_session
 from prompt_toolkit.formatted_text import StyleAndTextTuples
+from prompt_toolkit.utils import get_cwidth
 from rich.console import Console
 from rich.text import Text
 
@@ -21,11 +24,168 @@ _ansi_console = Console(
     force_terminal=True,
     color_system="truecolor",
     highlight=False,
+    # Match output.py: keep the offscreen renderer wider than any real terminal so
+    # padding is not silently truncated at Rich's 80-column non-tty fallback. Wrapping
+    # is the terminal's job, not the fragment renderer's.
+    width=4096,
 )
+
+# prompt_toolkit's ANSI color names -> Rich's equivalent names. Rich does not know the
+# "ansi*" spelling, so a raw "ansiwhite bg:#444" style silently loses its color when we
+# feed it to rich.text.Text below.
+_PT_ANSI_COLORS = {
+    "ansiblack": "black",
+    "ansired": "red",
+    "ansigreen": "green",
+    "ansiyellow": "yellow",
+    "ansiblue": "blue",
+    "ansimagenta": "magenta",
+    "ansicyan": "cyan",
+    "ansiwhite": "white",
+    "ansibrightblack": "bright_black",
+    "ansibrightred": "bright_red",
+    "ansibrightgreen": "bright_green",
+    "ansibrightyellow": "bright_yellow",
+    "ansibrightblue": "bright_blue",
+    "ansibrightmagenta": "bright_magenta",
+    "ansibrightcyan": "bright_cyan",
+    "ansibrightwhite": "bright_white",
+    "ansidefault": "default",
+}
+
+# prompt_toolkit attribute spellings -> Rich spellings. Rich accepts most of the same
+# names; the "no*" variants need "not <attr>" and hidden is called conceal.
+_PT_ATTRS = {
+    "bold": "bold",
+    "dim": "dim",
+    "italic": "italic",
+    "underline": "underline",
+    "blink": "blink",
+    "reverse": "reverse",
+    "strike": "strike",
+    "hidden": "conceal",
+    "nobold": "not bold",
+    "nodim": "not dim",
+    "noitalic": "not italic",
+    "nounderline": "not underline",
+    "noblink": "not blink",
+    "noreverse": "not reverse",
+    "nostrike": "not strike",
+    "nohidden": "not conceal",
+}
+
+
+def _rich_color(token: str) -> str:
+    """prompt_toolkit color token -> Rich color token (empty means drop it)."""
+    return _PT_ANSI_COLORS.get(token, token)
+
+
+def _rich_style(style: str) -> str:
+    """Translate a prompt_toolkit inline style into Rich's style vocabulary.
+
+    ``OutputChunk.fragments`` follow prompt_toolkit's vocabulary ("ansiwhite",
+    "bg:#444444"), but the scrollback commit path renders through ``rich.text.Text``.
+    Rich silently ignores tokens it does not understand, which previously dropped the
+    submitted-prompt background. Translate the vocabulary instead of changing every
+    producer (old transcript records must keep working too).
+    """
+    out: list[str] = []
+    for token in style.split():
+        if token.startswith("bg:"):
+            color = _rich_color(token[3:])
+            if color:
+                out.extend(("on", color))
+        elif token.startswith("fg:"):
+            color = _rich_color(token[3:])
+            if color:
+                out.append(color)
+        elif token == "on":
+            # Already Rich syntax; leave it for the following color token.
+            out.append(token)
+        elif token in _PT_ATTRS:
+            out.append(_PT_ATTRS[token])
+        else:
+            out.append(_rich_color(token))
+    return " ".join(out)
+
+
+def _terminal_columns() -> int:
+    """Current terminal width, with a fallback for replay before the prompt app starts."""
+    app = get_app_or_none()
+    if app is not None:
+        return app.output.get_size().columns
+    try:
+        return get_app_session().output.get_size().columns
+    except Exception:
+        return shutil.get_terminal_size((80, 24)).columns
+
+
+def _pad_full_width(fragments: StyleAndTextTuples, columns: int) -> list[tuple[str, str]]:
+    """Pad each *visual line* to ``columns`` display cells.
+
+    Width is accumulated across all fragments (a line may be split into several
+    styled pieces), and padding is emitted only when the line ends at ``\n``. Tabs are
+    expanded before measuring because ``get_cwidth("\t")`` is 0 while terminals expand
+    tabs to real columns. Over-wide lines are left unpadded; Rich is configured with a
+    4096-column offscreen width, so it does not wrap them and the terminal handles the
+    overflow (wrapped continuation lines intentionally get no synthetic background).
+    Padding inherits the last non-empty style on the line, so a prompt background
+    becomes one continuous bar.
+
+    Padding happens at commit time only; stored text/fragments remain unpadded.
+    """
+    if columns <= 0:
+        return list(fragments)
+
+    padded: list[tuple[str, str]] = []
+    line_width = 0
+    line_has_text = False
+    line_style = ""
+
+    def emit(style: str, text: str) -> None:
+        if not text:
+            return
+        if padded and padded[-1][0] == style:
+            padded[-1] = (style, padded[-1][1] + text)
+        else:
+            padded.append((style, text))
+
+    for style, text in fragments:
+        text = text.expandtabs(8)
+        start = 0
+        for index, char in enumerate(text):
+            if char != "\n":
+                continue
+            segment = text[start:index]
+            if segment:
+                emit(style, segment)
+                line_width += get_cwidth(segment)
+                line_has_text = True
+                if style:
+                    line_style = style
+            if line_has_text and line_style and line_width < columns:
+                emit(line_style, " " * (columns - line_width))
+            emit(style, "\n")
+            line_width = 0
+            line_has_text = False
+            line_style = ""
+            start = index + 1
+
+        tail = text[start:]
+        if tail:
+            emit(style, tail)
+            line_width += get_cwidth(tail)
+            line_has_text = True
+            if style:
+                line_style = style
+
+    if line_has_text and line_style and line_width < columns:
+        emit(line_style, " " * (columns - line_width))
+    return padded
 
 
 def _chunk_fragments(chunk: OutputChunk) -> StyleAndTextTuples:
-    """OutputChunk -> (style string, text) fragments (style strings use Rich's vocabulary)."""
+    """OutputChunk -> (style string, text) fragments in prompt_toolkit's vocabulary."""
     if chunk.fragments:
         return list(chunk.fragments)
     if chunk.format == "rich":
@@ -33,22 +193,30 @@ def _chunk_fragments(chunk: OutputChunk) -> StyleAndTextTuples:
     return [("", chunk.text)]
 
 
-def _chunk_to_ansi(chunk: OutputChunk) -> str:
+def _chunk_to_ansi(chunk: OutputChunk, columns: int | None = None) -> str:
     """OutputChunk -> ANSI string.
 
     The TranscriptLexer fragment translation was retired along with the output panel;
-    here the fragments are rebuilt into a Rich Text and rendered to ANSI -- the color
-    table matches pt inline style strings (named colors and hex work on both sides).
+    here the fragments are rebuilt into a Rich Text and rendered to ANSI. Fragments
+    follow prompt_toolkit's vocabulary, so each style is translated with ``_rich_style``
+    first -- Rich would otherwise drop tokens such as ``ansiwhite`` and ``bg:``.
+    ``full_width`` chunks are padded to ``columns`` (current terminal width by default).
     """
+    fragments = _chunk_fragments(chunk)
+    if chunk.full_width:
+        fragments = _pad_full_width(
+            fragments, columns if columns is not None else _terminal_columns()
+        )
+
     text = Text()
-    for style, fragment in _chunk_fragments(chunk):
-        text.append(fragment, style=style)
+    for style, fragment in fragments:
+        text.append(fragment, style=_rich_style(style))
     with _ansi_console.capture() as capture:
         _ansi_console.print(text, end="")
     return capture.get()
 
 
-def _commit_chunk(chunk: OutputChunk) -> None:
+def _commit_chunk(chunk: OutputChunk, columns: int | None = None) -> None:
     """Write an OutputChunk into the terminal scrollback above the prompt.
 
     Uses ``sys.stdout.write``: ``patch_stdout`` replaces stdout with a StdoutProxy that
@@ -60,5 +228,5 @@ def _commit_chunk(chunk: OutputChunk) -> None:
     a loop of "commit, then immediately await the next prompt_async" it races the
     prompt's input detach/attach and all subsequent input stops working.
     """
-    sys.stdout.write(_chunk_to_ansi(chunk))
+    sys.stdout.write(_chunk_to_ansi(chunk, columns=columns))
     sys.stdout.flush()
