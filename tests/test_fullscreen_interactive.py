@@ -938,7 +938,10 @@ def test_completion_menu_floats_anchor_below_frame() -> None:
         floats.extend(
             float_
             for float_ in node.floats
-            if isinstance(float_.content, (CompletionsMenu, MultiColumnCompletionsMenu))
+            if any(
+                isinstance(menu, (CompletionsMenu, MultiColumnCompletionsMenu))
+                for menu in _all_containers(float_.content)
+            )
         )
     assert len(floats) == 2
     for float_ in floats:
@@ -946,7 +949,8 @@ def test_completion_menu_floats_anchor_below_frame() -> None:
         assert float_.xcursor is True
         assert float_.ycursor is False
         # No render has happened yet, so the body-height fallback is one row, and the
-        # menu top lands just below the frame's bottom rule (body + 1).
+        # wrapped menu starts right below the frame's bottom rule (body + 1). The blank
+        # row that separates it from the rule is part of the wrapped content.
         assert float_.top == 2
 
     # The dynamic top offset follows the actual input-window body height.
@@ -954,6 +958,29 @@ def test_completion_menu_floats_anchor_below_frame() -> None:
     input_window.render_info = SimpleNamespace(window_height=3)
     for float_ in floats:
         assert float_.top == 4
+
+
+def test_menu_wrapper_keeps_a_gap_below_only() -> None:
+    """The menu float's content owns its spacing: no blank row above (the frame's bottom
+    rule already delimits the input), one blank row below (keeping it off the status bar)."""
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout.dimension import Dimension
+
+    from agent_code.ui.layout import _menu_with_gaps
+
+    menu = Window(height=Dimension.exact(3))  # stands in for a 3-row completion menu
+    wrapper = _menu_with_gaps(menu)
+
+    wrapped_menu, bottom_gap = wrapper.content.children
+    assert wrapped_menu is menu
+    assert isinstance(bottom_gap, Window)
+    assert bottom_gap.height.min == 1 and bottom_gap.height.max == 1
+    assert wrapper.preferred_height(80, 20).preferred == 4
+
+    # Closing the menu collapses the wrapper (and therefore the reserved rows).
+    wrapper.filter = Condition(lambda: False)
+    assert wrapper.preferred_height(80, 20).preferred == 0
 
 
 def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:

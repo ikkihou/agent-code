@@ -7,7 +7,14 @@ from typing import Any, Callable, Iterator
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.filters import to_filter
 from prompt_toolkit.formatted_text import AnyFormattedText
-from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit, VSplit, Window
+from prompt_toolkit.layout.containers import (
+    ConditionalContainer,
+    Float,
+    FloatContainer,
+    HSplit,
+    VSplit,
+    Window,
+)
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
@@ -20,6 +27,13 @@ from ..runtime import RuntimeState
 # Completion menus are Floats, so they do not need rows inside the input frame. This
 # is only the upper bound used when measuring the menu's own preferred height.
 MENU_MAX_HEIGHT = 16
+
+# Blank rows around the completion menu, which floats below the input frame. The top gap
+# is 0: the frame's bottom rule already separates the menu from the input line, and an
+# extra blank row there reads as a hole between the frame and the menu. The bottom gap
+# keeps the menu from touching the status bar.
+MENU_TOP_GAP = 0
+MENU_BOTTOM_GAP = 1
 
 
 def bottom_toolbar(state: RuntimeState) -> str:
@@ -78,13 +92,50 @@ def _completion_menu_height(menu_content: Any) -> int:
 
     Shared by the menu Float (so it reports a real height) and the spacer window (so the
     reserved gap between frame and status bar tracks the pending completions).
+    ``menu_content`` is the wrapped menu (``_menu_with_gaps``), so its height already
+    includes the blank rows around it.
     """
     state = get_app().current_buffer.complete_state
     if state is None or not state.completions:
         return 0
     width = get_app().output.get_size().columns
-    height = menu_content.preferred_height(width, MENU_MAX_HEIGHT).preferred
-    return max(0, min(height or 0, MENU_MAX_HEIGHT))
+    cap = MENU_MAX_HEIGHT + MENU_TOP_GAP + MENU_BOTTOM_GAP
+    height = menu_content.preferred_height(width, cap).preferred
+    return max(0, min(height or 0, cap))
+
+
+def _menu_with_gaps(menu: Any) -> Any:
+    """Wrap a completion menu so it carries its own blank rows (``MENU_*_GAP``).
+
+    prompt_toolkit has no per-window margin; the spacing primitives are plain rows. A
+    uniform gap between all children of a split is ``HSplit(padding=...)``, but these two
+    gaps are per-side (0 above, 1 below), so each side gets its own height-only Window --
+    the same rows ``padding`` would insert, just chosen individually.
+
+    Because the blank rows live in the Float's content, the wrapper's preferred height is
+    exactly what the Float draws (``menu rows + MENU_TOP_GAP + MENU_BOTTOM_GAP``), and
+    the spacer window below simply reserves that height. The Float anchor itself stays a
+    pure position (``body_height + 1``: the first row after the frame's bottom rule), so
+    the menu never reserves rows it does not draw.
+
+    The wrapper reuses the menu's own visibility filter, so it collapses to zero rows
+    (and reserves nothing) while the menu is closed.
+    """
+
+    def gap(rows: int) -> Window:
+        return Window(height=Dimension.exact(rows))
+
+    children: list[Any] = []
+    if MENU_TOP_GAP:
+        children.append(gap(MENU_TOP_GAP))
+    children.append(menu)
+    if MENU_BOTTOM_GAP:
+        children.append(gap(MENU_BOTTOM_GAP))
+
+    return ConditionalContainer(
+        HSplit(children),
+        filter=to_filter(getattr(menu, "filter", True)),
+    )
 
 
 class _CompletionMenuFloat(Float):
@@ -93,13 +144,16 @@ class _CompletionMenuFloat(Float):
     prompt_toolkit's stock completion menus use ``ycursor=True``, which anchors them
     below the cursor *inside* the frame body -- a one-row body clips them away, which is
     why the previous layout reserved rows and stretched the frame. This Float keeps
-    ``xcursor`` for the horizontal position but anchors vertically just below the frame's
-    bottom rule (``top = body_height + 1``). The rows it covers are reserved by
+    ``xcursor`` for the horizontal position but anchors vertically at the row right after
+    the frame's bottom rule (``top = body_height + 1``), so the menu starts immediately
+    under the rule. Its content carries the blank rows below the menu
+    (``_menu_with_gaps``), and the rows the Float covers are reserved by
     ``_install_menu_spacer`` (a gap between the frame and the status bar), so the menu
     never overlaps the status bar or grows the frame.
 
-    ``get_height`` mirrors the pending completion count (capped at the menu's normal
-    16-row maximum) so the Float has a real height for the top-anchored formula.
+    ``get_height`` mirrors the height the wrapped menu needs right now (menu rows plus the
+    blank rows around it, capped at the menu's normal 16-row maximum) so the Float has a
+    real height for the top-anchored formula.
     """
 
     def __init__(
@@ -122,6 +176,7 @@ class _CompletionMenuFloat(Float):
     def top(self) -> int:
         info = self._input_window.render_info
         body_height = info.window_height if info is not None else 1
+        # +1 skips the frame's bottom rule row: the menu starts right under the rule.
         return body_height + 1
 
     @top.setter
@@ -148,10 +203,11 @@ def _relocate_completion_menus(session: PromptSession[str]) -> None:
     prompt_toolkit builds CompletionsMenu / MultiColumnCompletionsMenu as cursor-
     anchored Floats inside the frame body. Replacing each Float with a
     ``_CompletionMenuFloat`` preserves the menu content/filters and navigation keys, but
-    changes the vertical anchor so the menu floats just below the frame. A spacer window
-    (``_install_menu_spacer``) then reserves the rows the menu needs between the frame and
-    the status bar, so the menu never grows the frame, clips off the terminal, or covers
-    the status bar.
+    changes the vertical anchor so the menu floats just below the frame. Each menu is
+    wrapped by ``_menu_with_gaps`` so it carries its own blank rows (none above, one
+    below by default), and a spacer window (``_install_menu_spacer``) reserves that
+    wrapped height between the frame and the status bar -- so the menu never grows the
+    frame, clips off the terminal, or covers the status bar.
     """
     input_window = _default_buffer_window(session)
     if input_window is None:
@@ -169,10 +225,13 @@ def _relocate_completion_menus(session: PromptSession[str]) -> None:
             if isinstance(float_, _CompletionMenuFloat):
                 continue
             if isinstance(float_.content, (CompletionsMenu, MultiColumnCompletionsMenu)):
+                wrapped = _menu_with_gaps(float_.content)
                 if menu_content is None:
-                    menu_content = float_.content
+                    # The spacer measures exactly what the first (visible) menu float
+                    # draws, so the reserved rows can never disagree with the gaps.
+                    menu_content = wrapped
                 container.floats[index] = _CompletionMenuFloat(
-                    float_.content,
+                    wrapped,
                     input_window,
                     transparent=float_.transparent,
                     z_index=float_.z_index,
@@ -197,10 +256,14 @@ def _frame_branch_index(session: PromptSession[str]) -> int:
 def _install_menu_spacer(session: PromptSession[str], menu_content: Any) -> None:
     """Reserve a gap between the input frame and the status bar for the completion menu.
 
-    The menu is a Float just below the frame, so without this spacer its rows would land
-    on the status bar. A content-less window whose height follows the menu's preferred
+    The menu is a Float below the frame, so without this spacer its rows would land on
+    the status bar. A content-less window whose height follows the menu's preferred
     height (0 while the menu is closed) pushes the status bar down only while completions
     are shown -- and grows automatically as more slash commands are added.
+
+    The height is the wrapped menu's own height (``_menu_with_gaps``: menu rows plus the
+    blank rows around it), i.e. exactly the rows the Float covers, so the status bar keeps
+    the menu's own bottom gap.
     """
     root = session.layout.container
     if not hasattr(root, "children"):
