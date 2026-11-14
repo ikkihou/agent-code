@@ -308,3 +308,4 @@ def run_agent(  ## AGENT LOOP
     final = f"Agent reached max steps ({max_steps}) without finishing. Last response: {response}"
     emit(f"final: {final}")
     return AgentResult(final=final, trace=trace, messages=messages)
+
