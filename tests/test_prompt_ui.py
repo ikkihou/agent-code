@@ -44,3 +44,23 @@ def test_prompt_single_choice_uses_structured_request_for_interactive_asker() ->
             "default": 0,
         }
     ]
+
+
+def test_confirm_edit_passes_detail_in_request() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def asker(request: dict[str, Any]) -> bool:
+        requests.append(request)
+        return True
+
+    state = RuntimeState(asker=asker)
+    assert prompt_ui.confirm_edit(state, "a.py", detail="--- a/a.py\n+++ b/a.py\n") is True
+
+    assert requests == [
+        {
+            "type": "confirm",
+            "message": "Apply this edit to a.py?",
+            "default": False,
+            "detail": "--- a/a.py\n+++ b/a.py\n",
+        }
+    ]

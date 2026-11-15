@@ -32,6 +32,7 @@ from .prompt_ui import (
     confirm_plan,
     confirm_tool_use,
     prompt_single_choice,
+    render_diff,
 )
 from .runtime import RuntimeState
 from .tools import ToolContext, ToolRegistry
@@ -46,6 +47,22 @@ def _error_block(tool_call_id: str, content: str) -> dict[str, Any]:
         "content": content,
         "is_error": True,
     }
+
+
+# Cap on the diff lines shown inside the ask-prompt body. The full diff still reaches
+# scrollback via DiffPreview in the one-shot frontend; this only bounds the Live area,
+# which would otherwise overflow a normal terminal and push the input frame off-screen.
+DIFF_PROMPT_MAX_LINES = 30
+
+
+def _truncate_diff(diff: str, max_lines: int = DIFF_PROMPT_MAX_LINES) -> str:
+    """Clip a rendered diff to a bounded number of lines so it cannot overflow the
+    ask-prompt Live area."""
+    lines = diff.splitlines()
+    if len(lines) <= max_lines:
+        return diff
+    shown = "\n".join(lines[:max_lines])
+    return f"{shown}\n... ({len(lines) - max_lines} lines omitted)"
 
 
 def approve_plan(state: RuntimeState, plan_text: str) -> bool:
@@ -121,7 +138,8 @@ def _handle_ask(
     if call.name in ("file_write", "file_edit") and edit_preview is not None:
         path_str, old_content, new_content = edit_preview
         wire.send(DiffPreview(path=path_str, old=old_content, new=new_content))
-        if not confirm_edit(state, path_str):
+        diff = _truncate_diff(render_diff(old_content, new_content, path_str, markup=False))
+        if not confirm_edit(state, path_str, detail=diff):
             return _error_block(call.id, "error: edit rejected by user")
     elif call.name == "bash":
         command = call.arguments.get("command", "")

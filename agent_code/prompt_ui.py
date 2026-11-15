@@ -31,8 +31,12 @@ def _ask_request(
     return fallback()
 
 
-def render_diff(old: str, new: str, path: str) -> str:
-    """Build a unified diff with difflib and color added/removed lines with rich markup."""
+def render_diff(old: str, new: str, path: str, *, markup: bool = True) -> str:
+    """Build a unified diff with difflib and color added/removed lines with rich markup.
+
+    With ``markup=False`` the diff is returned as plain text (no ``[red]``/``[bold]``
+    wrappers), for paths that render it verbatim rather than as Rich markup.
+    """
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
     diff_lines = difflib.unified_diff(
@@ -44,7 +48,9 @@ def render_diff(old: str, new: str, path: str) -> str:
     colored: list[str] = []
     for line in diff_lines:
         line = line.rstrip()
-        if line.startswith("---") or line.startswith("+++"):
+        if not markup:
+            colored.append(line)
+        elif line.startswith("---") or line.startswith("+++"):
             colored.append(f"[bold]{line}[/bold]")
         elif line.startswith("-"):
             colored.append(f"[red]{line}[/red]")
@@ -57,8 +63,12 @@ def render_diff(old: str, new: str, path: str) -> str:
     return "\n".join(colored)
 
 
-def confirm_edit(state: RuntimeState, path: str) -> bool:
-    """Ask the user whether to apply this edit; defaults to no."""
+def confirm_edit(state: RuntimeState, path: str, detail: str = "") -> bool:
+    """Ask the user whether to apply this edit; defaults to no.
+
+    ``detail`` carries the diff preview so the interactive asker can show the actual
+    change instead of asking for a blind approval.
+    """
     return bool(
         _ask_request(
             state,
@@ -66,6 +76,7 @@ def confirm_edit(state: RuntimeState, path: str) -> bool:
                 "type": "confirm",
                 "message": f"Apply this edit to {path}?",
                 "default": False,
+                "detail": detail,
             },
             lambda: typer.confirm(f"Apply this edit to {path}?", default=False),
         )

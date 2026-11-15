@@ -19,24 +19,63 @@ from ..fs_safety import (
 )
 from .core import Tool, ToolContext
 
+# Absolute upper bound for ranged (offset/limit) reads. A ranged read still loads the
+# file into memory to number lines, so refuse anything past this to avoid an OOM on a
+# multi-GB file; whole-file reads remain capped by the smaller MAX_READ_BYTES.
+RANGED_READ_MAX_BYTES = 20 * 1024 * 1024
+
 
 def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
     path_str = args.get("path", "")
     if not path_str:
         return "error: missing required argument 'path'"
+    offset = args.get("offset")
+    limit = args.get("limit")
+    use_range = offset is not None or limit is not None
     try:
         path = resolve_in_cwd(ctx.cwd, path_str)
         ensure_text_file(path)
-        ensure_within_size(path)
+        if use_range:
+            size = path.stat().st_size
+            if size > RANGED_READ_MAX_BYTES:
+                return (
+                    f"error: file too large for a ranged read: {size} bytes > "
+                    f"{RANGED_READ_MAX_BYTES}; use grep or a smaller offset/limit"
+                )
+        else:
+            # A whole-file read stays under the size cap.
+            ensure_within_size(path)
         # Source files may be GBK (common on Chinese Windows): read tolerantly over the
         # candidate encodings to avoid a strict-UTF-8 UnicodeDecodeError, and avoid
         # errors="replace" turning CJK text into garbage.
         text, _ = read_text_file(path)
     except (FileNotFoundError, IsADirectoryError, ValueError) as exc:
         return f"error: {exc}"
-    # Record the version the model has seen: the basis for read-before-edit checks.
+
+    if not use_range:
+        # Record the version the model has seen: the basis for read-before-edit checks.
+        ctx.read_state.record(path, text)
+        return truncate_output(text)
+
+    try:
+        start_line = int(offset) if offset is not None else 1
+        max_lines = int(limit) if limit is not None else None
+    except (TypeError, ValueError):
+        return "error: offset/limit must be integers"
+    if start_line < 1:
+        return "error: offset must be >= 1 (1-indexed)"
+    if max_lines is not None and max_lines < 1:
+        return "error: limit must be >= 1"
+
+    lines = text.splitlines()
+    start = start_line - 1
+    if start >= len(lines):
+        return ""
+    end = None if max_lines is None else start + max_lines
+    # Number every returned line so the model can reference absolute line numbers.
+    numbered = [f"{start + 1 + i}\t{line}" for i, line in enumerate(lines[start:end])]
     ctx.read_state.record(path, text)
-    return truncate_output(text)
+    return truncate_output("\n".join(numbered))
 
 
 def list_files(args: dict[str, Any], ctx: ToolContext) -> str:
@@ -236,7 +275,17 @@ def tools() -> list[Tool]:
             is_read_only=True,
             parameters={
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-indexed start line for a ranged read.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return.",
+                    },
+                },
                 "required": ["path"],
             },
         ),

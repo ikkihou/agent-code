@@ -3,7 +3,7 @@ sub-module plus the cron tools."""
 
 from __future__ import annotations
 
-from . import edit, memory, misc, plan, read, shell, todo
+from . import edit, memory, misc, plan, read, shell, todo, web
 from .core import Tool, ToolRegistry
 
 
@@ -22,6 +22,7 @@ def default_tools() -> ToolRegistry:
         *todo.tools(),
         *plan.tools(),
         *misc.tools(),
+        *web.tools(),
     ):
         registry.register(tool)
     registry.register(

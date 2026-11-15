@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
+import threading
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -20,6 +23,59 @@ WEB_FETCH_MAX_CHARS = 20_000
 WEB_URL_MAX_LENGTH = 2000
 WEB_FETCH_TIMEOUT_S = 30.0
 WEB_SEARCH_TIMEOUT_S = 15.0
+DNS_TIMEOUT_S = 3.0
+
+# Hostnames we never resolve/fetch, regardless of what DNS says. ``localhost`` has no
+# dot so the dot check below already rejects it, but keep it here for clarity.
+_BLOCKED_HOSTNAMES = frozenset({"localhost", "metadata.google.internal"})
+
+# Private / loopback / link-local / unique-local ranges. 169.254.0.0/16 includes the
+# cloud metadata endpoint 169.254.169.254.
+_BLOCKED_NETWORKS = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
+def _is_blocked_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    # Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1) back to IPv4 first, otherwise every
+    # mapped form of the private ranges slips past the IPv4 network checks.
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return any(address in network for network in _BLOCKED_NETWORKS)
+
+
+def _resolve_host(host: str) -> list[str]:
+    """Resolve a hostname to its address list, bounded by a short timeout.
+
+    ``socket.getaddrinfo`` is a blocking libc call that ignores socket timeouts, so the
+    lookup runs on a daemon thread and the caller waits at most ``DNS_TIMEOUT_S``.
+    """
+    addresses: list[str] = []
+    errors: list[BaseException] = []
+
+    def _lookup() -> None:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception as exc:  # surface any lookup failure as a clear ValueError
+            errors.append(exc)
+            return
+        addresses.extend(info[4][0] for info in infos)
+
+    thread = threading.Thread(target=_lookup, daemon=True)
+    thread.start()
+    thread.join(timeout=DNS_TIMEOUT_S)
+    if thread.is_alive():
+        raise ValueError(f"dns resolution timed out for host: {host}")
+    if errors:
+        raise ValueError(f"could not resolve host: {host}")
+    return addresses
 
 
 def _validate_url(url: str) -> None:
@@ -34,6 +90,24 @@ def _validate_url(url: str) -> None:
         raise ValueError("url with credentials is not allowed")
     if not parsed.hostname or "." not in parsed.hostname:
         raise ValueError(f"invalid hostname: {parsed.hostname}")
+
+    # SSRF guard: never reach loopback/private/link-local/unique-local addresses.
+    host = parsed.hostname.rstrip(".").lower()
+    if host in _BLOCKED_HOSTNAMES or host.endswith(".local") or host.endswith(".internal"):
+        raise ValueError(f"blocked host: {host}")
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if _is_blocked_address(literal):
+            raise ValueError(f"blocked private address: {host}")
+        return
+
+    for address in _resolve_host(host):
+        if _is_blocked_address(ipaddress.ip_address(address)):
+            raise ValueError(f"url resolves to a private address: {address}")
 
 
 def _html_to_markdown(html: str) -> str:

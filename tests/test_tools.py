@@ -32,6 +32,8 @@ EXPECTED_TOOLS = {
     "todo_read",
     "enter_plan_mode",
     "exit_plan_mode",
+    "web_fetch",
+    "web_search",
 }
 
 
@@ -163,3 +165,55 @@ def test_read_file_tool_reads_gbk_without_mojibake(tmp_path) -> None:
     ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
 
     assert read_file({"path": "notes.md"}, ctx) == "中文内容\n"
+
+
+def test_read_file_offset_limit_numbers_lines(tmp_path) -> None:
+    from agent_code.fs_safety import SkipPolicy
+    from agent_code.tools.read import read_file
+
+    p = tmp_path / "lines.txt"
+    p.write_text("\n".join(f"line {i}" for i in range(1, 11)) + "\n", encoding="utf-8")
+    ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
+
+    out = read_file({"path": "lines.txt", "offset": 4, "limit": 3}, ctx)
+    assert out == "4\tline 4\n5\tline 5\n6\tline 6"
+
+
+def test_read_file_offset_allows_file_over_whole_file_cap(tmp_path) -> None:
+    from agent_code.fs_safety import SkipPolicy
+    from agent_code.tools.read import read_file
+
+    p = tmp_path / "big.txt"
+    p.write_text("x" * 50 + "\n" + ("data\n" * 60000), encoding="utf-8")  # > 256 KiB
+    ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
+
+    out = read_file({"path": "big.txt", "offset": 1, "limit": 2}, ctx)
+    assert out.split("\n")[0] == "1\t" + "x" * 50
+    assert out.split("\n")[1] == "2\tdata"
+
+
+def test_read_file_offset_rejects_bad_values(tmp_path) -> None:
+    from agent_code.fs_safety import SkipPolicy
+    from agent_code.tools.read import read_file
+
+    p = tmp_path / "lines.txt"
+    p.write_text("a\nb\nc\n", encoding="utf-8")
+    ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
+
+    assert read_file({"path": "lines.txt", "offset": 0}, ctx) == "error: offset must be >= 1 (1-indexed)"
+    assert read_file({"path": "lines.txt", "offset": "x"}, ctx) == "error: offset/limit must be integers"
+    assert read_file({"path": "lines.txt", "offset": 99}, ctx) == ""
+
+
+def test_read_file_ranged_read_refuses_files_over_upper_bound(tmp_path, monkeypatch) -> None:
+    from agent_code.fs_safety import SkipPolicy
+    from agent_code.tools import read as read_module
+    from agent_code.tools.read import read_file
+
+    p = tmp_path / "big.txt"
+    p.write_text("a\nb\nc\n", encoding="utf-8")
+    monkeypatch.setattr(read_module, "RANGED_READ_MAX_BYTES", 5)
+    ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
+
+    out = read_file({"path": "big.txt", "offset": 1, "limit": 2}, ctx)
+    assert out.startswith("error: file too large for a ranged read")

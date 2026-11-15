@@ -258,6 +258,29 @@ def _cmd_todo(_args: list[str], ctx: SlashContext) -> SlashResult:
     return SlashResult(handled=True, message=body)
 
 
+def _cmd_undo(args: list[str], ctx: SlashContext) -> SlashResult:
+    """Restore the newest pre-edit backup of a relative path."""
+    from .file_history import restore
+    from .fs_safety import resolve_in_cwd
+
+    if not args:
+        return SlashResult(
+            handled=True,
+            message="Usage: /undo <path>  (restore the newest backup of a relative path)",
+        )
+    raw = args[0]
+    try:
+        target = resolve_in_cwd(ctx.cwd, raw)
+        rel = target.relative_to(ctx.cwd.resolve())
+    except (ValueError, OSError) as exc:
+        return SlashResult(handled=True, message=f"error: {exc}")
+
+    backup_path = restore(ctx.cwd, rel)
+    if backup_path is None:
+        return SlashResult(handled=True, message=f"no backup found for {rel}")
+    return SlashResult(handled=True, message=f"restored {rel} from backup {backup_path.name}")
+
+
 def _cmd_exit(_args: list[str], ctx: SlashContext) -> SlashResult:
     return SlashResult(handled=True, should_exit=True)
 
@@ -275,5 +298,6 @@ def default_slash_registry() -> SlashRegistry:
     registry.register("sessions", "list all session records under the current path", _cmd_sessions)
     registry.register("loop", "manage cron jobs: add/list/cancel", _cmd_loop)
     registry.register("todo", "show the current todo list", _cmd_todo)
+    registry.register("undo", "restore the newest backup of a file", _cmd_undo)
     registry.register("exit", "quit current session", _cmd_exit)
     return registry

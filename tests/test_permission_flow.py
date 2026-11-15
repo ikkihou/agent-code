@@ -125,6 +125,68 @@ def test_execute_one_tool_call_edit_confirmation_sends_diff_preview(tmp_path):
     )
 
 
+def test_execute_one_tool_call_edit_passes_diff_in_confirm_detail(tmp_path):
+    """ask-mode file_edit: the confirmation request must carry the diff in ``detail`` so
+    the user sees the actual change instead of approving blindly."""
+    p = tmp_path / "a.txt"
+    p.write_text("hello\n", encoding="utf-8")
+    ctx = ToolContext(cwd=tmp_path)
+    ctx.read_state.record(p, "hello\n")
+    reg = _registry(_tool("file_edit"))
+    requests: list = []
+    state = RuntimeState(asker=lambda request: requests.append(request) or True)
+    wire, _ = _collecting_wire()
+    block = execute_one_tool_call(
+        _call("file_edit", file_path="a.txt", old_string="hello", new_string="hi"),
+        ctx,
+        state,
+        reg,
+        wire,
+    )
+    assert block["is_error"] is False
+    assert len(requests) == 1
+    assert requests[0]["type"] == "confirm"
+    assert "-hello" in requests[0]["detail"]
+    assert "+hi" in requests[0]["detail"]
+
+
+def test_truncate_diff_caps_line_count():
+    from agent_code.tool_execution import _truncate_diff
+
+    diff = "\n".join(f"line {i}" for i in range(50))
+    out = _truncate_diff(diff, max_lines=30)
+    assert "line 29" in out
+    assert "line 30" not in out
+    assert "20 lines omitted" in out
+
+    assert _truncate_diff("short\n", max_lines=30) == "short\n"
+
+
+def test_edit_confirm_detail_is_plain_text_without_rich_markup(tmp_path):
+    """The ask-prompt body renders the diff as plain text, so no [red]/[green] wrappers
+    leak into the REPL Live area."""
+    p = tmp_path / "a.txt"
+    p.write_text("hello\n", encoding="utf-8")
+    ctx = ToolContext(cwd=tmp_path)
+    ctx.read_state.record(p, "hello\n")
+    reg = _registry(_tool("file_edit"))
+    requests: list = []
+    state = RuntimeState(asker=lambda request: requests.append(request) or True)
+    wire, _ = _collecting_wire()
+    execute_one_tool_call(
+        _call("file_edit", file_path="a.txt", old_string="hello", new_string="hi"),
+        ctx,
+        state,
+        reg,
+        wire,
+    )
+    assert len(requests) == 1
+    assert "[red]" not in requests[0]["detail"]
+    assert "[green]" not in requests[0]["detail"]
+    assert "-hello" in requests[0]["detail"]
+    assert "+hi" in requests[0]["detail"]
+
+
 def test_execute_one_tool_call_denies_dangerous_bash(tmp_path):
     reg = _registry(_tool("bash"))
     block, _ = _run(

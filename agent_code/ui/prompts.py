@@ -53,6 +53,10 @@ def render_prompt_request(request: PromptRequest) -> str:
         suffix = "[Y/n]" if default else "[y/N]"
         parts.append(f"? {message} {suffix}")
 
+    detail = str(request.get("detail") or "")
+    if detail:
+        parts.append(detail.rstrip())
+
     return "\n".join(parts).rstrip() + "\n"
 
 

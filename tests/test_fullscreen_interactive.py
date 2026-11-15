@@ -545,6 +545,26 @@ def test_prompt_request_helpers_render_bottom_prompt_text() -> None:
     assert prompt_for_request(choice_request) == "Choice [0]: "
 
 
+def test_prompt_request_helpers_render_detail_field() -> None:
+    """The detail field (diff / command) must be shown in the ask prompt, after the question."""
+    request = {
+        "type": "confirm",
+        "message": "Apply this edit to a.py?",
+        "default": False,
+        "detail": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-hello\n+hi",
+    }
+    assert render_prompt_request(request) == (
+        "? Apply this edit to a.py? [y/N]\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@\n"
+        "-hello\n"
+        "+hi\n"
+    )
+    # No detail -> unchanged (the question line alone).
+    assert render_prompt_request({"type": "confirm", "message": "x", "default": False}) == "? x [y/N]\n"
+
+
 # ---- slash ------------------------------------------------------------------
 
 
