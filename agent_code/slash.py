@@ -62,7 +62,7 @@ class SlashRegistry:
     def __init__(self) -> None:
         self._commands: dict[str, SlashCommand] = {}
 
-    def register(self, name: str, description: str, handler: SlashHandler | None) -> None:
+    def register(self, name: str, description: str, handler: SlashHandler) -> None:
         self._commands[name] = SlashCommand(name, description, handler)
 
     def commands(self) -> list[SlashCommand]:
