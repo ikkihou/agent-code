@@ -465,7 +465,7 @@ def test_commit_chunk_through_patch_stdout_preserves_ansi() -> None:
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.patch_stdout import patch_stdout
 
-    from agent_code.ui.scrollback import _commit_chunk
+    from agent_code.ui.scrollback import commit_chunk
 
     class _RecordingOutput(DummyOutput):
         def __init__(self) -> None:
@@ -485,7 +485,7 @@ def test_commit_chunk_through_patch_stdout_preserves_ansi() -> None:
     output = _RecordingOutput()
     with create_app_session(input=DummyInput(), output=output):
         with patch_stdout(raw=True):
-            _commit_chunk(render_user_prompt("hello"), columns=40)
+            commit_chunk(render_user_prompt("hello"), columns=40)
 
     raw = "".join(output.raw_chunks)
     assert "\x1b[1;37;48;2;68;68;68m" in raw
@@ -601,6 +601,7 @@ def test_backspace_reopens_slash_completion() -> None:
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.shortcuts import PromptSession
 
+    from agent_code.ui.keys import build_key_bindings
     from agent_code.ui.shell import InteractiveShell
 
     async def check() -> None:
@@ -610,7 +611,7 @@ def test_backspace_reopens_slash_completion() -> None:
             return None
 
         shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
-        kb = shell._build_key_bindings()
+        kb = build_key_bindings(state, shell._busy)
         with create_pipe_input() as pipe:
             session = PromptSession(
                 completer=SlashCompleter(),
@@ -787,13 +788,13 @@ def test_collapse_input_height_stops_at_content() -> None:
     """The input area must not absorb the rest of the screen: with a bare Dimension() the
     buffer window stretches to the bottom_toolbar, the frame encloses a tall empty box,
     and run_in_terminal commits land inside it instead of scrolling above the prompt."""
-    from agent_code.ui.layout import _collapse_input_height
+    from agent_code.ui.layout import collapse_input_height
 
     session = _build_framed_session()
     buffer_window = _default_buffer_window(session)
     assert not buffer_window.dont_extend_height()
 
-    _collapse_input_height(session)
+    collapse_input_height(session)
 
     assert buffer_window.dont_extend_height()
     # In place: the focus stack keeps its reference, so the same object must be in the tree.
@@ -807,13 +808,13 @@ def test_collapse_input_height_grows_with_multiline_content() -> None:
     from prompt_toolkit.input.base import DummyInput
     from prompt_toolkit.output import DummyOutput
 
-    from agent_code.ui.layout import _collapse_input_height
+    from agent_code.ui.layout import collapse_input_height
 
     async def check() -> None:
         with create_app_session(input=DummyInput(), output=DummyOutput()):
             session = _build_framed_session(multiline=True)
             set_app(session.app)
-            _collapse_input_height(session)
+            collapse_input_height(session)
             buffer_window = _default_buffer_window(session)
 
             assert buffer_window.preferred_height(80, 24).preferred == 1
@@ -828,6 +829,7 @@ def test_multiline_key_bindings_insert_newline_and_enter_submits() -> None:
     from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.keys import Keys
 
+    from agent_code.ui.keys import build_key_bindings
     from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
@@ -836,7 +838,7 @@ def test_multiline_key_bindings_insert_newline_and_enter_submits() -> None:
         return None
 
     shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
-    kb = shell._build_key_bindings()
+    kb = build_key_bindings(state, shell._busy)
 
     def binding_for(*keys: Any) -> Any:
         return next(b for b in kb.bindings if b.keys == keys).handler
@@ -888,7 +890,7 @@ def test_shift_enter_sequences_map_to_control_j() -> None:
 
 def test_bottom_toolbar_only_shows_mode_and_model() -> None:
     from agent_code.runtime import TodoItem
-    from agent_code.ui.layout import bottom_toolbar
+    from agent_code.ui.theme import bottom_toolbar
 
     state = RuntimeState(permission_mode="plan", model="mock")
     state.todo_store = [TodoItem(content="task", status="in_progress", active_form="working")]
@@ -897,10 +899,10 @@ def test_bottom_toolbar_only_shows_mode_and_model() -> None:
 
 def test_collapse_input_height_never_reserves_menu_rows() -> None:
     """The menu is a Float below the frame, so it never grows the input window."""
-    from agent_code.ui.layout import _collapse_input_height
+    from agent_code.ui.layout import collapse_input_height
 
     session = _build_framed_session()
-    _collapse_input_height(session)
+    collapse_input_height(session)
     buffer_window = _default_buffer_window(session)
 
     assert buffer_window.height.min == 0
@@ -921,11 +923,11 @@ def test_completion_menu_floats_anchor_below_frame() -> None:
 
     from agent_code.ui.layout import (
         _CompletionMenuFloat,
-        _relocate_completion_menus,
+        relocate_completion_menus,
     )
 
     session = _build_framed_session()
-    _relocate_completion_menus(session)
+    relocate_completion_menus(session)
 
     seen: set[int] = set()
     floats = []
@@ -992,7 +994,8 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
     from prompt_toolkit.shortcuts import PromptSession
 
     from agent_code.ui.completer import SlashCompleter
-    from agent_code.ui.layout import _frame_branch_index, _relocate_completion_menus
+    from agent_code.ui.keys import build_key_bindings
+    from agent_code.ui.layout import _frame_branch_index, relocate_completion_menus
     from agent_code.ui.shell import InteractiveShell
 
     async def check() -> None:
@@ -1002,7 +1005,7 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
             return None
 
         shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
-        kb = shell._build_key_bindings()
+        kb = build_key_bindings(state, shell._busy)
         with create_pipe_input() as pipe:
             session = PromptSession(
                 completer=SlashCompleter(),
@@ -1014,7 +1017,7 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
                 reserve_space_for_menu=0,
                 bottom_toolbar=lambda: " STATUS ",
             )
-            _relocate_completion_menus(session)
+            relocate_completion_menus(session)
             root = session.layout.container
             spacer = root.children[_frame_branch_index(session) + 1]
             assert callable(spacer.height)
@@ -1045,7 +1048,7 @@ def test_strip_frame_side_borders_removes_vertical_bars() -> None:
     from prompt_toolkit.layout.containers import VSplit
     from prompt_toolkit.layout.controls import BufferControl
 
-    from agent_code.ui.layout import _strip_frame_side_borders
+    from agent_code.ui.layout import strip_frame_side_borders
 
     session = _build_framed_session()
     middle = _frame_split(session).children[1]
@@ -1053,7 +1056,7 @@ def test_strip_frame_side_borders_removes_vertical_bars() -> None:
     left, body, right = middle.children
     assert left.width != 0 and right.width != 0  # side borders visible before
 
-    _strip_frame_side_borders(session)
+    strip_frame_side_borders(session)
 
     left, body_after, right = middle.children
     assert left.width.preferred == 0 and left.width.max == 0
@@ -1066,13 +1069,13 @@ def test_strip_frame_side_borders_removes_vertical_bars() -> None:
 def test_strip_frame_side_borders_keeps_horizontal_rules() -> None:
     """The top and bottom rule rows must survive: the first and last children of the
     Frame split are untouched."""
-    from agent_code.ui.layout import _strip_frame_side_borders
+    from agent_code.ui.layout import strip_frame_side_borders
 
     session = _build_framed_session()
     frame_split = _frame_split(session)
     top_before, _, bottom_before = frame_split.children
 
-    _strip_frame_side_borders(session)
+    strip_frame_side_borders(session)
 
     assert frame_split.children[0] is top_before
     assert frame_split.children[2] is bottom_before
@@ -1119,7 +1122,7 @@ def test_render_live_is_empty_when_idle() -> None:
 def test_live_window_is_above_the_input_frame() -> None:
     """The Live area must be a sibling of the frame branch placed immediately above it --
     not part of the prompt message, which pt renders inside the frame."""
-    from agent_code.ui.layout import _install_live_area_window
+    from agent_code.ui.layout import install_live_area_window
 
     session = _build_framed_session()
     from agent_code.ui.layout import _find_frame_split
@@ -1128,7 +1131,7 @@ def test_live_window_is_above_the_input_frame() -> None:
     assert frame_split is not None
     root_before = session.layout.container
 
-    live_window = _install_live_area_window(session, lambda: [("", "live")])
+    live_window = install_live_area_window(session, lambda: [("", "live")])
 
     root = session.layout.container
     assert root is root_before

@@ -1,4 +1,19 @@
-"""Bottom status bar and the input-area Frame layout reshaping."""
+"""Input-area layout reshaping for the REPL.
+
+prompt_toolkit builds the default prompt layout (input frame, completion menus) in a
+fixed shape; this module surgically adjusts that tree in place:
+
+- the input window stops at its content height instead of stretching to fill the screen
+  (``collapse_input_height``),
+- the frame's left/right vertical borders are collapsed so only the horizontal rules
+  remain (``strip_frame_side_borders``),
+- the completion menus are re-anchored to float below the frame and reserve their rows
+  (``relocate_completion_menus``),
+- an extra "Live area" window is inserted above the frame for in-progress output
+  (``install_live_area_window``).
+
+The status bar and stylesheet live in ``theme.py``; this module is pure layout.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +34,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
 from prompt_toolkit.shortcuts import PromptSession
-from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets.base import Border
-
-from ..runtime import RuntimeState
 
 # Completion menus are Floats, so they do not need rows inside the input frame. This
 # is only the upper bound used when measuring the menu's own preferred height.
@@ -36,28 +48,7 @@ MENU_TOP_GAP = 0
 MENU_BOTTOM_GAP = 1
 
 
-def bottom_toolbar(state: RuntimeState) -> str:
-    """Bottom status bar: current mode + model only."""
-    mode = {"default": "default", "acceptEdits": "accept edits", "plan": "plan"}.get(
-        state.permission_mode, state.permission_mode
-    )
-    return f" {mode} · {state.model} "
-
-
-def build_style() -> Style:
-    """REPL stylesheet: spinner / pending preview / status bar / Frame border."""
-    return Style.from_dict(
-        {
-            "spinner": "bold ansibrightcyan",
-            "preview": "ansiyellow",
-            "bottom-toolbar": "bg:#222222 ansiwhite",
-            # Frame border: muted slate blue, understated but distinct from scrollback content.
-            "frame.border": "#556677",
-        }
-    )
-
-
-def _collapse_input_height(session: PromptSession[str]) -> None:
+def collapse_input_height(session: PromptSession[str]) -> None:
     """Make the input area stop at its content height instead of absorbing the rest of
     the screen -- the layout then follows the content, right under the scrollback tail.
 
@@ -197,7 +188,7 @@ def _default_buffer_window(session: PromptSession[str]) -> Window | None:
     return None
 
 
-def _relocate_completion_menus(session: PromptSession[str]) -> None:
+def relocate_completion_menus(session: PromptSession[str]) -> None:
     """Move the built-in completion Floats below the frame and reserve their space.
 
     prompt_toolkit builds CompletionsMenu / MultiColumnCompletionsMenu as cursor-
@@ -283,7 +274,7 @@ def _install_menu_spacer(session: PromptSession[str], menu_content: Any) -> None
     )
 
 
-def _strip_frame_side_borders(session: PromptSession[str]) -> None:
+def strip_frame_side_borders(session: PromptSession[str]) -> None:
     """Remove the Frame's left/right vertical borders, keeping only the horizontal
     rules (top ┌──┐ / bottom └──┘, no │ columns).
 
@@ -310,7 +301,7 @@ def _strip_frame_side_borders(session: PromptSession[str]) -> None:
     right.width = Dimension.exact(0)
 
 
-def _install_live_area_window(
+def install_live_area_window(
     session: PromptSession[str], get_text: Callable[[], AnyFormattedText]
 ) -> Window:
     """Insert a Live-area window directly above the input frame.

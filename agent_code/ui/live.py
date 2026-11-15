@@ -109,7 +109,7 @@ class LiveArea:
         return FormattedText(out)
 
 
-def _preview_lines(event: WireEvent) -> list[str] | None:
+def preview_lines(event: WireEvent) -> list[str] | None:
     """Confirmation-class events -> Live area preview lines (text truncated)."""
     if isinstance(event, DiffPreview):
         return [f"⏸ diff {event.path} — waiting for approval"]

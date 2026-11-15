@@ -3,7 +3,8 @@
 See the package docstring (ui/__init__.py) for the threading and terminal-ownership
 model. This module keeps only stateful orchestration: the worker thread (turn
 execution / cron dispatch), the UI coroutine (event consumption / spinner / prompts),
-input submission and key bindings. Pure rendering and parsing live in sibling modules.
+and input submission. Key bindings live in ``keys.py``; rendering and parsing live in
+the other sibling modules.
 """
 
 from __future__ import annotations
@@ -17,12 +18,7 @@ from typing import Any, Callable
 
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app_or_none, get_app_session
-from prompt_toolkit.filters import emacs_insert_mode, has_selection, vi_insert_mode
 from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
-from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
 
@@ -42,57 +38,24 @@ from ..wire import (
 )
 from .completer import SlashCompleter
 from .events import event_to_chunks, render_user_prompt
+from .keys import build_key_bindings
 from .layout import (
-    _collapse_input_height,
-    _install_live_area_window,
-    _relocate_completion_menus,
-    _strip_frame_side_borders,
-    bottom_toolbar,
-    build_style,
+    collapse_input_height,
+    install_live_area_window,
+    relocate_completion_menus,
+    strip_frame_side_borders,
 )
-from .live import LiveArea, _preview_lines
+from .live import LiveArea, preview_lines
 from .prompts import (
     parse_choice_index,
     parse_confirm_answer,
     prompt_for_request,
     render_prompt_request,
 )
-from .scrollback import _commit_chunk
-
-# Shift+Enter encodings used by the common extended protocols. prompt_toolkit has no
-# kitty protocol support and maps the xterm modifyOtherKeys sequence to ControlM, which
-# is indistinguishable from Enter. The ANSI parser reads this dict when it feeds input,
-# so overriding these entries makes the sequences surface as ControlJ (the existing
-# c-j binding inserts a newline). This is intentionally a module-level, idempotent
-# install: every REPL in the process must see the same mapping.
-_SHIFT_ENTER_SEQUENCES = (
-    "\x1b[13;2u",  # kitty CSI-u
-    "\x1b[27;2;13u",  # kitty legacy
-    "\x1b[27;2;13~",  # xterm modifyOtherKeys
-)
-
-
-def _install_shift_enter_mapping() -> None:
-    """Map standard Shift+Enter sequences to ControlJ (newline in this app)."""
-    for sequence in _SHIFT_ENTER_SEQUENCES:
-        ANSI_SEQUENCES[sequence] = Keys.ControlJ
-
-
-_install_shift_enter_mapping()
+from .scrollback import commit_chunk
+from .theme import bottom_toolbar, build_style
 
 PendingPrompt = dict[str, Any]
-_INSERT_MODE = vi_insert_mode | emacs_insert_mode
-
-
-def _restart_completion(buffer: Any) -> None:
-    """Re-run completion after a deletion.
-
-    ``complete_while_typing`` only fires on ``insert_text``; deletions change the
-    document without firing that event. ``start_completion`` schedules the same async
-    completion coroutine the typing path uses, so the UI is not blocked.
-    """
-    if buffer.complete_while_typing():
-        buffer.start_completion()
 
 
 class InteractiveShell:
@@ -257,7 +220,7 @@ class InteractiveShell:
                     continue
                 if isinstance(event, ToolCallCompleted):
                     self._live.active_tool = None
-                preview = _preview_lines(event)
+                preview = preview_lines(event)
                 if preview is not None:
                     self._live.pending_preview = preview
                     continue
@@ -389,7 +352,7 @@ class InteractiveShell:
         for chunk in chunks:
             if self._on_transcript is not None:
                 self._on_transcript(chunk)
-            _commit_chunk(chunk)
+            commit_chunk(chunk)
 
     # ---- main entry ----------------------------------------------------------
 
@@ -402,13 +365,13 @@ class InteractiveShell:
         # Resume replay / header: written straight to the terminal before the prompt starts
         # (no app yet, direct write).
         for chunk in self._initial_chunks:
-            _commit_chunk(chunk)
+            commit_chunk(chunk)
 
         session = PromptSession[str](
             # Only the input prompt lives in `message`: pt renders it INSIDE the frame,
             # and the frame is there to delimit the input line alone. The Live area
             # (spinner / streaming tail / pending question) gets its own window above
-            # the frame -- see _install_live_area_window.
+            # the frame -- see install_live_area_window.
             message=lambda: FormattedText([("class:prompt", "> ")]),
             bottom_toolbar=lambda: FormattedText(
                 [("class:bottom-toolbar", bottom_toolbar(self._state))]
@@ -421,7 +384,7 @@ class InteractiveShell:
             # patch above.
             multiline=True,
             style=style,
-            key_bindings=self._build_key_bindings(),
+            key_bindings=build_key_bindings(self._state, self._busy),
             # Soft-wrapped input lines align under the text, past the '> ' prefix
             # (the default is no indentation in single-line mode).
             prompt_continuation=lambda width, line_number, wrap_count: " " * width,
@@ -445,9 +408,9 @@ class InteractiveShell:
         # Escape is both "abort" and the prefix of Esc+Enter. Keep the prefix timeout
         # short so a plain Escape still aborts promptly.
         session.app.timeoutlen = 0.2
-        _collapse_input_height(session)
-        _strip_frame_side_borders(session)
-        _relocate_completion_menus(session)
+        collapse_input_height(session)
+        strip_frame_side_borders(session)
+        relocate_completion_menus(session)
         self._install_live_window(session)
 
         worker = threading.Thread(target=self._work_loop, daemon=True)
@@ -481,7 +444,7 @@ class InteractiveShell:
 
     def _install_live_window(self, session: PromptSession[str]) -> None:
         """Put the Live area in its own window right above the input frame."""
-        _install_live_area_window(session, self._render_live)
+        install_live_area_window(session, self._render_live)
 
     def _render_live(self) -> FormattedText:
         """Render the Live area: spinner / pending question / streaming tail.
@@ -511,64 +474,6 @@ class InteractiveShell:
         if fragments:
             fragments[-1] = (fragments[-1][0], fragments[-1][1].rstrip("\n"))
         return FormattedText(fragments)
-
-    # ---- keys ----------------------------------------------------------------
-
-    def _build_key_bindings(self) -> KeyBindings:
-        kb = KeyBindings()
-
-        @kb.add("escape")
-        def _(event: Any) -> None:
-            # The provider watches this signal and actively closes the HTTP stream it is
-            # reading. Esc+Enter is a longer match handled below; session.app.timeoutlen
-            # keeps a plain Escape from feeling delayed.
-            self._state.abort_event.set()
-
-        @kb.add("enter")
-        def _(event: Any) -> None:
-            # Ordinary Enter (ControlM) submits.
-            event.current_buffer.validate_and_handle()
-
-        # Deletions do not fire Buffer.on_text_insert, so complete_while_typing never
-        # reopens the slash menu after a backspace. Bind the common deletion keys to
-        # delete first, then schedule the same async completion path typing uses.
-        @kb.add("backspace", filter=_INSERT_MODE & ~has_selection)
-        def _(event: Any) -> None:
-            get_by_name("backward-delete-char").handler(event)
-            _restart_completion(event.current_buffer)
-
-        @kb.add("delete", filter=_INSERT_MODE & ~has_selection)
-        def _(event: Any) -> None:
-            get_by_name("delete-char").handler(event)
-            _restart_completion(event.current_buffer)
-
-        @kb.add("c-w", filter=_INSERT_MODE & ~has_selection)
-        def _(event: Any) -> None:
-            get_by_name("unix-word-rubout").handler(event)
-            _restart_completion(event.current_buffer)
-
-        @kb.add("escape", "enter")
-        @kb.add("c-j")
-        def _(event: Any) -> None:
-            # Shift+Enter sequences are remapped to ControlJ by
-            # _install_shift_enter_mapping; Alt+Enter (often sent as Esc, Enter) and
-            # Ctrl+J are explicit fallbacks. copy_margin=False keeps newlines predictable.
-            event.current_buffer.newline(copy_margin=False)
-
-        @kb.add("s-tab")
-        def _(event: Any) -> None:
-            self._state.cycle_permission_mode()
-            event.app.invalidate()
-
-        @kb.add("c-c")
-        def _(event: Any) -> None:
-            if self._busy.is_set():
-                # Turn in flight: Ctrl+C behaves like ESC (abort the turn) and does not exit.
-                self._state.abort_event.set()
-            else:
-                event.app.exit(exception=EOFError)
-
-        return kb
 
     def run(self) -> None:
         asyncio.run(self._run_async())

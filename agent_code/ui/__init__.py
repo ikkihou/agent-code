@@ -6,8 +6,8 @@ A scrollback + Live REPL (modelled on kimi-cli's terminal-ownership model):
   area just above it (spinner / streaming tail / pending preview), and the
   bottom_toolbar status bar.
 - The input area has horizontal rules above and below (top/bottom only -- the Frame's
-  side columns are collapsed by ``layout._strip_frame_side_borders``) and the input line
-  is prefixed with ``>``. The layout follows the content: ``layout._collapse_input_height``
+  side columns are collapsed by ``layout.strip_frame_side_borders``) and the input line
+  is prefixed with ``>``. The layout follows the content: ``layout.collapse_input_height``
   pins the input window to its content height, so the input box sits right under the
   scrollback tail and scrolls with it. It is deliberately NOT pinned to the bottom
   edge -- a full-height layout leaves no scroll space above, so content committed with
@@ -15,7 +15,7 @@ A scrollback + Live REPL (modelled on kimi-cli's terminal-ownership model):
   Completion menus float just below the frame, and a dynamic spacer window between the
   frame and the status bar (``layout._install_menu_spacer``) reserves their rows only
   while the menu is open, so the input window never grows.
-- In-progress output does not live in the prompt frame: ``layout._install_live_area_window``
+- In-progress output does not live in the prompt frame: ``layout.install_live_area_window``
   puts it in its own window between the scrollback tail and the frame, so a submitted
   prompt's spinner and streamed text appear above the input box and move up into the
   scrollback as they finish. The Live window top starts with one blank separator line,
@@ -35,6 +35,8 @@ Sub-modules by responsibility:
 - live:       Live area state (spinner / streaming tail / pending preview)
 - events:     translation of finished wire events -> OutputChunk
 - prompts:    rendering and answer parsing for prompt requests (confirm/choice)
-- layout:     status bar, horizontal rules around the input, Live area window
+- theme:      bottom status bar text + prompt_toolkit stylesheet
+- keys:       REPL key bindings (Shift+Enter remap, abort/delete/newline, mode cycle)
+- layout:     input-area Frame reshaping (height collapse, side-border strip, menus, Live window)
 - shell:      the InteractiveShell REPL itself (threading model + input loop)
 """

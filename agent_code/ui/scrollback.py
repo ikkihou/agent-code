@@ -216,7 +216,7 @@ def _chunk_to_ansi(chunk: OutputChunk, columns: int | None = None) -> str:
     return capture.get()
 
 
-def _commit_chunk(chunk: OutputChunk, columns: int | None = None) -> None:
+def commit_chunk(chunk: OutputChunk, columns: int | None = None) -> None:
     """Write an OutputChunk into the terminal scrollback above the prompt.
 
     Uses ``sys.stdout.write``: ``patch_stdout`` replaces stdout with a StdoutProxy that
