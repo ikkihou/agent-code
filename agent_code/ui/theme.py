@@ -12,10 +12,13 @@ from ..runtime import RuntimeState
 
 
 def bottom_toolbar(state: RuntimeState) -> str:
-    """Bottom status bar: current mode + model only."""
-    mode = {"default": "default", "acceptEdits": "accept edits", "plan": "plan"}.get(
-        state.permission_mode, state.permission_mode
-    )
+    """Bottom status bar: current mode + model."""
+    mode = {
+        "default": "default",
+        "acceptEdits": "accept edits",
+        "plan": "plan",
+        "fullAccess": "full access",
+    }.get(state.permission_mode, state.permission_mode)
     return f" {mode} · {state.model} "
 
 

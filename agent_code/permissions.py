@@ -69,8 +69,8 @@ _READONLY_TOOLS = frozenset(
     }
 )
 
-# default / acceptEdits let these through; plan mode still denies them -- plan mode's
-# hard constraint is read-only.
+# default / acceptEdits / fullAccess let these through; plan mode still denies them --
+# plan mode's hard constraint is read-only.
 _LOW_RISK_WRITES = frozenset(
     {
         "memory_write",
@@ -95,10 +95,23 @@ _ASK_TOOLS = frozenset(
 
 def decide_permission(request: PermissionRequest) -> PermissionDecision:
     """Permission engine entry point: decide allow / ask / deny from the tool name,
-    arguments and current mode."""
+    arguments and current mode.
+
+    Modes: default (read-only free, writes/bash ask), acceptEdits (file edits also
+    free), plan (hard read-only), fullAccess (everything free).
+    """
     tool_name = request.tool_name
     args = request.args
     mode = request.mode
+
+    # fullAccess bypasses every gate: dangerous-command patterns, edit confirmations
+    # and the web_* asks all run without prompting. ask_user_question is the one
+    # exception -- its "ask" is the question itself (the interaction mechanism), not a
+    # permission gate, so it must keep reaching the confirmation UI.
+    if mode == "fullAccess":
+        if tool_name == "ask_user_question":
+            return PermissionDecision("ask")
+        return PermissionDecision("allow")
 
     if tool_name in _ASK_TOOLS:
         return PermissionDecision("ask")

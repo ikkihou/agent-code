@@ -38,7 +38,7 @@ class RuntimeState:
     scheduler: CronScheduler | None = None
 
     def cycle_permission_mode(self) -> str:
-        order = ["default", "acceptEdits", "plan"]
+        order = ["default", "acceptEdits", "plan", "fullAccess"]
         idx = order.index(self.permission_mode) if self.permission_mode in order else 0
         self.permission_mode = order[(idx + 1) % len(order)]
         return self.permission_mode

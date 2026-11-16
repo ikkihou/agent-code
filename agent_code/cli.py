@@ -156,7 +156,7 @@ def main_command(
     permission_mode: str = typer.Option(
         "default",
         "--permission-mode",
-        help="Permission mode: default, acceptEdits, plan",
+        help="Permission mode: default, acceptEdits, plan, fullAccess",
     ),
     resume: str | None = typer.Option(
         None, "--resume", help="resume the given session id"

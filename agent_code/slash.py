@@ -133,7 +133,7 @@ def _cmd_context(_args: list[str], ctx: SlashContext) -> SlashResult:
 
 def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
     """Show the permission mode. v1 does not hot-swap runtime state from the REPL."""
-    modes = ["default", "acceptEdits", "plan"]
+    modes = ["default", "acceptEdits", "plan", "fullAccess"]
     if not args:
         return SlashResult(
             handled=True,

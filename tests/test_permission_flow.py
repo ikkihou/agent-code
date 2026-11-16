@@ -271,7 +271,58 @@ def test_approve_plan_rejects_keeps_mode():
     assert state.permission_mode == "plan"
 
 
-# ---- execute_plan_boundary_calls -------------------------------------------
+# ---- fullAccess mode --------------------------------------------------------
+
+
+def test_full_access_allows_bash_even_dangerous_patterns(tmp_path):
+    """fullAccess bypasses the dangerous-command deny list: the mode is an explicit
+    blanket approval, so even rm -rf runs without prompting."""
+    reg = _registry(_tool("bash"))
+    block, _ = _run(
+        _call("bash", command="rm -rf /tmp/x"),
+        ToolContext(cwd=tmp_path),
+        RuntimeState(permission_mode="fullAccess"),
+        reg,
+    )
+    assert block["is_error"] is False
+
+
+def test_full_access_allows_file_write_without_confirmation(tmp_path):
+    reg = _registry(_tool("file_write"))
+    state = RuntimeState(permission_mode="fullAccess")
+    # No asker injected: a confirmation attempt would go through the typer fallback and
+    # fail on the null stdin -- reaching "ok" proves no ask happened.
+    block, _ = _run(
+        _call("file_write", file_path="new.txt", content="hi"),
+        ToolContext(cwd=tmp_path),
+        state,
+        reg,
+    )
+    assert block["is_error"] is False
+    assert block["content"] == "ok"
+
+
+def test_full_access_still_asks_ask_user_question(tmp_path):
+    """ask_user_question's ask is the interaction itself, not a gate: even fullAccess
+    routes it through the confirmation UI."""
+    reg = _registry()
+    state = RuntimeState(permission_mode="fullAccess", asker=lambda request: 1)
+    block, _ = _run(
+        _call("ask_user_question", prompt="Pick one", options=["A", "B"]),
+        ToolContext(cwd=tmp_path),
+        state,
+        reg,
+    )
+    assert block["is_error"] is False
+    assert "User selected" in block["content"]
+    assert '"A"' in block["content"]
+
+
+def test_cycle_permission_mode_includes_full_access():
+    state = RuntimeState(permission_mode="plan")
+    assert state.cycle_permission_mode() == "fullAccess"
+    assert state.cycle_permission_mode() == "default"  # wraps around
+
 
 
 def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):
@@ -290,3 +341,6 @@ def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):
     # exit_plan_mode itself runs; approval switches the mode to acceptEdits
     assert blocks[1]["content"] == "approved"
     assert state.permission_mode == "acceptEdits"
+
+
+# ---- fullAccess mode --------------------------------------------------------
