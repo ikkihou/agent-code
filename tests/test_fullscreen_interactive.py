@@ -312,7 +312,7 @@ def test_live_area_code_fence_survives_blank_lines() -> None:
 
 
 def test_markdown_fragments_style_real_markdown() -> None:
-    """markdown_fragments produces real pt styles: bold heading, bold text, styled
+    """markdown_fragments produces real Rich styles: bold heading, bold text, styled
     code block -- and the plain text survives verbatim (no markup parsing)."""
     frags = markdown_fragments("# Title\n\n**bold** text\n")
     text = "".join(t for _, t in frags)
@@ -324,26 +324,44 @@ def test_markdown_fragments_style_real_markdown() -> None:
     assert "**" not in text
 
 
-def test_pt_style_negated_attributes_are_not_inverted() -> None:
-    """rich writes disabled attributes as "not <attr>"; dropping "not" would turn them
-    into pt's POSITIVE form (the all-underlined code-fence regression). They must map
-    to pt's native no<attr> negation instead.
+def test_fragment_styles_are_rich_vocabulary_and_parseable() -> None:
+    """Fragment styles are Rich inline style strings: every one must parse and none may
+    use prompt_toolkit-only vocabulary.
 
-    Regression for: markdown code fences rendered every token underlined because
-    rich's pygments theme emits Style(underline=False) -> "not underline".
+    Regression for: code fences rendered all-underlined because rich's pygments theme
+    emits Style(underline=False). The style string must keep the negation
+    ("not underline"), never a bare "underline".
     """
-    from agent_code.output import _pt_style
+    from rich.style import Style
 
-    assert _pt_style("not underline") == "nounderline"
-    assert _pt_style("not bold not italic not underline") == (
-        "nobold noitalic nounderline"
+    sample = (
+        "# Title\n\n**bold** and *italic* with `inline` code\n\n"
+        "```python\ndef foo():\n    return 1  # comment\n```\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n\n[link](http://x)\n"
     )
-    assert _pt_style("on #272822 not underline #f8f8f2") == (
-        "bg:#272822 nounderline #f8f8f2"
-    )
-    # A dangling or color-bound "not" must not corrupt the translation.
-    assert _pt_style("not") == ""
-    assert _pt_style("not red") == "red"
+    fragments = markdown_fragments(sample)
+    assert fragments
+    for style, _ in fragments:
+        if not style:
+            continue
+        Style.parse(style)  # raises on anything Rich cannot consume
+        assert not any(
+            token.startswith(("ansi", "bg:", "fg:")) for token in style.split()
+        ), style
+
+    # Headings and links legitimately use underline; the regression is that code
+    # tokens acquire it. Check the code fence content specifically.
+    code_fragments = markdown_fragments("```python\ndef foo():\n    return 1\n```\n")
+    code_styles = [style for style, _ in code_fragments]
+    # The pygments theme disables underline explicitly; the negation must survive.
+    assert any("not underline" in style for style in code_styles)
+    # Every literal underline token must be preceded by "not" (rich splits attributes
+    # into separate tokens, so check the token sequence, not the substring).
+    for style in code_styles:
+        tokens = style.split()
+        for index, token in enumerate(tokens):
+            if token == "underline":
+                assert index > 0 and tokens[index - 1] == "not", style
 
 
 def test_markdown_fragments_verbatim_content_with_brackets() -> None:
@@ -438,7 +456,7 @@ def test_render_user_prompt_formats_prompt_blocks() -> None:
     empty = render_user_prompt("")
     assert empty.format == "plain"
     assert empty.text == ""
-    assert ("bold ansiwhite bg:#444444", "> hello") in chunk.fragments
+    assert ("bold white on #444444", "> hello") in chunk.fragments
     assert chunk.fragments[-1] == ("", "\n")
 
 
@@ -454,15 +472,13 @@ def test_prompt_echo_and_live_spinner_have_exactly_one_blank_gap() -> None:
     assert fragments[0] == ("", "\n")
 
 
-def test_scrollback_prompt_style_is_translated_for_rich() -> None:
-    """The submitted-prompt background must survive the pt -> Rich style translation.
-
-    The old implementation fed "ansiwhite bg:#444444" straight into rich.text.Text;
-    Rich silently ignored both tokens, so the block had no background.
+def test_scrollback_renders_rich_and_legacy_prompt_styles() -> None:
+    """New prompt chunks carry Rich vocabulary and render straight through; fragments
+    persisted by older versions use prompt_toolkit vocabulary and go through the
+    legacy shim. Both must produce the truecolor background and the padded bar.
     """
-    from agent_code.ui.scrollback import _chunk_to_ansi, _rich_style
+    from agent_code.ui.scrollback import _chunk_to_ansi
 
-    assert _rich_style("bold ansiwhite bg:#444444") == "bold white on #444444"
     ansi = _chunk_to_ansi(render_user_prompt("hello"), columns=40)
     assert "48;2;68;68;68" in ansi  # truecolor background #444444
     assert "> hello" + " " * (40 - len("> hello")) in ansi  # padded bar
@@ -471,10 +487,10 @@ def test_scrollback_prompt_style_is_translated_for_rich() -> None:
     wide = _chunk_to_ansi(render_user_prompt("hello"), columns=132)
     assert "> hello" + " " * (132 - len("> hello")) in wide
 
-    # Legacy transcript records (before the style change) must render too.
+    # Legacy transcript records (prompt_toolkit vocabulary) must render too.
     legacy = OutputChunk(
         "\n\n> hi\n\n",
-        fragments=(("ansiwhite bg:#444444", "> hi"),),
+        fragments=(("bold ansiwhite bg:#444444", "> hi"),),
         full_width=True,
     )
     legacy_ansi = _chunk_to_ansi(legacy, columns=40)
@@ -482,12 +498,33 @@ def test_scrollback_prompt_style_is_translated_for_rich() -> None:
     assert "> hi" + " " * (40 - len("> hi")) in legacy_ansi
 
 
+def test_legacy_pt_style_detection() -> None:
+    """Only prompt_toolkit-vocabulary styles are routed through the legacy shim.
+
+    Detection covers both prefixed tokens (ansi*/bg:/fg:) and pt-only attribute
+    spellings (nobold/hidden/...), which Rich raises on rather than ignoring.
+    """
+    from agent_code.ui.scrollback import _legacy_pt_style, _looks_legacy_pt_style
+
+    assert _looks_legacy_pt_style("bold ansiwhite bg:#444444")
+    assert _looks_legacy_pt_style("fg:red")
+    assert _looks_legacy_pt_style("nounderline")
+    assert _looks_legacy_pt_style("bold hidden")
+    assert not _looks_legacy_pt_style("bold white on #444444")
+    assert not _looks_legacy_pt_style("not bold #66d9ef on #272822")
+    assert not _looks_legacy_pt_style("")
+    # Attributes both vocabularies share must not trigger the shim.
+    assert not _looks_legacy_pt_style("bold underline dim")
+
+    assert _legacy_pt_style("bold ansiwhite bg:#444444") == "bold white on #444444"
+
+
 def test_pad_full_width_accumulates_across_fragments() -> None:
     """Multiple styled fragments on one visual line produce one padded line."""
     from agent_code.ui.scrollback import _pad_full_width
 
     padded = _pad_full_width(
-        [("bold", "> "), ("ansiwhite bg:#444444", "hello"), ("", "\n")],
+        [("bold", "> "), ("white on #444444", "hello"), ("", "\n")],
         columns=20,
     )
     text = "".join(part for _, part in padded)
@@ -556,6 +593,33 @@ def test_transcript_prompt_style_survives_resume(tmp_path: Path) -> None:
     ansi = _chunk_to_ansi(resumed.transcript_chunks[0], columns=40)
     assert "48;2;68;68;68" in ansi
     assert "> hello" + " " * (40 - len("> hello")) in ansi
+
+
+def test_transcript_full_width_inference_covers_both_vocabularies(tmp_path: Path) -> None:
+    """Records without the explicit flag infer full_width from the prompt background
+    in either vocabulary: pt's "bg:#444444" (old) or Rich's "on #444444" (current)."""
+    import json
+
+    from agent_code.session import Session
+
+    session = Session.create(tmp_path)
+    records = [
+        {"text": "\n\n> old\n", "format": "plain",
+         "fragments": [["", "\n\n"], ["bold ansiwhite bg:#444444", "> old"], ["", "\n"]]},
+        {"text": "\n\n> new\n", "format": "plain",
+         "fragments": [["", "\n\n"], ["bold white on #444444", "> new"], ["", "\n"]]},
+        {"text": "plain\n", "format": "plain"},
+    ]
+    with session.transcript_path.open("a", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+    resumed = Session.load_by_id(tmp_path, session.session_id)
+    assert resumed is not None
+    chunks = resumed.transcript_chunks
+    assert chunks[0].full_width is True   # legacy pt vocabulary
+    assert chunks[1].full_width is True   # current Rich vocabulary
+    assert chunks[2].full_width is False  # no prompt background, no inference
 
 
 # ---- prompt request rendering and parsing ------------------------------------

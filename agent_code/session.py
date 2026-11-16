@@ -221,7 +221,12 @@ class Session:
             if not full_width and fragments:
                 # Transcripts written before the flag existed used this background for
                 # submitted prompts; infer it so older files also replay as full-width.
-                full_width = any("bg:#444444" in str(style) for style, _ in fragments)
+                # Current records spell it in Rich vocabulary ("on #444444"), older
+                # ones in prompt_toolkit vocabulary ("bg:#444444").
+                full_width = any(
+                    "bg:#444444" in str(style) or "on #444444" in str(style)
+                    for style, _ in fragments
+                )
             chunks.append(
                 OutputChunk(
                     data.get("text", ""),
