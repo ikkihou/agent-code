@@ -154,6 +154,7 @@ cron 到点 prompt 在 worker 线程内直接 `_worker_sink([PromptEcho(...)])` 
 11. **`full_width` 只在提交时 pad，样式必须翻译**——存储层保持未 pad（否则 transcript 会把某个终端宽度写死），`_pad_full_width` 用 `get_cwidth` + `expandtabs`、超宽行不 pad，`_ansi_console` 的 `width=4096` 不能调小（Rich 按 80 列回退会截断长行）。片段的 pt 词汇（`ansiwhite`、`bg:#444444`）必须先经 `_rich_style()` 翻成 Rich（`white`、`on #444444`），否则 Rich 静默丢弃 token，表现为"文字在、背景没了"。翻译放在 `scrollback.py` 一处，别改各个生产者——旧 transcript 记录也要能渲染。
 12. **多行输入的边界**——`multiline=True` 下 Enter 绑定到 `validate_and_handle`，换行必须显式绑定；Shift+Enter 只在终端主动发 kitty / modifyOtherKeys 序列时可达（pt 3.0.52 无 kitty protocol，不能主动 enable，否则 Esc/Ctrl+C 编码改变）。Esc 同时是 abort 前缀，`session.app.timeoutlen = 0.2` 是这两者能共存的前提。
 13. **gap 只由 Live 提供**——prompt echo 以单个 `\n` 结尾，`LiveArea.formatted()` 在 turn 活跃时先补一个 `\n`。两边都加会变成两个空行；Live 不在 turn 活跃时输出这行，所以空闲时窗口高度为 0。
+14. **`SlashResult.message` 必须是文本**——REPL 的 `_route_slash_command` 把它塞进 `OutputChunk`，cron 路径则 `_worker_sink([Line(str(result.message))])`；返回 Rich renderable（如 `Table`）会被 `str()` 成 `<rich.table.Table object at 0x...>`。`/sessions` 曾如此，现在由 `session._sessions_text()` 用离屏 `Console(record=True).export_text()` 转成文本表格（两个前端都能直接显示）。新增 slash command 需要表格时照此办理，别把 renderable 塞进 message。
 
 ## 5. 调试速查表
 

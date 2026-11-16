@@ -19,14 +19,14 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
 from rich.table import Table
 
 from .output import OutputChunk
-
-SessionRenderable = str | Table
 
 
 def _is_session_file(path: Path) -> bool:
@@ -71,7 +71,21 @@ def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
     return sorted(summaries, key=lambda item: item[2], reverse=True)
 
 
-def _sessions_renderable(cwd: Path) -> SessionRenderable:
+def _render_table_text(table: Table, width: int = 100) -> str:
+    """Render a Rich table to plain text (no ANSI).
+
+    Slash results cross the wire as *text*: the REPL sink only stores strings
+    (``str(result.message)``), so returning the ``Table`` object itself printed
+    ``<rich.table.Table object at 0x...>``. Lowering it to text here keeps one
+    representation both frontends (one-shot console / REPL scrollback) can show.
+    """
+    console = Console(file=StringIO(), record=True, width=width, color_system=None)
+    console.print(table)
+    return "\n".join(line.rstrip() for line in console.export_text().splitlines())
+
+
+def _sessions_text(cwd: Path) -> str:
+    """Session list as Rich markup text: a rendered table, or a dim notice."""
     summaries = _session_summaries(cwd)
     if not summaries:
         return "[dim]No sessions found.[/dim]"
@@ -87,7 +101,7 @@ def _sessions_renderable(cwd: Path) -> SessionRenderable:
             .isoformat(timespec="seconds")
         )
         table.add_row(session_id, str(message_count), updated)
-    return table
+    return _render_table_text(table)
 
 
 def _sanitize_cwd(cwd: Path) -> str:

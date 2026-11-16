@@ -3,7 +3,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from .runtime import RuntimeState
 
@@ -27,6 +27,12 @@ class SlashResult:
     """Result of running a slash command. handled=True means it was consumed and the
     CLI must not treat the input as a normal prompt. should_query=True makes the CLI
     feed the prompt field to the model as a new user message.
+
+    message must be *text* (empty = nothing to show): every consumer is a frontend
+    that either prints it as-is (one-shot, with markup) or pushes it through the wire
+    as a ``Line`` (REPL). A Rich renderable such as a ``Table`` is not accepted --
+    it would reach the REPL as ``str(obj)`` and show up as ``<rich.table.Table
+    object at 0x...>``; handlers render their own text instead.
     """
 
     def __init__(
@@ -34,7 +40,7 @@ class SlashResult:
         handled: bool = True,
         should_query: bool = False,
         prompt: str = "",
-        message: Any = "",
+        message: str = "",
         markup: bool = False,
         should_exit: bool = False,
     ) -> None:
@@ -151,9 +157,9 @@ def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def _cmd_sessions(args: list[str], ctx: SlashContext) -> SlashResult:
-    from .session import _sessions_renderable
+    from .session import _sessions_text
 
-    return SlashResult(handled=True, message=_sessions_renderable(ctx.cwd), markup=True)
+    return SlashResult(handled=True, message=_sessions_text(ctx.cwd), markup=True)
 
 
 def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:

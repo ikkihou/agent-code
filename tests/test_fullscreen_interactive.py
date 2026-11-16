@@ -837,6 +837,37 @@ def test_sessions_slash_returns_renderable_message(tmp_path: Path, capsys: Any) 
     assert result.message == "[dim]No sessions found.[/dim]"
 
 
+def test_sessions_slash_with_records_returns_text(tmp_path: Path) -> None:
+    """A non-empty /sessions result must be text, not a Rich Table.
+
+    The REPL sink stores ``str(result.message)``, so returning the Table object made
+    the scrollback print ``<rich.table.Table object at 0x...>`` -- both frontends now
+    get the rendered text.
+    """
+    from agent_code.session import Session
+
+    session = Session.create(tmp_path)
+    result = dispatch_slash(
+        "/sessions",
+        SlashContext(
+            cwd=tmp_path,
+            permission_mode="default",
+            model="test-model",
+            provider="test-provider",
+            session_id=None,
+        ),
+    )
+
+    assert result.handled is True
+    assert isinstance(result.message, str)
+    assert "<rich.table" not in result.message
+    assert session.session_id in result.message
+    assert "last updated" in result.message
+    # The rendered table survives the REPL's str() unchanged (no repr leak).
+    assert str(result.message) == result.message
+    assert len(result.message.splitlines()) >= 4
+
+
 def test_slash_completer_suggests_command_prefixes() -> None:
     completions = list(
         SlashCompleter().get_completions(Document("/he"), CompleteEvent())
