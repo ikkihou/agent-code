@@ -341,6 +341,3 @@ def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):
     # exit_plan_mode itself runs; approval switches the mode to acceptEdits
     assert blocks[1]["content"] == "approved"
     assert state.permission_mode == "acceptEdits"
-
-
-# ---- fullAccess mode --------------------------------------------------------
