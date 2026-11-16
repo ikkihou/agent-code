@@ -35,34 +35,46 @@ def parse_choice_index(text: str, option_count: int, default: int = 0) -> int | 
 
 
 def render_prompt_request(request: PromptRequest) -> str:
+    """Content shown in the Live area *below* the question line: options, diff,
+    command, or the plan panel (``body``).
+
+    The question line itself (``? ... [y/N]``) comes from ``prompt_for_request`` and
+    lives in the input-box message -- this function must not repeat it, or the
+    question renders twice. An empty string (no content) is valid: a bare confirm
+    shows only the question line.
+    """
     request_type = request.get("type")
-    body = str(request.get("body") or "")
     parts: list[str] = []
+
+    body = str(request.get("body") or "")
     if body:
         parts.append(body.rstrip())
 
     if request_type == "choice":
-        question = str(request.get("question") or "")
         labels = request.get("labels") or []
-        parts.append(f"? {question}")
         parts.extend(f"  {i}. {label}" for i, label in enumerate(labels, 1))
         parts.append("  0. Skip / Other")
     else:
-        message = str(request.get("message") or "Confirm?")
-        default = bool(request.get("default", False))
-        suffix = "[Y/n]" if default else "[y/N]"
-        parts.append(f"? {message} {suffix}")
+        detail = str(request.get("detail") or "")
+        if detail:
+            parts.append(detail.rstrip())
 
-    detail = str(request.get("detail") or "")
-    if detail:
-        parts.append(detail.rstrip())
-
-    return "\n".join(parts).rstrip() + "\n"
+    return "\n".join(parts).rstrip() + ("\n" if parts else "")
 
 
 def prompt_for_request(request: PromptRequest) -> str:
+    """The single-line prompt shown in the input box, cursor right after it.
+
+    Rendered as the prompt ``message`` while a question is pending, so the question
+    and the input line are one unit (Claude-Code style) instead of the question
+    floating in the Live area above an unrelated ``> ``.
+    """
     if request.get("type") == "choice":
+        question = str(request.get("question") or "Choose:")
+        labels = request.get("labels") or []
         default = int(request.get("default", 0))
-        return f"Choice [{default}]: "
+        return f"? {question} (1-{max(len(labels), 1)}, default {default + 1}): "
     default = bool(request.get("default", False))
-    return "Confirm [Y/n]: " if default else "Confirm [y/N]: "
+    message = str(request.get("message") or "Confirm?")
+    suffix = "[Y/n]" if default else "[y/N]"
+    return f"? {message} {suffix}: "

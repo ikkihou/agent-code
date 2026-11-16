@@ -16,6 +16,7 @@ from io import StringIO
 from typing import Any
 
 import typer
+from rich.markup import escape
 
 from .runtime import PromptAsker, PromptFallback, PromptRequest, RuntimeState
 
@@ -34,8 +35,11 @@ def _ask_request(
 def render_diff(old: str, new: str, path: str, *, markup: bool = True) -> str:
     """Build a unified diff with difflib and color added/removed lines with rich markup.
 
-    With ``markup=False`` the diff is returned as plain text (no ``[red]``/``[bold]``
-    wrappers), for paths that render it verbatim rather than as Rich markup.
+    With ``markup=True`` each line's *content* is markup-escaped first, so a body
+    containing ``[x]`` cannot be parsed as a Rich style when the caller prints with
+    ``markup=True``; only the ``[red]``/``[green]`` wrappers added here are markup.
+    With ``markup=False`` the diff is returned as plain text (no wrappers), for paths
+    that render it verbatim rather than as Rich markup.
     """
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
@@ -51,15 +55,15 @@ def render_diff(old: str, new: str, path: str, *, markup: bool = True) -> str:
         if not markup:
             colored.append(line)
         elif line.startswith("---") or line.startswith("+++"):
-            colored.append(f"[bold]{line}[/bold]")
+            colored.append(f"[bold]{escape(line)}[/bold]")
         elif line.startswith("-"):
-            colored.append(f"[red]{line}[/red]")
+            colored.append(f"[red]{escape(line)}[/red]")
         elif line.startswith("+"):
-            colored.append(f"[green]{line}[/green]")
+            colored.append(f"[green]{escape(line)}[/green]")
         elif line.startswith("@@"):
-            colored.append(f"[cyan]{line}[/cyan]")
+            colored.append(f"[cyan]{escape(line)}[/cyan]")
         else:
-            colored.append(line)
+            colored.append(escape(line))
     return "\n".join(colored)
 
 
@@ -100,17 +104,21 @@ def confirm_command(state: RuntimeState, command: str) -> bool:
 
 
 def confirm_tool_use(state: RuntimeState, tool_name: str, detail: str) -> bool:
-    """Ask the user whether to allow a non-bash ask-class tool, e.g. external network access."""
+    """Ask the user whether to allow a non-bash ask-class tool, e.g. external network access.
+
+    The detail is already embedded in the message here (unlike edits/commands, where the
+    diff/command is too big for one line), so don't also send it as the body.
+    """
+    message = f"Allow {tool_name}: {detail}?"
     return bool(
         _ask_request(
             state,
             {
                 "type": "confirm",
-                "message": f"Allow {tool_name}: {detail}?",
+                "message": message,
                 "default": False,
-                "detail": detail,
             },
-            lambda: typer.confirm(f"Allow {tool_name}: {detail}?", default=False),
+            lambda: typer.confirm(message, default=False),
         )
     )
 
@@ -118,11 +126,14 @@ def confirm_tool_use(state: RuntimeState, tool_name: str, detail: str) -> bool:
 def _render_plan_panel(plan_summary: str) -> str:
     from rich.console import Console
     from rich.panel import Panel
+    from rich.text import Text
 
     buffer = StringIO()
     Console(file=buffer, no_color=True).print(
         Panel(
-            plan_summary or "(empty plan_summary)",
+            # Text(...) so the plan is verbatim: Rich parses markup in plain str
+            # renderables, and plan text comes from the model.
+            Text(plan_summary or "(empty plan_summary)"),
             title="Plan",
             border_style="blue",
         )
@@ -159,10 +170,13 @@ def prompt_single_choice(
         from rich.console import Console
 
         console = Console()
-        console.print(f"\n[bold yellow]? {question}[/bold yellow]")
+        # Question/labels are model-controlled content: markup must stay off, or a
+        # label containing "[x]" would be parsed as a Rich style (garbled or crash),
+        # and highlight=False keeps bare numbers from being colorized.
+        console.print(f"\n? {question}", markup=False, highlight=False)
         for i, label in enumerate(labels, 1):
-            console.print(f"  {i}. {label}")
-        console.print("  0. [dim]Skip / Other[/dim]")
+            console.print(f"  {i}. {label}", markup=False, highlight=False)
+        console.print("  0. Skip / Other", markup=False, highlight=False)
 
         return typer.prompt("Choice", default="0")
 

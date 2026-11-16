@@ -258,11 +258,18 @@ class InteractiveShell:
         future: asyncio.Future[Any] = self._loop.create_future()  # type: ignore[union-attr]
         self._pending_prompt = {"request": request, "future": future}
         self._live.pending_preview = render_prompt_request(request).rstrip().splitlines()
+        # Hide the spinner while waiting for the answer: nothing is running -- the turn
+        # is parked on the user. turn_started_at is kept, so the elapsed timer resumes
+        # correctly after the answer. Note _render_live suppresses the body again while
+        # _pending_prompt is set, so the content below shows exactly once.
+        was_active = self._live.turn_active
+        self._live.turn_active = False
         self._invalidate()
         try:
             return await future
         finally:
             self._live.pending_preview = []
+            self._live.turn_active = was_active
             self._invalidate()
 
     def _terminal_asker(self, func: PromptFallback | PromptRequest) -> Any:
@@ -369,10 +376,12 @@ class InteractiveShell:
 
         session = PromptSession[str](
             # Only the input prompt lives in `message`: pt renders it INSIDE the frame,
-            # and the frame is there to delimit the input line alone. The Live area
-            # (spinner / streaming tail / pending question) gets its own window above
-            # the frame -- see install_live_area_window.
-            message=lambda: FormattedText([("class:prompt", "> ")]),
+            # and the frame is there to delimit the input line alone. While a question
+            # is pending the message becomes the question line itself (``? ... [y/N]``)
+            # so the cursor sits right after the question; otherwise it is plain ``> ``.
+            # The Live area (spinner / streaming tail / question *body*) gets its own
+            # window above the frame -- see install_live_area_window.
+            message=self._prompt_message,
             bottom_toolbar=lambda: FormattedText(
                 [("class:bottom-toolbar", bottom_toolbar(self._state))]
             ),
@@ -442,29 +451,43 @@ class InteractiveShell:
 
     # ---- Live area rendering (own window, above the input frame) --------------
 
+    def _prompt_message(self) -> FormattedText:
+        """Input-box prompt: the pending question when asking, ``> `` otherwise.
+
+        Putting the question IN the message puts the cursor right after it -- the
+        question and the answer line are one visual unit, like Claude Code.
+        """
+        if self._pending_prompt is not None:
+            request: PromptRequest = self._pending_prompt["request"]
+            return FormattedText([("class:prompt", prompt_for_request(request))])
+        return FormattedText([("class:prompt", "> ")])
+
     def _install_live_window(self, session: PromptSession[str]) -> None:
         """Put the Live area in its own window right above the input frame."""
         install_live_area_window(session, self._render_live)
 
     def _render_live(self) -> FormattedText:
-        """Render the Live area: spinner / pending question / streaming tail.
+        """Render the Live area: spinner / pending question body / streaming tail.
 
         Rendered as its own layout window above the input frame, NOT as the prompt
         ``message`` -- with message-based rendering all of this would appear inside
         the frame, next to the input line. The Live window is directly below the
         scrollback tail, so the spinner sits immediately under the submitted prompt.
+
+        While a question is pending, the one-line prompt (``? ... [y/N]``) moves into
+        the input box (see ``_prompt_message``) and only the question *body* --
+        option list, diff, command -- renders here, so the question appears exactly
+        once and the cursor sits right after it.
         """
         columns = 80
         app = get_app_or_none()
         if app is not None:
             columns = app.output.get_size().columns
         fragments: list[tuple[str, str]] = []
-        # Pending prompt: the input prompt hangs at the top of the Live area (the question
-        # body is there too, see _ask_in_app -- nothing is written to stdout, so nothing
-        # races the prompt over input).
-        if self._pending_prompt is not None:
-            request = self._pending_prompt["request"]
-            fragments.append(("class:preview", prompt_for_request(request) + "\n"))
+        # While a question is pending, its content (options / diff / command / plan
+        # panel) was parked in live.pending_preview by _ask_in_app and renders below
+        # via live.formatted(); the question line itself is the prompt message. No
+        # duplicate rendering here.
         fragments.extend(self._live.formatted(columns, time.monotonic()))
         # Drop the trailing newline: the window's preferred height is derived from the
         # content, and a final empty line would reserve a blank row while nothing is

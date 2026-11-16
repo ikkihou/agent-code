@@ -530,8 +530,11 @@ def test_prompt_request_helpers_parse_choice_indexes() -> None:
 
 def test_prompt_request_helpers_render_bottom_prompt_text() -> None:
     confirm_request = {"type": "confirm", "message": "Run this command?", "default": False}
-    assert render_prompt_request(confirm_request) == "? Run this command? [y/N]\n"
-    assert prompt_for_request(confirm_request) == "Confirm [y/N]: "
+    # render_prompt_request: content BELOW the question line for the Live area.
+    # A bare confirm has no content -- the question line alone is the whole prompt.
+    assert render_prompt_request(confirm_request) == ""
+    # prompt_for_request: the one-line input prompt (goes into the prompt message).
+    assert prompt_for_request(confirm_request) == "? Run this command? [y/N]: "
 
     choice_request = {
         "type": "choice",
@@ -539,14 +542,12 @@ def test_prompt_request_helpers_render_bottom_prompt_text() -> None:
         "labels": ["A", "B"],
         "default": 0,
     }
-    assert render_prompt_request(choice_request) == (
-        "? Pick one\n  1. A\n  2. B\n  0. Skip / Other\n"
-    )
-    assert prompt_for_request(choice_request) == "Choice [0]: "
+    assert render_prompt_request(choice_request) == "  1. A\n  2. B\n  0. Skip / Other\n"
+    assert prompt_for_request(choice_request) == "? Pick one (1-2, default 1): "
 
 
 def test_prompt_request_helpers_render_detail_field() -> None:
-    """The detail field (diff / command) must be shown in the ask prompt, after the question."""
+    """The detail field (diff / command) is the Live-area content, below the question."""
     request = {
         "type": "confirm",
         "message": "Apply this edit to a.py?",
@@ -554,15 +555,26 @@ def test_prompt_request_helpers_render_detail_field() -> None:
         "detail": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-hello\n+hi",
     }
     assert render_prompt_request(request) == (
-        "? Apply this edit to a.py? [y/N]\n"
         "--- a/a.py\n"
         "+++ b/a.py\n"
         "@@ -1 +1 @@\n"
         "-hello\n"
         "+hi\n"
     )
-    # No detail -> unchanged (the question line alone).
-    assert render_prompt_request({"type": "confirm", "message": "x", "default": False}) == "? x [y/N]\n"
+    # The message (question line) must NOT leak into the content: it renders once,
+    # in the prompt message.
+    assert "Apply this edit" not in render_prompt_request(request)
+
+
+def test_prompt_request_helpers_render_body_field() -> None:
+    """body (e.g. the rendered plan panel) is the Live-area content, below the question."""
+    request = {
+        "type": "confirm",
+        "message": "Approve this plan and exit plan mode?",
+        "default": False,
+        "body": "╭─ Plan ─╮\n│ do it  │\n╰────────╯",
+    }
+    assert render_prompt_request(request) == "╭─ Plan ─╮\n│ do it  │\n╰────────╯\n"
 
 
 # ---- slash ------------------------------------------------------------------
@@ -597,8 +609,17 @@ def test_slash_completer_suggests_command_prefixes() -> None:
     assert str(completions[0].display_meta_text) == "show all available slash commands"
 
 
-def test_slash_completer_is_case_insensitive_and_contains() -> None:
+def test_slash_completer_prefix_first_contains_fallback() -> None:
+    """Two-tier matching: prefix hits rank before contains hits. "/ex" lists /exit
+    (prefix) before /context (contains); a mid-word typo "/ELP" still finds /help
+    via the contains fallback."""
     completer = SlashCompleter()
+
+    ex_names = [
+        completion.text
+        for completion in completer.get_completions(Document("/ex"), CompleteEvent())
+    ]
+    assert ex_names.index("/exit") < ex_names.index("/context")
 
     assert [
         completion.text
@@ -686,7 +707,13 @@ def test_shell_render_live_includes_pending_prompt() -> None:
     }
 
     text = "".join(t for _, t in shell._render_live())
-    assert "Confirm [y/N]:" in text
+    # The Live area must NOT duplicate the question line -- it lives in the prompt
+    # message (_prompt_message). With no content parked (bare confirm, no preview), the
+    # Live area is empty.
+    assert "Confirm [y/N]:" not in text
+    assert "Run this command?" not in text
+    prompt_text = "".join(t for _, t in shell._prompt_message())
+    assert prompt_text == "? Run this command? [y/N]: "
 
 
 def test_shell_submit_text_routes_pending_choice_answer() -> None:

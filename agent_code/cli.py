@@ -126,6 +126,9 @@ class _ConsoleWireSink:
                 console.print(f"\nDiff for {event.path}:", markup=True)
                 from .prompt_ui import render_diff
 
+                # render_diff wraps lines in [red]/[green] markup; diff-line content
+                # is escaped inside render_diff, so a body "[x]" cannot be parsed as
+                # a Rich style here.
                 console.print(
                     render_diff(event.old, event.new, event.path), markup=True
                 )
