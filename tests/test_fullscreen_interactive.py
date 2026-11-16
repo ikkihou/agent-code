@@ -36,7 +36,6 @@ from agent_code.wire import (
     DiffPreview,
     Line,
     PromptEcho,
-    StreamLineBuffer,
     TextDelta,
     ToolCallCompleted,
     ToolCallStarted,
@@ -129,16 +128,9 @@ def test_run_agent_streaming_reaches_wire_as_text_delta(tmp_path: Path) -> None:
     )
 
     assert result.final == final_text
-    # Raw deltas go onto the wire unchanged; assembling lines is the consumer's job
-    # (StreamLineBuffer).
+    # Raw deltas go onto the wire unchanged; assembling lines/paragraphs is the
+    # consumer's job (LiveArea.feed_stream in the REPL).
     assert "".join(sink.texts()) == final_text
-
-    lines: list[str] = []
-    line_buf = StreamLineBuffer(lines.append)
-    for text in sink.texts():
-        line_buf.feed(text)
-    line_buf.finish()
-    assert lines == ["First line complete", "", "- **Ability**: can read, generate and process text"]
 
 
 def test_wire_merges_adjacent_text_deltas_in_queue() -> None:
@@ -330,6 +322,28 @@ def test_markdown_fragments_style_real_markdown() -> None:
     # Markdown control chars are consumed by the renderer: "#" and "**" are gone.
     assert "#" not in text.replace("Title", "")
     assert "**" not in text
+
+
+def test_pt_style_negated_attributes_are_not_inverted() -> None:
+    """rich writes disabled attributes as "not <attr>"; dropping "not" would turn them
+    into pt's POSITIVE form (the all-underlined code-fence regression). They must map
+    to pt's native no<attr> negation instead.
+
+    Regression for: markdown code fences rendered every token underlined because
+    rich's pygments theme emits Style(underline=False) -> "not underline".
+    """
+    from agent_code.output import _pt_style
+
+    assert _pt_style("not underline") == "nounderline"
+    assert _pt_style("not bold not italic not underline") == (
+        "nobold noitalic nounderline"
+    )
+    assert _pt_style("on #272822 not underline #f8f8f2") == (
+        "bg:#272822 nounderline #f8f8f2"
+    )
+    # A dangling or color-bound "not" must not corrupt the translation.
+    assert _pt_style("not") == ""
+    assert _pt_style("not red") == "red"
 
 
 def test_markdown_fragments_verbatim_content_with_brackets() -> None:

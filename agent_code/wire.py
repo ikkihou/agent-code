@@ -178,38 +178,3 @@ class Wire:
         with self._lock:
             batch, self._pending = self._pending, []
             return batch
-
-
-# ---------------------------------------------------------------------------
-# Streaming line buffer (consumer side)
-# ---------------------------------------------------------------------------
-
-
-class StreamLineBuffer:
-    """Buffer that assembles raw TextDelta text into whole lines -- held by the
-    frontend, not by the agent.
-
-    The agent only emits raw deltas now; line boundaries are a rendering concern
-    (prompt_toolkit must not overwrite half a line, one-shot wants whole lines), so
-    that logic moved to the consumer.
-    """
-
-    def __init__(self, on_line: Callable[[str], None]) -> None:
-        self._on_line = on_line
-        self.pending: str = ""
-        self.started: bool = False
-
-    def feed(self, text: str) -> None:
-        if not text:
-            return
-
-        self.started = True
-        self.pending += text
-        while "\n" in self.pending:
-            line, self.pending = self.pending.split("\n", 1)
-            self._on_line(line.removesuffix("\r"))
-
-    def finish(self) -> None:
-        if self.pending:
-            self._on_line(self.pending)
-            self.pending = ""

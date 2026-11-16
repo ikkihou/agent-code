@@ -25,11 +25,10 @@ OutputFormat = Literal["plain", "rich", "markdown"]
 # style vocabulary, e.g. "bold yellow".
 StyleAndText = tuple[str, str]
 
-# The single output sink: receives one OutputChunk per complete line (streaming text
-# has already been assembled into whole lines by agent.py's
-# _LineBufferedStreamRenderer, and text carries its own trailing newline), and lets
-# the frontend decide how to display it -- one-shot mode prints to the terminal,
-# REPL mode feeds the prompt_toolkit panel across threads.
+# The single output sink: receives one OutputChunk per complete piece of output
+# (text carries its own trailing newline), and lets the frontend decide how to
+# display it -- one-shot mode prints to the terminal, the REPL renders via its
+# scrollback/Live pipeline across threads.
 OutputWriter = Callable[["OutputChunk"], None]
 
 
@@ -110,26 +109,35 @@ def _pt_color(token: str) -> str:
 def _pt_style(style: object) -> str:
     """rich Style -> prompt_toolkit inline style string.
 
-    The two vocabularies mostly overlap (bold/dim/red/...), with two differences:
-    rich writes backgrounds as ``on <color>`` while pt writes ``bg:<color>``, and
-    ``color(N)`` needs a hex conversion. Tokens pt does not know (such as rich's
-    "not" reset token) are dropped -- missing styling beats crashing the render.
+    The two vocabularies mostly overlap (bold/dim/red/...), with three differences:
+    rich writes backgrounds as ``on <color>`` while pt writes ``bg:<color>``,
+    ``color(N)`` needs a hex conversion, and rich writes negated attributes as
+    ``not bold`` while pt writes ``nobold`` -- dropping the "not" would INVERT the
+    meaning (explicitly-disabled rich attributes such as the markdown code theme's
+    ``underline=False`` would turn into pt ``underline``). Unrecognized tokens are
+    still dropped -- missing styling beats crashing the render.
     """
     if style is None:
         return ""
     tokens: list[str] = []
     pending_bg = False
+    pending_not = False
     for token in str(style).split():
         if token == "on":
             pending_bg = True
             continue
+        if token == "not":
+            pending_not = True
+            continue
         if pending_bg:
             pending_bg = False
             translated = "bg:" + _pt_color(token)
-        elif token in _PT_ATTR_TOKENS:
-            translated = token
         else:
-            translated = _pt_color(token)
+            if token in _PT_ATTR_TOKENS:
+                translated = "no" + token if pending_not else token
+            else:
+                translated = _pt_color(token)
+        pending_not = False
         # Validate that the color token is one pt knows (hex / named / ansi name).
         if translated in _PT_ATTR_TOKENS or translated.startswith("bg:"):
             tokens.append(translated)

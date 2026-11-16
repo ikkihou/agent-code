@@ -176,8 +176,9 @@ def run_agent(  ## AGENT LOOP
             ):
                 if event.type == "text_delta" and event.text:
                     streamed_parts.append(event.text)
-                    # Raw deltas go straight onto the wire; line buffering is a frontend
-                    # rendering concern, left to the consumer via StreamLineBuffer.
+                    # Raw deltas go straight onto the wire; paragraph/line assembly
+                    # is a frontend rendering concern (LiveArea.feed_stream in the
+                    # REPL, direct printing in one-shot mode).
                     wire.send(TextDelta(text=event.text))
                 elif event.type == "completed":
                     response = event.response
