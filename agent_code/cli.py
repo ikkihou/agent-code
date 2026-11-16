@@ -119,9 +119,12 @@ class _ConsoleWireSink:
             elif isinstance(event, ToolCallStarted):
                 console.print(f"tool_call: {event.name} {event.args_preview}")
             elif isinstance(event, ToolCallCompleted):
-                console.print(
-                    f"✓ {event.name}" + (" (error)" if event.is_error else "")
+                suffix = (
+                    f" ({event.outcome})"
+                    if event.outcome
+                    else (" (error)" if event.is_error else "")
                 )
+                console.print(f"✓ {event.name}{suffix}")
             elif isinstance(event, DiffPreview):
                 console.print(f"\nDiff for {event.path}:", markup=True)
                 from .prompt_ui import render_diff

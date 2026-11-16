@@ -128,28 +128,29 @@ def _handle_ask(
     edit_preview: tuple[str, str, str] | None,
     state: RuntimeState,
     wire: Wire,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, bool]:
     """Dispatch the confirmation UI by tool type in ask mode.
 
     Returns:
-        A block ends the flow here (rejected or intercepted); None means confirmed and
-        execution continues.
+        (block, declined): a non-None block ends the flow here (rejected or
+        intercepted), and ``declined`` says the user actively rejected it; (None, False)
+        means confirmed and execution continues.
     """
     if call.name in ("file_write", "file_edit") and edit_preview is not None:
         path_str, old_content, new_content = edit_preview
         wire.send(DiffPreview(path=path_str, old=old_content, new=new_content))
         diff = _truncate_diff(render_diff(old_content, new_content, path_str, markup=False))
         if not confirm_edit(state, path_str, detail=diff):
-            return _error_block(call.id, "error: edit rejected by user")
+            return _error_block(call.id, "error: edit rejected by user"), True
     elif call.name == "bash":
         command = call.arguments.get("command", "")
         wire.send(CommandPreview(command=command))
         if not confirm_command(state, command):
-            return _error_block(call.id, "error: command rejected by user")
+            return _error_block(call.id, "error: command rejected by user"), True
     elif call.name in ("web_fetch", "web_search"):
         detail = call.arguments.get("url") or call.arguments.get("query") or str(call.arguments)
         if not confirm_tool_use(state, call.name, detail):
-            return _error_block(call.id, "error: tool use rejected by user")
+            return _error_block(call.id, "error: tool use rejected by user"), True
     elif call.name == "ask_user_question":
         options = call.arguments.get("options", [])
         labels = [str(o) for o in options] if isinstance(options, list) else []
@@ -163,8 +164,8 @@ def _handle_ask(
             "tool_use_id": call.id,
             "content": content,
             "is_error": False,
-        }
-    return None
+        }, False
+    return None, False
 
 
 def _format_call_args(args: dict[str, Any]) -> str:
@@ -187,10 +188,27 @@ def execute_one_tool_call(
     tools: ToolRegistry,
     wire: Wire,
 ) -> dict[str, Any]:
-    """Run a single tool and return one tool_result block."""
+    """Run a single tool and return one tool_result block.
+
+    Every call settles: a ToolCallCompleted follows every ToolCallStarted, including
+    calls that never executed (denied, blocked by a hook, failed preflight, rejected by
+    the user -- the last marked ``declined``). The frontend's Live area depends on that
+    pairing, and so does the folded tool summary in scrollback.
+    """
     wire.send(
         ToolCallStarted(call_id=call.id, name=call.name, args_preview=_format_call_args(call.arguments))
     )
+
+    def _finish(block: dict[str, Any], *, outcome: str = "") -> dict[str, Any]:
+        wire.send(
+            ToolCallCompleted(
+                call_id=call.id,
+                name=call.name,
+                is_error=bool(block.get("is_error")),
+                outcome=outcome,
+            )
+        )
+        return block
 
     request = PermissionRequest(
         tool_name=call.name,
@@ -205,14 +223,14 @@ def execute_one_tool_call(
         blocked = [h for h in pre if not h["success"]]
         if blocked:
             msg = "\n".join(f"  [hook] {h['command']}: {h['output']}" for h in blocked)
-            return _error_block(call.id, f"tool blocked by PreToolUse hook:\n{msg}")
+            return _finish(_error_block(call.id, f"tool blocked by PreToolUse hook:\n{msg}"))
 
         if call.name == "exit_plan_mode":
             plan_summary = call.arguments.get("plan_summary", "")
             if not approve_plan(state, plan_summary):
                 obs = "Plan not approved. Revise the plan and call exit_plan_mode again"
                 wire.send(Line(f"plan rejected: {obs}"))
-                return _error_block(call.id, obs)
+                return _finish(_error_block(call.id, obs), outcome="declined")
 
     # File-write preflight (file_write/file_edit; acceptEdits must pass it too, it only
     # skips the confirmation UI afterwards).
@@ -220,22 +238,24 @@ def execute_one_tool_call(
     if call.name in ("file_write", "file_edit") and decision.behavior != "deny":
         edit_preview, preflight_err = _edit_preflight(call, ctx)
         if preflight_err is not None:
-            return _error_block(call.id, preflight_err)
+            return _finish(_error_block(call.id, preflight_err))
 
     # deny: return the error immediately, no UI.
     if decision.behavior == "deny":
-        return _error_block(call.id, f"error: {decision.message}")
+        return _finish(_error_block(call.id, f"error: {decision.message}"))
 
     # ask: dispatch the confirmation UI by tool type (the confirm_* helpers already wrap
     # _ask, which routes the question back to the terminal).
     if decision.behavior == "ask":
-        block = _handle_ask(call, edit_preview, state, wire)
+        block, declined = _handle_ask(call, edit_preview, state, wire)
         if block is not None:
-            return block
+            return _finish(block, outcome="declined" if declined else "")
 
     # allow / ask approved: execute.
     result = tools.run(call, ctx)
-    wire.send(ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error))
+    wire.send(
+        ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error)
+    )
     if not result.is_error:
         for h in run_hooks(
             "PostToolUse",
@@ -293,6 +313,13 @@ def execute_plan_boundary_calls(
         if call is exit_call:
             blocks.append(execute_one_tool_call(call, ctx, state, tools, wire))
             continue
+        # The skipped calls never start, so they need no Started event -- but the folded
+        # tool summary in scrollback still shows them as skipped.
+        wire.send(
+            ToolCallCompleted(
+                call_id=call.id, name=call.name, is_error=True, outcome="skipped"
+            )
+        )
         blocks.append(
             {
                 "type": "tool_result",

@@ -383,6 +383,130 @@ def test_live_area_reset_stream_clears_paragraph_state() -> None:
     assert live.flush_paragraph() == ""
 
 
+def test_live_area_mid_turn_flush_keeps_fence_state() -> None:
+    """A prose flush before a tool call must not close an unterminated code fence: the
+    blank line that follows would otherwise split the block in two."""
+    live = LiveArea()
+    live.feed_stream("```python\n")
+    assert live.open_paragraph == ["```python"]
+
+    flushed = live.flush_paragraph(close_fence=False)
+    assert flushed == "```python\n"
+    assert live.open_paragraph == []
+
+    # Still inside the fence: a blank line does not emit a block.
+    assert live.feed_stream("\n") == []
+    assert live.feed_stream("x = 1\n") == []
+    assert live.feed_stream("```\n\n") == ["x = 1\n```\n\n"]
+
+
+# ---- consume-batch ordering: scrollback must read in event order -------------
+
+
+def _shell_for_batch() -> Any:
+    from agent_code.ui.shell import InteractiveShell
+
+    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
+
+    def noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    return InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+
+
+def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
+    """The reported bug: prose streamed before a tool call stayed in the Live area until
+    a blank line closed it, so the tool lines (committed immediately) appeared ABOVE
+    their own preamble."""
+    shell = _shell_for_batch()
+
+    first = shell._handle_batch(
+        [TurnStarted(), TextDelta("Let me check git first.")]
+    )
+    assert first == []  # still the open paragraph in the Live area
+
+    second = shell._handle_batch(
+        [
+            ToolCallStarted(call_id="1", name="git_status", args_preview="{}"),
+            ToolCallCompleted(call_id="1", name="git_status"),
+        ]
+    )
+    # Prose is committed at once; the tool burst stays open (the model may call more
+    # tools) and its summary lands when the burst closes.
+    assert [chunk.text for chunk in second] == ["Let me check git first.\n\n"]
+    assert shell._tool_fold == [("git_status", "ok")]
+
+    third = shell._handle_batch([TextDelta("Done. Nothing to report."), TurnEnded()])
+    assert [chunk.text for chunk in third] == [
+        "✓ git_status\n",
+        "Done. Nothing to report.\n",
+    ]
+    assert shell._live.open_paragraph == []
+    assert shell._tool_fold == []
+
+
+def test_consume_batch_folds_a_tool_burst_into_one_line() -> None:
+    """Twenty tool calls must not occupy twenty rows: one burst -> one summary line."""
+    shell = _shell_for_batch()
+    calls: list[Any] = [TurnStarted()]
+    for index in range(4):
+        calls.append(ToolCallStarted(call_id=str(index), name="bash", args_preview="{}"))
+        calls.append(ToolCallCompleted(call_id=str(index), name="bash"))
+    calls.append(TurnEnded())
+
+    chunks = shell._handle_batch(calls)
+
+    assert [chunk.text for chunk in chunks] == ["✓ 4 tools: bash ×4\n"]
+    assert shell._tool_fold == []
+
+
+def test_consume_batch_tool_summary_before_resumed_prose() -> None:
+    """The burst closes when the model speaks again, so the summary precedes that prose."""
+    shell = _shell_for_batch()
+    shell._handle_batch(
+        [
+            TurnStarted(),
+            ToolCallStarted(call_id="1", name="read_file", args_preview="{}"),
+            ToolCallCompleted(call_id="1", name="read_file"),
+        ]
+    )
+
+    chunks = shell._handle_batch([TextDelta("The file says hi."), TurnEnded()])
+    assert [chunk.text for chunk in chunks] == ["✓ read_file\n", "The file says hi.\n"]
+
+
+def test_consume_batch_records_declined_tools_in_the_fold() -> None:
+    """A rejected confirmation settles the call (no hanging spinner) and is visible in
+    the folded summary."""
+    shell = _shell_for_batch()
+    chunks = shell._handle_batch(
+        [
+            TurnStarted(),
+            ToolCallStarted(call_id="1", name="bash", args_preview="{}"),
+            ToolCallCompleted(call_id="1", name="bash", is_error=True, outcome="declined"),
+            TurnEnded(),
+        ]
+    )
+
+    assert [chunk.text for chunk in chunks] == ["⊘ bash (declined)\n"]
+
+
+def test_tool_fold_formatting() -> None:
+    from agent_code.ui.events import format_tool_fold
+
+    assert format_tool_fold([]) == ""
+    assert format_tool_fold([("bash", "ok")]) == "✓ bash"
+    assert format_tool_fold([("bash", "declined")]) == "⊘ bash (declined)"
+    assert format_tool_fold([("read_file", "skipped")]) == "⊘ read_file (skipped)"
+    assert (
+        format_tool_fold([("bash", "ok"), ("bash", "ok"), ("git_diff", "error")])
+        == "✗ 3 tools: bash ×2, git_diff (error)"
+    )
+    # Distinct names beyond the cap are elided, keeping the line terminal-width sized.
+    elided = format_tool_fold([(f"t{index}", "ok") for index in range(9)])
+    assert elided == "✓ 9 tools: t0, t1, t2, t3, t4, t5, …"
+
+
 def test_live_area_formatted_renders_gap_spinner_tool_and_preview() -> None:
     """The Live window starts with one blank gap line, then the spinner."""
     live = LiveArea()

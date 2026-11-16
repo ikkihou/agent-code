@@ -37,7 +37,7 @@ from ..wire import (
     WireEvent,
 )
 from .completer import SlashCompleter
-from .events import event_to_chunks, render_user_prompt
+from .events import event_to_chunks, render_user_prompt, tool_fold_chunk, tool_outcome
 from .keys import build_key_bindings
 from .layout import (
     collapse_input_height,
@@ -87,6 +87,13 @@ class InteractiveShell:
         self._job_queue: queue.Queue[str] = queue.Queue()
         self._busy = threading.Event()
         self._turn_wire: Wire | None = None
+        # Finished tool calls not yet committed. They fold into ONE summary line so a
+        # long tool chain cannot push the conversation out of the scrollback; the burst
+        # ends when prose resumes, another finished event arrives, or the turn ends.
+        self._tool_fold: list[tuple[str, str]] = []
+        # Scrollback text for the answer to the prompt currently pending (a question
+        # line renders where it was asked; its answer lands right under it).
+        self._pending_answer_chunk: OutputChunk | None = None
 
         # Event queue consumed by the UI coroutine (the worker posts via call_soon_threadsafe).
         self._event_queue: asyncio.Queue[WireEvent] = asyncio.Queue()
@@ -180,7 +187,14 @@ class InteractiveShell:
 
     async def _consume_events(self) -> None:
         """UI event-consuming coroutine: commit finished events to scrollback, update the
-        Live area for streaming events."""
+        Live area for streaming events.
+
+        Ordering rule: scrollback must read in the order things actually happened. Open
+        streamed prose is therefore flushed to scrollback *before* any other event is
+        handled -- otherwise the prose (which the Live area holds until a blank line
+        closes it) would land after the tool lines that followed it. Tool results are
+        folded into one line per burst rather than one line per call.
+        """
         while True:
             await self._live_dirty.wait()
             self._live_dirty.clear()
@@ -192,45 +206,101 @@ class InteractiveShell:
             if not batch:
                 continue
 
-            commit: list[OutputChunk] = []
-            for event in batch:
-                if isinstance(event, TextDelta):
-                    # Incremental commit: a closed block goes to scrollback at once (as
-                    # markdown: headings/tables/code blocks get real styling) and only
-                    # the tail block stays in the Live area.
-                    for paragraph in self._live.feed_stream(event.text):
-                        commit.append(OutputChunk(paragraph, format="markdown"))
-                    continue
-                if isinstance(event, TurnStarted):
-                    self._live.turn_active = True
-                    self._live.turn_started_at = time.monotonic()
-                    self._live.reset_stream()
-                    self._live.active_tool = None
-                    continue
-                if isinstance(event, TurnEnded):
-                    # Wrap-up: commit the whole open paragraph (usually just the last few lines).
-                    tail = self._live.flush_paragraph()
-                    self._live.turn_active = False
-                    self._live.active_tool = None
-                    self._live.pending_preview = []
-                    if tail.strip():
-                        commit.append(OutputChunk(tail, format="markdown"))
-                    continue
-                if isinstance(event, ToolCallStarted):
-                    self._live.active_tool = event.name
-                    continue
-                if isinstance(event, ToolCallCompleted):
-                    self._live.active_tool = None
-                preview = preview_lines(event)
-                if preview is not None:
-                    self._live.pending_preview = preview
-                    continue
-                # Everything else is a "finished" fact -> scrollback.
-                commit.extend(event_to_chunks(event))
-
+            commit = self._handle_batch(batch)
             if commit:
                 self._commit_chunks(commit)
             self._invalidate()
+
+    def _handle_batch(self, batch: list[WireEvent]) -> list[OutputChunk]:
+        """Fold one drained batch into the chunks to commit (in scrollback order).
+
+        Pure state transition over the Live area and the tool-burst buffer: no terminal
+        IO, so the ordering rules are testable without an event loop.
+        """
+        commit: list[OutputChunk] = []
+        for event in batch:
+            if isinstance(event, TextDelta):
+                # The model is speaking again: the tool burst it preceded is finished
+                # and must land before this new prose.
+                self._flush_tool_fold(commit)
+                # Incremental commit: a closed block goes to scrollback at once (as
+                # markdown: headings/tables/code blocks get real styling) and only
+                # the tail block stays in the Live area.
+                for paragraph in self._live.feed_stream(event.text):
+                    commit.append(OutputChunk(paragraph, format="markdown"))
+                continue
+            if isinstance(event, ToolCallStarted):
+                # Prose written before the call belongs above the tool line.
+                self._flush_prose(commit)
+                self._live.active_tool = event.name
+                continue
+            if isinstance(event, ToolCallCompleted):
+                self._live.active_tool = None
+                self._tool_fold.append((event.name, tool_outcome(event)))
+                continue
+            if isinstance(event, TurnStarted):
+                # A new turn starts clean: any leftover paragraph from the previous one
+                # is closed out (fence state included) before the Live area resets.
+                self._flush_prose(commit, close_fence=True)
+                self._live.turn_active = True
+                self._live.turn_started_at = time.monotonic()
+                self._live.reset_stream()
+                self._live.active_tool = None
+                continue
+            if isinstance(event, TurnEnded):
+                # End of turn: no trailing blank line (the next prompt echo supplies
+                # its own gap), and the fence state is discarded with the turn.
+                self._flush_prose(commit, trailing_blank=False, close_fence=True)
+                self._flush_tool_fold(commit)
+                self._live.turn_active = False
+                self._live.active_tool = None
+                self._live.pending_preview = []
+                continue
+
+            preview = preview_lines(event)
+            if preview is not None:
+                # An approval is pending: the preview replaces the Live content but
+                # nothing is committed yet.
+                self._flush_prose(commit)
+                self._live.pending_preview = preview
+                continue
+            # Any other finished fact (notification / hook line): prose first, then
+            # the tool summary, then the line itself.
+            self._flush_prose(commit)
+            self._flush_tool_fold(commit)
+            commit.extend(event_to_chunks(event))
+        return commit
+
+    def _flush_prose(
+        self,
+        commit: list[OutputChunk],
+        *,
+        trailing_blank: bool = True,
+        close_fence: bool = False,
+    ) -> None:
+        """Move the open streamed paragraph into ``commit`` so it keeps its place in the
+        scrollback order.
+
+        Mid-turn flushes keep the fence state (a blank line after the flush must not
+        split a code block that is still open) and end with one blank line, separating
+        the prose from whatever follows.
+        """
+        tail = self._live.flush_paragraph(close_fence=close_fence)
+        if not tail.strip():
+            return
+        if trailing_blank:
+            commit.append(OutputChunk(tail.rstrip("\n") + "\n\n", format="markdown"))
+        else:
+            commit.append(OutputChunk(tail, format="markdown"))
+
+    def _flush_tool_fold(self, commit: list[OutputChunk]) -> None:
+        """Close the current tool burst: emit its single summary line."""
+        if not self._tool_fold:
+            return
+        chunk = tool_fold_chunk(self._tool_fold)
+        self._tool_fold = []
+        if chunk is not None:
+            commit.append(chunk)
 
     def _invalidate(self) -> None:
         app = get_app_or_none()
@@ -255,8 +325,13 @@ class InteractiveShell:
         races the running prompt_async over the input stream (observed to swallow
         subsequent input so the prompt never returns). Keeping the question body in the
         Live area (prompt message) is equally visible and races with nothing.
+
+        ``_pending_answer_chunk`` collects what the user's answer should leave in the
+        scrollback (if anything): the caller commits it once the prompt is settled, so
+        nothing can land between the question and its answer.
         """
         future: asyncio.Future[Any] = self._loop.create_future()  # type: ignore[union-attr]
+        self._pending_answer_chunk = None
         self._pending_prompt = {"request": request, "future": future}
         self._live.pending_preview = render_prompt_request(request).rstrip().splitlines()
         # Hide the spinner while waiting for the answer: nothing is running -- the turn
@@ -272,6 +347,11 @@ class InteractiveShell:
             self._live.pending_preview = []
             self._live.turn_active = was_active
             self._invalidate()
+            # The answer line belongs to the question just answered: commit it now, on
+            # the UI thread, so no worker event can slip in between the two.
+            answer, self._pending_answer_chunk = self._pending_answer_chunk, None
+            if answer is not None:
+                self._commit_chunks([answer])
 
     def _terminal_asker(self, func: PromptFallback | PromptRequest) -> Any:
         """Asking entry point on the worker thread: structured requests go through the in-app
@@ -282,6 +362,20 @@ class InteractiveShell:
         return asyncio.run_coroutine_threadsafe(run_in_terminal(func), self._loop).result()
 
     # ---- input submission (UI thread) ---------------------------------------
+
+    def _answer_chunk(self, request: PromptRequest, answer: str) -> OutputChunk:
+        """One scrollback line recording a settled question and its answer.
+
+        The question itself is never a committed line of its own: it lives in the input
+        box (``_prompt_message``) and disappears with the prompt (``erase_when_done``).
+        Folding question and answer into one line keeps the durable record readable
+        without spending two rows per confirmation.
+        """
+        if request.get("type") == "choice":
+            question = str(request.get("question") or "Choose")
+        else:
+            question = str(request.get("message") or "Confirm")
+        return OutputChunk(f"? {question} → {answer}\n")
 
     def _submit_text(self, text: str) -> None:
         """Single input entry point: feed a pending prompt state machine first, otherwise
@@ -303,7 +397,8 @@ class InteractiveShell:
                 result = str(idx)
                 if not future.done():
                     future.set_result(result)
-                self._commit_now("Choice: skip\n" if idx == 0 else f"Choice: {labels[idx - 1]}\n")
+                answer = "skip" if idx == 0 else labels[idx - 1]
+                self._pending_answer_chunk = self._answer_chunk(request, str(answer))
                 return
 
             answer = parse_confirm_answer(text, bool(request.get("default", False)))
@@ -313,7 +408,9 @@ class InteractiveShell:
             self._pending_prompt = None
             if not future.done():
                 future.set_result(answer)
-            self._commit_now(f"Answer: {'yes' if answer else 'no'}\n")
+            self._pending_answer_chunk = self._answer_chunk(
+                request, "yes" if answer else "no"
+            )
             return
 
         if not text:

@@ -79,12 +79,19 @@ class ToolCallStarted:
 
 @dataclass(frozen=True)
 class ToolCallCompleted:
-    """A tool call finishes (the spinner settles and the frontend commits the line to
-    scrollback)."""
+    """A tool call is settled (the spinner stops; the frontend records the outcome).
+
+    Exactly one of these follows every ToolCallStarted, so the Live area always leaves
+    the "running" state. ``outcome`` refines ``is_error`` for the scrollback summary:
+    "" means the ordinary executed case (ok / error by ``is_error``), ``declined`` means
+    the user rejected the confirmation, ``skipped`` means another call in the same batch
+    ended the turn before this one could run.
+    """
 
     call_id: str
     name: str
     is_error: bool = False
+    outcome: str = ""
 
 
 @dataclass(frozen=True)

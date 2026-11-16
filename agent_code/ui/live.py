@@ -73,23 +73,30 @@ class LiveArea:
                 if self._is_fence(line):
                     self._in_code_fence = not in_fence
             elif in_fence:
-                # Blank line inside a code fence: still part of the block.
-                self.open_paragraph.append(line)
+                # Blank line inside a code fence: still part of the block -- unless the
+                # block was flushed mid-turn and this is its leading blank, which would
+                # only add an empty line at the top of the continuation.
+                if self.open_paragraph:
+                    self.open_paragraph.append(line)
             elif self.open_paragraph:
                 # Blank line = paragraph closed, commit the whole block.
                 committed.append("\n".join(self.open_paragraph) + "\n\n")
                 self.open_paragraph = []
         return committed
 
-    def flush_paragraph(self) -> str:
-        """At turn end, take the current open block (including a trailing partial line)
-        and clear it."""
+    def flush_paragraph(self, *, close_fence: bool = True) -> str:
+        """Take the current open block (including a trailing partial line) and clear it.
+
+        ``close_fence=False`` keeps the fence state: a mid-turn flush (prose followed by
+        a tool call) must not make a following blank line split a still-open code block.
+        """
         lines = list(self.open_paragraph)
         if self.stream_pending:
             lines.append(self.stream_pending)
             self.stream_pending = ""
         self.open_paragraph = []
-        self._in_code_fence = False
+        if close_fence:
+            self._in_code_fence = False
         if not lines:
             return ""
         return "\n".join(lines) + "\n"
