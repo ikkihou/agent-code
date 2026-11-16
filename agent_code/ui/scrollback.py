@@ -115,8 +115,19 @@ def _legacy_pt_style(style: str) -> str:
 # Attribute names Rich understands (rich/style.py::STYLE_ATTRIBUTES). Used to tell a
 # pt-only spelling apart from a name both vocabularies share ("bold", "underline", ...).
 _RICH_ATTRS = {
-    "dim", "bold", "italic", "underline", "blink", "blink2", "reverse", "conceal",
-    "strike", "underline2", "frame", "encircle", "overline",
+    "dim",
+    "bold",
+    "italic",
+    "underline",
+    "blink",
+    "blink2",
+    "reverse",
+    "conceal",
+    "strike",
+    "underline2",
+    "frame",
+    "encircle",
+    "overline",
 }
 
 

@@ -105,6 +105,7 @@ def rich_markup_fragments(markup_text: str) -> list[StyleAndText]:
 # chunk -> fragment normalization entry point
 # ---------------------------------------------------------------------------
 
+
 def chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
     """Normalize any chunk into style fragments -- the single conversion entry point
     for transcript / commit path. Fragment styles follow Rich's inline vocabulary."""

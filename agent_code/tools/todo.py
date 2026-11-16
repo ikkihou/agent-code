@@ -10,10 +10,7 @@ from .core import Tool, ToolContext
 
 def _render_todos(items: list[TodoItem]) -> str:
     icon = {"pending": "○", "in_progress": "◉", "completed": "✓"}
-    return (
-        "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items)
-        or "(no todos)"
-    )
+    return "\n".join(f"  {icon.get(t.status, '?')} {t.content}" for t in items) or "(no todos)"
 
 
 def todo_write(args: dict[str, Any], ctx: ToolContext) -> str:

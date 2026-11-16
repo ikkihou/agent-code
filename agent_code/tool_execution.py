@@ -196,7 +196,9 @@ def execute_one_tool_call(
     pairing, and so does the folded tool summary in scrollback.
     """
     wire.send(
-        ToolCallStarted(call_id=call.id, name=call.name, args_preview=_format_call_args(call.arguments))
+        ToolCallStarted(
+            call_id=call.id, name=call.name, args_preview=_format_call_args(call.arguments)
+        )
     )
 
     def _finish(block: dict[str, Any], *, outcome: str = "") -> dict[str, Any]:
@@ -253,9 +255,7 @@ def execute_one_tool_call(
 
     # allow / ask approved: execute.
     result = tools.run(call, ctx)
-    wire.send(
-        ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error)
-    )
+    wire.send(ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error))
     if not result.is_error:
         for h in run_hooks(
             "PostToolUse",
@@ -288,7 +288,9 @@ def partition_tool_calls(calls: list[ToolCall], tools: ToolRegistry) -> list[lis
             if current:  # Close the read-only group accumulated so far before the write.
                 batches.append(current)
                 current = []
-            batches.append([call])  # Write/unknown tools get their own batch (unknown fail-closed, treated as serial)
+            batches.append(
+                [call]
+            )  # Write/unknown tools get their own batch (unknown fail-closed, treated as serial)
     if current:
         batches.append(current)
     return batches
@@ -316,9 +318,7 @@ def execute_plan_boundary_calls(
         # The skipped calls never start, so they need no Started event -- but the folded
         # tool summary in scrollback still shows them as skipped.
         wire.send(
-            ToolCallCompleted(
-                call_id=call.id, name=call.name, is_error=True, outcome="skipped"
-            )
+            ToolCallCompleted(call_id=call.id, name=call.name, is_error=True, outcome="skipped")
         )
         blocks.append(
             {

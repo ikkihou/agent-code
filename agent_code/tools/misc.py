@@ -31,9 +31,7 @@ def _ask_user_question(args: dict[str, Any], ctx: ToolContext) -> str:
     # The real interaction happens in agent.py's intercept block -- this is only a
     # placeholder. The normal path never reaches here because the intercept block
     # handles the call first.
-    return (
-        "error: ask_user_question must be handled by the harness, not executed directly"
-    )
+    return "error: ask_user_question must be handled by the harness, not executed directly"
 
 
 def tools() -> list[Tool]:

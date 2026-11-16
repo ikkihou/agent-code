@@ -21,9 +21,7 @@ from rich.markup import escape
 from .runtime import PromptAsker, PromptFallback, PromptRequest, RuntimeState
 
 
-def _ask_request(
-    state: RuntimeState, request: PromptRequest, fallback: PromptFallback
-) -> Any:
+def _ask_request(state: RuntimeState, request: PromptRequest, fallback: PromptFallback) -> Any:
     """Where the worker asks the user something. The interactive shell injects an asker,
     so the question is posted back to the main-thread event loop; one-shot mode injects
     nothing (state.asker is None) and asks directly through the typer fallback."""
@@ -163,9 +161,7 @@ def confirm_plan(state: RuntimeState, plan_summary: str) -> bool:
     )
 
 
-def prompt_single_choice(
-    state: RuntimeState, question: str, labels: list[str]
-) -> str | None:
+def prompt_single_choice(state: RuntimeState, question: str, labels: list[str]) -> str | None:
     def ask_choice() -> str:
         from rich.console import Console
 

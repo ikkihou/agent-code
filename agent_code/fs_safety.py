@@ -65,9 +65,7 @@ def decode_subprocess_output(data: bytes | None, *, encodings: list[str] | None 
 SOURCE_FILE_ENCODINGS = ("utf-8", "gb18030", "cp936")
 
 
-def read_text_file(
-    path: Path, *, encodings: tuple[str, ...] | None = None
-) -> tuple[str, str]:
+def read_text_file(path: Path, *, encodings: tuple[str, ...] | None = None) -> tuple[str, str]:
     """Read a source file and return ``(text, encoding)``.
 
     Source files on Chinese Windows are often GBK; a strict UTF-8 read raises
@@ -91,7 +89,6 @@ def read_text_file(
 def write_text_file(path: Path, content: str, encoding: str = "utf-8") -> None:
     """Write a source file back in the given encoding (preserving the read encoding)."""
     path.write_text(content, encoding=encoding, newline="")
-
 
 
 # Per-observation cap for a single tool. The model context is finite, so very long
@@ -224,8 +221,7 @@ def ensure_within_size(path: Path, max_bytes: int = MAX_READ_BYTES) -> None:
     size = path.stat().st_size
     if size > max_bytes:
         raise ValueError(
-            f"file too large: {size} bytes > {max_bytes}; "
-            f"read a smaller file or use grep instead"
+            f"file too large: {size} bytes > {max_bytes}; read a smaller file or use grep instead"
         )
 
 
@@ -297,9 +293,7 @@ def ensure_read_before_edit(state: ReadFileState, path: Path) -> str | None:
 
     """
     if path not in state.entries:
-        return (
-            f"error: file has not been read yet. Read {path.name} first before editing."
-        )
+        return f"error: file has not been read yet. Read {path.name} first before editing."
 
     return None
 

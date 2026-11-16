@@ -95,11 +95,7 @@ def _sessions_text(cwd: Path) -> str:
     table.add_column("messages", justify="right")
     table.add_column("last updated")
     for session_id, message_count, modified_at in summaries:
-        updated = (
-            datetime.fromtimestamp(modified_at)
-            .astimezone()
-            .isoformat(timespec="seconds")
-        )
+        updated = datetime.fromtimestamp(modified_at).astimezone().isoformat(timespec="seconds")
         table.add_row(session_id, str(message_count), updated)
     return _render_table_text(table)
 
@@ -117,9 +113,7 @@ def _session_dir(cwd: Path) -> Path:
 
 
 class Session:
-    def __init__(
-        self, cwd: Path, session_id: str, file_path: Path, resumed: bool = False
-    ) -> None:
+    def __init__(self, cwd: Path, session_id: str, file_path: Path, resumed: bool = False) -> None:
         self.cwd = cwd
         self.session_id = session_id
         self.file_path = file_path
@@ -135,9 +129,7 @@ class Session:
     @classmethod
     def load_latest(cls, cwd: Path) -> "Session" | None:
         sessions_dir = _session_dir(cwd)
-        jsonl_files = [
-            path for path in sessions_dir.glob("*.jsonl") if _is_session_file(path)
-        ]
+        jsonl_files = [path for path in sessions_dir.glob("*.jsonl") if _is_session_file(path)]
         if not jsonl_files:
             return None
         latest = max(jsonl_files, key=lambda p: p.stat().st_mtime)
@@ -179,9 +171,7 @@ class Session:
                     "content": msg["content"],
                     "timestamp": now,
                 }
-                f.write(
-                    json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-                )
+                f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     @property
     def transcript_path(self) -> Path:
@@ -211,9 +201,7 @@ class Session:
             # width, and transcript files stay independent of one terminal's columns.
             record["full_width"] = True
         with open(self.transcript_path, "a", encoding="utf-8") as f:
-            f.write(
-                json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-            )
+            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     @property
     def transcript_chunks(self) -> list[OutputChunk]:

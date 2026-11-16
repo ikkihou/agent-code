@@ -24,9 +24,7 @@ def load_agent_md(cwd: Path) -> str | None:
         return None
 
     if len(content.encode("utf-8")) > _MAX_AGENT_MD_BYTES:
-        truncated = content.encode("utf-8")[:_MAX_AGENT_MD_BYTES].decode(
-            "utf-8", errors="replace"
-        )
+        truncated = content.encode("utf-8")[:_MAX_AGENT_MD_BYTES].decode("utf-8", errors="replace")
         content = truncated + "\n\n[... AGENT.md truncated at 50 KB ...]"
 
     return f"<project-rules>\n{content}\n</project-rules>"

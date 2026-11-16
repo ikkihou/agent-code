@@ -57,9 +57,7 @@ class ToolRegistry:
                 content=f"unknown tool: {call.name}",
                 is_error=True,
             )
-        return ToolResult(
-            tool_call_id=call.id, content=tool.run(call.arguments, context)
-        )
+        return ToolResult(tool_call_id=call.id, content=tool.run(call.arguments, context))
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

@@ -132,9 +132,7 @@ class _ConsoleWireSink:
                 # render_diff wraps lines in [red]/[green] markup; diff-line content
                 # is escaped inside render_diff, so a body "[x]" cannot be parsed as
                 # a Rich style here.
-                console.print(
-                    render_diff(event.old, event.new, event.path), markup=True
-                )
+                console.print(render_diff(event.old, event.new, event.path), markup=True)
             elif isinstance(event, CommandPreview):
                 console.print(f"\nCommand: {event.command}", markup=True)
 
@@ -158,9 +156,7 @@ def main_command(
         "--permission-mode",
         help="Permission mode: default, acceptEdits, plan, fullAccess",
     ),
-    resume: str | None = typer.Option(
-        None, "--resume", help="resume the given session id"
-    ),
+    resume: str | None = typer.Option(None, "--resume", help="resume the given session id"),
     continue_: bool = typer.Option(
         False, "--continue", "-c", help="resume the latest session in cwd"
     ),

@@ -49,9 +49,7 @@ def write_memory(cwd: Path, mem_type: str, title: str, body: str) -> MemoryEntry
     the index update fails midway, the topic file is already on disk and the recall
     scan still finds it, so no memory is lost."""
     if mem_type not in MEMORY_TYPES:
-        raise ValueError(
-            f"unknown memory type: {mem_type}, expected one of {MEMORY_TYPES}"
-        )
+        raise ValueError(f"unknown memory type: {mem_type}, expected one of {MEMORY_TYPES}")
 
     ensure_memdir(cwd)
     slug = make_slug(title)

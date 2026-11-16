@@ -38,9 +38,7 @@ def cron_list(args: dict[str, Any], ctx: ToolContext) -> str:
     for j in jobs:
         last = j.last_run_at or "never"
         label = f" — {j.label}" if j.label else ""
-        lines.append(
-            f"  [{j.id}] every {j.every_seconds}s: {j.slash}{label}  (last: {last})"
-        )
+        lines.append(f"  [{j.id}] every {j.every_seconds}s: {j.slash}{label}  (last: {last})")
     return "\n".join(lines)
 
 

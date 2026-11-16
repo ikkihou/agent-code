@@ -408,9 +408,7 @@ class InteractiveShell:
             self._pending_prompt = None
             if not future.done():
                 future.set_result(answer)
-            self._pending_answer_chunk = self._answer_chunk(
-                request, "yes" if answer else "no"
-            )
+            self._pending_answer_chunk = self._answer_chunk(request, "yes" if answer else "no")
             return
 
         if not text:

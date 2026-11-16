@@ -73,9 +73,9 @@ def _run_hook_command(
             env=env,
         )
 
-        output = _decode_hook_output(result.stdout).strip() or _decode_hook_output(
-            result.stderr
-        ).strip()
+        output = (
+            _decode_hook_output(result.stdout).strip() or _decode_hook_output(result.stderr).strip()
+        )
         return result.returncode == 0, output
     except subprocess.TimeoutExpired:
         return False, "hook time out"
@@ -135,9 +135,7 @@ def run_hooks(
     return results
 
 
-def run_hooks_raw(
-    event: str, payload: dict[str, Any], cwd: Path
-) -> list[dict[str, Any]]:
+def run_hooks_raw(event: str, payload: dict[str, Any], cwd: Path) -> list[dict[str, Any]]:
     """Run hooks that have no tool context (e.g. Stop). The whole payload is passed to
     the hook as stdin JSON."""
     config = load_hooks(cwd)
@@ -151,15 +149,9 @@ def run_hooks_raw(
             commands = [entry["run"]]
         else:
             for h in entry.get("hooks", []):
-                if (
-                    isinstance(h, dict)
-                    and h.get("type") == "command"
-                    and h.get("command")
-                ):
+                if isinstance(h, dict) and h.get("type") == "command" and h.get("command"):
                     commands.append(h["command"])
         for cmd in commands:
             success, output = _run_hook_command(cmd, payload, cwd)
-            results.append(
-                {"event": event, "command": cmd, "success": success, "output": output}
-            )
+            results.append({"event": event, "command": cmd, "success": success, "output": output})
     return results

@@ -62,9 +62,7 @@ def file_edit(args: dict[str, Any], ctx: ToolContext) -> str:
     # Race guard: agent.py already ran apply_single_replace to build the diff; if an
     # external writer touched old_content between the confirm prompt and now, this
     # catches it once more.
-    new_content, err = apply_single_replace(
-        content, old_string, new_string, replace_all
-    )
+    new_content, err = apply_single_replace(content, old_string, new_string, replace_all)
     if err:
         return err
     assert new_content is not None
