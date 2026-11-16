@@ -188,7 +188,7 @@ def _chunk_fragments(chunk: OutputChunk) -> StyleAndTextTuples:
     """OutputChunk -> (style string, text) fragments in prompt_toolkit's vocabulary."""
     if chunk.fragments:
         return list(chunk.fragments)
-    if chunk.format == "rich":
+    if chunk.format in ("rich", "markdown"):
         return chunk_fragments(chunk)
     return [("", chunk.text)]
 

@@ -17,7 +17,7 @@ from prompt_toolkit.document import Document
 
 from agent_code.agent import run_agent
 from agent_code.model import ModelResponse, ModelStreamEvent
-from agent_code.output import OutputChunk
+from agent_code.output import OutputChunk, markdown_fragments
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
@@ -303,6 +303,42 @@ def test_live_area_commits_closed_paragraphs_incrementally() -> None:
     live.feed_stream("tail")
     assert live.flush_paragraph() == "second para content\ntail\n"
     assert live.flush_paragraph() == ""  # idempotent: a second take yields nothing
+
+
+def test_live_area_code_fence_survives_blank_lines() -> None:
+    """Blank lines INSIDE a fenced code block must not close the block: a markdown
+    code sample with empty lines is committed as ONE block, not split mid-fence."""
+    live = LiveArea()
+    assert live.feed_stream("para\n```python\n\nx = 1\n\n```\n") == []
+    # Only the blank line AFTER the closing fence closes the block.
+    assert live.feed_stream("\nnext\n") == ["para\n```python\n\nx = 1\n\n```\n\n"]
+
+    # An UNTERMINATED fence keeps accumulating (until the closer or turn end).
+    live2 = LiveArea()
+    assert live2.feed_stream("```py\n\ncode\n") == []
+    assert live2.flush_paragraph() == "```py\n\ncode\n"
+
+
+def test_markdown_fragments_style_real_markdown() -> None:
+    """markdown_fragments produces real pt styles: bold heading, bold text, styled
+    code block -- and the plain text survives verbatim (no markup parsing)."""
+    frags = markdown_fragments("# Title\n\n**bold** text\n")
+    text = "".join(t for _, t in frags)
+    assert "Title" in text and "bold" in text and "text" in text
+    styles = {s for s, _ in frags}
+    assert any("bold" in s for s in styles)  # heading + **bold** got styled
+    # Markdown control chars are consumed by the renderer: "#" and "**" are gone.
+    assert "#" not in text.replace("Title", "")
+    assert "**" not in text
+
+
+def test_markdown_fragments_verbatim_content_with_brackets() -> None:
+    """Content like lst[0] or [link] must survive verbatim -- markdown rendering does
+    not parse Rich markup, so no injection issue."""
+    frags = markdown_fragments("use `lst[0]` and [not-a-style] here\n")
+    text = "".join(t for _, t in frags)
+    assert "lst[0]" in text
+    assert "[not-a-style]" in text
 
 
 def test_live_area_reset_stream_clears_paragraph_state() -> None:

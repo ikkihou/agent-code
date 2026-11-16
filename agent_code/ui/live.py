@@ -8,6 +8,8 @@ of the Live area, not the prompt echo, so the gap is exactly one line."""
 
 from __future__ import annotations
 
+import re
+
 from prompt_toolkit.formatted_text import FormattedText
 
 from ..wire import CommandPreview, DiffPreview, WireEvent
@@ -17,6 +19,9 @@ from ..wire import CommandPreview, DiffPreview, WireEvent
 STREAM_TAIL_LINES = 3
 # Spinner animation frames.
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# A fenced code block delimiter (``` or ~~~, 3+, optional indent/info string).
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
 class LiveArea:
@@ -42,36 +47,49 @@ class LiveArea:
         self.pending_preview: list[str] = []  # pending preview lines (diff/command)
         self.active_tool: str | None = None  # tool name shown on the spinner line
         self.spinner_frame = 0
+        self._in_code_fence = False  # inside an unclosed ``` block
+
+    @staticmethod
+    def _is_fence(line: str) -> bool:
+        return bool(_FENCE_RE.match(line))
 
     def feed_stream(self, text: str) -> list[str]:
-        """Feed streaming text; return the paragraphs closed in this batch, ready to be
-        committed to scrollback.
+        """Feed streaming text; return the markdown blocks closed in this batch, ready to
+        be committed to scrollback.
 
-        Paragraphs are separated by blank lines: a blank line means the previous
-        paragraph is complete. Each returned item is one paragraph (with its trailing
-        newlines) that the caller can commit as-is.
+        Paragraphs are separated by blank lines -- but blank lines inside a fenced code
+        block (```) do NOT close the block, so fence state is tracked across batches and
+        an unterminated fence keeps accumulating until its closer arrives. Each returned
+        item is one block (with its trailing newlines) that the caller can commit as-is.
         """
         committed: list[str] = []
         self.stream_pending += text
         *lines, self.stream_pending = self.stream_pending.split("\n")
         for line in lines:
             line = line.removesuffix("\r")
+            in_fence = self._in_code_fence
             if line.strip():
                 self.open_paragraph.append(line)
+                if self._is_fence(line):
+                    self._in_code_fence = not in_fence
+            elif in_fence:
+                # Blank line inside a code fence: still part of the block.
+                self.open_paragraph.append(line)
             elif self.open_paragraph:
-                # Blank line = paragraph closed, commit the whole paragraph.
+                # Blank line = paragraph closed, commit the whole block.
                 committed.append("\n".join(self.open_paragraph) + "\n\n")
                 self.open_paragraph = []
         return committed
 
     def flush_paragraph(self) -> str:
-        """At turn end, take the current open paragraph (including a trailing partial
-        line) and clear it."""
+        """At turn end, take the current open block (including a trailing partial line)
+        and clear it."""
         lines = list(self.open_paragraph)
         if self.stream_pending:
             lines.append(self.stream_pending)
             self.stream_pending = ""
         self.open_paragraph = []
+        self._in_code_fence = False
         if not lines:
             return ""
         return "\n".join(lines) + "\n"

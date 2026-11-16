@@ -195,10 +195,11 @@ class InteractiveShell:
             commit: list[OutputChunk] = []
             for event in batch:
                 if isinstance(event, TextDelta):
-                    # Incremental commit: a closed paragraph goes to scrollback at once and
-                    # only the tail paragraph stays in the Live area.
+                    # Incremental commit: a closed block goes to scrollback at once (as
+                    # markdown: headings/tables/code blocks get real styling) and only
+                    # the tail block stays in the Live area.
                     for paragraph in self._live.feed_stream(event.text):
-                        commit.append(OutputChunk(paragraph))
+                        commit.append(OutputChunk(paragraph, format="markdown"))
                     continue
                 if isinstance(event, TurnStarted):
                     self._live.turn_active = True
@@ -213,7 +214,7 @@ class InteractiveShell:
                     self._live.active_tool = None
                     self._live.pending_preview = []
                     if tail.strip():
-                        commit.append(OutputChunk(tail))
+                        commit.append(OutputChunk(tail, format="markdown"))
                     continue
                 if isinstance(event, ToolCallStarted):
                     self._live.active_tool = event.name

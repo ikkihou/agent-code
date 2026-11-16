@@ -19,7 +19,7 @@ from prompt_toolkit.styles.style import parse_color
 from rich.color import Color
 from rich.console import Console
 
-OutputFormat = Literal["plain", "rich"]
+OutputFormat = Literal["plain", "rich", "markdown"]
 
 # (style string, text) fragments; the style string uses prompt_toolkit's inline
 # style vocabulary, e.g. "bold yellow".
@@ -164,6 +164,48 @@ def chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
         return list(chunk.fragments)
     if chunk.format == "rich":
         return rich_markup_fragments(chunk.text)
+    if chunk.format == "markdown":
+        return markdown_fragments(chunk.text)
     if chunk.text:
         return [("", chunk.text)]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Markdown -> style fragments
+# ---------------------------------------------------------------------------
+
+_MD_CONSOLE_WIDTH = 100
+
+
+def markdown_fragments(text: str) -> list[StyleAndText]:
+    """Render markdown into pt-vocabulary style fragments (no ANSI round-trip).
+
+    Uses rich.markdown.Markdown rendered on an offscreen console: headings, emphasis,
+    tables and fenced code all come out as styled segments, converted through the
+    same ``_pt_style`` vocabulary translation as ``rich_markup_fragments``. Width is
+    fixed so transcript replay does not re-wrap per terminal -- the terminal wraps
+    over-wide lines itself, as elsewhere in the commit path.
+    """
+    from rich.markdown import Markdown
+
+    console = Console(
+        file=StringIO(),
+        width=_MD_CONSOLE_WIDTH,
+        tab_size=4,
+        highlight=False,
+        legacy_windows=False,
+    )
+    segments = console.render(Markdown(text), console.options)
+    out: list[StyleAndText] = []
+    for segment in segments:
+        if not segment.text:
+            continue
+        out.append((_pt_style(segment.style), segment.text))
+    merged: list[StyleAndText] = []
+    for style, part in out:
+        if merged and merged[-1][0] == style:
+            merged[-1] = (style, merged[-1][1] + part)
+        else:
+            merged.append((style, part))
+    return merged
