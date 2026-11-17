@@ -1,9 +1,10 @@
-"""REPL key bindings: Shift+Enter remapping and the input/abort/mode-cycle bindings.
+"""REPL key bindings: Shift+Enter remapping, paste placeholdering, input/abort/mode-cycle.
 
 Extracted from ``InteractiveShell`` so the shell class stays about orchestration
 (threads, the event loop, prompts) rather than key plumbing. ``build_key_bindings`` is a
 pure-ish factory: it takes the shared ``RuntimeState`` (abort flag + permission-mode
-cycler) and the worker's ``busy`` Event, and returns a configured ``KeyBindings``.
+cycler), the worker's ``busy`` Event and the ``PasteCache`` for oversized pastes, and
+returns a configured ``KeyBindings``.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
 from prompt_toolkit.keys import Keys
 
 from ..runtime import RuntimeState
+from .paste import PasteCache, is_oversized_paste
 
 # Shift+Enter encodings used by the common extended protocols. prompt_toolkit has no
 # kitty protocol support and maps the xterm modifyOtherKeys sequence to ControlM, which
@@ -54,12 +56,15 @@ def _restart_completion(buffer: Any) -> None:
         buffer.start_completion()
 
 
-def build_key_bindings(state: RuntimeState, busy: threading.Event) -> KeyBindings:
+def build_key_bindings(
+    state: RuntimeState, busy: threading.Event, paste_cache: PasteCache | None = None
+) -> KeyBindings:
     """Build the REPL's key bindings.
 
     ``state`` supplies the abort flag (ESC / Ctrl+C during a turn) and the permission-
     mode cycler (Shift+Tab); ``busy`` is the worker's flag deciding whether Ctrl+C aborts
-    a running turn or exits the REPL.
+    a running turn or exits the REPL; ``paste_cache`` enables oversized-paste
+    placeholdering (None keeps pt's verbatim insert).
     """
     kb = KeyBindings()
 
@@ -92,6 +97,19 @@ def build_key_bindings(state: RuntimeState, busy: threading.Event) -> KeyBinding
     def _(event: Any) -> None:
         get_by_name("unix-word-rubout").handler(event)
         _restart_completion(event.current_buffer)
+
+    if paste_cache is not None:
+        # Oversized bracketed pastes become a placeholder token instead of landing in
+        # the buffer verbatim (the Live area would flood). pt's default BracketedPaste
+        # handler inserts event.data; this custom binding wins because app-level
+        # bindings get priority over defaults in pt's merged registry.
+        @kb.add(Keys.BracketedPaste)
+        def _(event: Any) -> None:
+            data = event.data.replace("\r\n", "\n").replace("\r", "\n")
+            if is_oversized_paste(data):
+                event.current_buffer.insert_text(paste_cache.register(data))
+            else:
+                event.current_buffer.insert_text(data)
 
     @kb.add("escape", "enter")
     @kb.add("c-j")

@@ -96,9 +96,13 @@ def write_text_file(path: Path, content: str, encoding: str = "utf-8") -> None:
 DEFAULT_MAX_CHARS = 8000
 
 # Default skip directory names. A hit on any ancestor directory drops the whole path.
+# .agent/.bg are the agent's own runtime state (sessions/memory/cron/bg output) --
+# invisible to reads and listings the same way .git is.
 DEFAULT_SKIP_DIRS = frozenset(
     {
         ".git",
+        ".agent",
+        ".bg",
         ".venv",
         "venv",
         "node_modules",
@@ -230,7 +234,11 @@ def should_skip(rel_path: Path, policy: SkipPolicy) -> bool:
 
     Check logic:
     1. Is any ancestor directory of the path in skip_dirs (e.g. .git, node_modules)?
-    2. Does the path match a .gitignore rule?
+    2. Does the path match a .gitignore rule? A directory rule written with a trailing
+       slash ("build/") does not match the bare directory name ("build") -- only its
+       children -- so a gitignored directory's *own listing entry* would leak into
+       @mentions and project_tree. The path is additionally tried with a trailing
+       slash to catch those directory rules.
 
     Args:
         rel_path: path relative to cwd.
@@ -241,9 +249,11 @@ def should_skip(rel_path: Path, policy: SkipPolicy) -> bool:
     """
     if any(part in policy.skip_dirs for part in rel_path.parts):
         return True
-    if policy.gitignore is not None and policy.gitignore.match_file(str(rel_path)):
+    if policy.gitignore is None:
+        return False
+    if policy.gitignore.match_file(str(rel_path)):
         return True
-    return False
+    return policy.gitignore.match_file(str(rel_path).rstrip("/") + "/")
 
 
 def truncate_output(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> str:

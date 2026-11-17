@@ -30,13 +30,17 @@ A scrollback + Live REPL (modelled on kimi-cli's terminal-ownership model):
   paragraph when the turn ends.
 
 Sub-modules by responsibility:
-- completer:  slash command completer
+- completer:  slash command completer + @file mention completer (TTL-cached cwd scan,
+              honoring SkipPolicy so git-ignored/vendored paths never surface)
+- paste:      oversized bracketed-paste placeholdering ([Pasted text #N +K lines],
+              expanded back to full text at submit time; the echo shows the token)
 - scrollback: commit path OutputChunk -> ANSI -> native terminal scrollback
 - live:       Live area state (spinner / streaming tail / pending preview)
 - events:     translation of finished wire events -> OutputChunk
 - prompts:    rendering and answer parsing for prompt requests (confirm/choice)
 - theme:      bottom status bar text + prompt_toolkit stylesheet
-- keys:       REPL key bindings (Shift+Enter remap, abort/delete/newline, mode cycle)
+- keys:       REPL key bindings (Shift+Enter remap, abort/delete/newline, mode cycle,
+              oversized-paste interception)
 - layout:     input-area Frame reshaping (height collapse, side-border strip, menus, Live window)
 - shell:      the InteractiveShell REPL itself (threading model + input loop)
 """

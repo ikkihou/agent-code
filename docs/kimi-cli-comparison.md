@@ -121,8 +121,8 @@ agent-code 的 `ToolCallStarted`/`ToolCallCompleted` 事件已有，展示粒度
 | 能力 | kimi-cli | agent-code |
 |---|---|---|
 | 输入历史持久化 | ✅ JSONL 按目录存 + 连续去重，↑ 回溯 | ❌ |
-| @文件引用补全 | ✅ `LocalFileMentionCompleter` | ❌ |
-| 粘贴大文本占位符化 | ✅ `[Pasted text #N]` + AttachmentCache | ❌（大粘贴瞬间撑爆 Live 区）|
+| @文件引用补全 | ✅ `LocalFileMentionCompleter` | ✅（2026-11-17，`ui/completer.py::FileMentionCompleter`：basename/全路径两级排序、1s TTL 扫描缓存、复用 SkipPolicy 过滤 gitignore/跳过目录）|
+| 粘贴大文本占位符化 | ✅ `[Pasted text #N]` + AttachmentCache | ✅（2026-11-17，`ui/paste.py::PasteCache`：>30 行粘贴替换为 `[Pasted text #N +K lines]`，提交时展开全文给模型、echo 只显示占位符）|
 | 流式中输入路由 | ✅ queue / steer / btw / send 单一决策点（`classify_input`） | 只有排队 |
 | 外部编辑器 | ✅ Ctrl+O 打开 `$EDITOR` | ❌ |
 | Shell 模式 | ✅ Ctrl+X 切换（`$` 提示符，cd 特判） | ❌ |
@@ -131,7 +131,7 @@ agent-code 的 `ToolCallStarted`/`ToolCallCompleted` 事件已有，展示粒度
 | 主题 | ✅ dark/light 集中定义，`/theme` 切换 | ❌ |
 | resume 回放 | ✅ 只重放最近轮次 | 全量重放 |
 
-性价比排序：**输入历史持久化**（pt `FileHistory`，一行的事）→ **底栏加 context 用量 + git 分支** → **@文件补全** → **粘贴占位符化**。
+性价比排序：**输入历史持久化**（pt `FileHistory`，一行的事）→ **底栏加 context 用量 + git 分支**。~~@文件补全、粘贴占位符化~~ 已完成（2026-11-17）。
 
 ### 4. 权限确认 UI
 
@@ -143,7 +143,7 @@ agent-code 的核心问题：**diff/命令全文在 REPL 里根本看不到**（
 
 ## 三、改进路线（按性价比排序）
 
-1. ~~**修 `-c` bug**~~（已完成，见上）+ **输入历史持久化** —— 输入历史持久化仍待做。
+1. ~~**修 `-c` bug**~~（已完成，见上）+ **输入历史持久化** —— 输入历史持久化仍待做。~~@文件补全 / 粘贴占位符化~~ 已完成。
 2. **审批体验**：完整 diff 预览（行数预算）+ "approve for session" / "reject with feedback" 两选项。
 3. **循环防呆**：同参工具调用去重 + 连续重复检测强制停 turn + token 用量触发压缩。
 4. **web 工具注册** + SKILL.md 式 skills。

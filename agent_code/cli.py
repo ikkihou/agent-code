@@ -291,6 +291,7 @@ def main_command(
         on_transcript=session.append_transcript,
         drain_pending=scheduler.drain_pending,
         slash_registry=slash_registry,
+        cwd=resolved_cwd,
     )
 
 

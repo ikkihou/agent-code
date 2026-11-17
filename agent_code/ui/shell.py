@@ -14,10 +14,12 @@ import queue
 import threading
 import time
 import traceback
+from pathlib import Path
 from typing import Any, Callable
 
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.application.current import get_app_or_none, get_app_session
+from prompt_toolkit.completion import merge_completers
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
@@ -36,7 +38,7 @@ from ..wire import (
     Wire,
     WireEvent,
 )
-from .completer import SlashCompleter
+from .completer import FileMentionCompleter, SlashCompleter
 from .events import event_to_chunks, render_user_prompt, tool_fold_chunk, tool_outcome
 from .keys import build_key_bindings
 from .layout import (
@@ -46,6 +48,7 @@ from .layout import (
     strip_frame_side_borders,
 )
 from .live import LiveArea, preview_lines
+from .paste import PasteCache
 from .prompts import (
     parse_choice_index,
     parse_confirm_answer,
@@ -76,6 +79,7 @@ class InteractiveShell:
         on_transcript: Callable[[OutputChunk], None] | None = None,
         drain_pending: Callable[[], list[str]] | None = None,
         slash_registry: SlashRegistry | None = None,
+        cwd: Path | None = None,
     ) -> None:
         self._state = state
         self._run_turn = run_turn
@@ -83,6 +87,8 @@ class InteractiveShell:
         self._on_transcript = on_transcript
         self._drain_pending = drain_pending
         self._slash_registry = slash_registry
+        self._cwd = cwd  # @file mention scan root; None disables mention completion
+        self._paste_cache = PasteCache()
 
         self._job_queue: queue.Queue[str] = queue.Queue()
         self._busy = threading.Event()
@@ -379,7 +385,13 @@ class InteractiveShell:
 
     def _submit_text(self, text: str) -> None:
         """Single input entry point: feed a pending prompt state machine first, otherwise
-        submit as new input."""
+        submit as new input.
+
+        Oversized-paste placeholders are expanded back to their full text here (the
+        model sees the real content; the echo shows the short token). Pending-prompt
+        answers are never expanded: a confirmation answer is one keystroke ("y"), and
+        a choice answer is a bare number -- neither can carry a placeholder.
+        """
         text = text.strip()
         if self._pending_prompt is not None:
             entry = self._pending_prompt
@@ -418,12 +430,16 @@ class InteractiveShell:
             self._route_slash_command(text)
             return
 
+        expanded = self._paste_cache.expand(text)
+        # The echo shows the buffer content as typed (short placeholder token -- a
+        # full-text echo would flood the scrollback with the very paste we just hid);
+        # the queue gets the expanded text so the model sees the real content.
         self._echo_user_prompt(text)
         if self._busy.is_set():
-            self._state.input_queue.put(text)
+            self._state.input_queue.put(expanded)
             self._commit_now("[queued] will run after the current turn\n")
         else:
-            self._job_queue.put(text)
+            self._job_queue.put(expanded)
 
     def _route_slash_command(self, text: str) -> bool:
         """Slash dispatch: commit the result in place when handled, queue the expanded prompt
@@ -459,6 +475,17 @@ class InteractiveShell:
 
     # ---- main entry ----------------------------------------------------------
 
+    def _build_completer(self) -> Any:
+        """Slash commands + @file mentions. Each completer decides its own trigger,
+        so a merged pair only ever fires one menu (slash for leading ``/``, mentions
+        for a cursor word starting with ``@``)."""
+        completers: list[Any] = [SlashCompleter(self._slash_registry)]
+        if self._cwd is not None:
+            completers.append(FileMentionCompleter(self._cwd))
+        if len(completers) == 1:
+            return completers[0]
+        return merge_completers(completers)
+
     async def _run_async(self) -> None:
         app_session = get_app_session()
         output = app_session.output
@@ -481,7 +508,7 @@ class InteractiveShell:
             bottom_toolbar=lambda: FormattedText(
                 [("class:bottom-toolbar", bottom_toolbar(self._state))]
             ),
-            completer=SlashCompleter(self._slash_registry),
+            completer=self._build_completer(),
             complete_while_typing=True,
             # Multiline layout: the buffer can contain newlines, and the input frame
             # grows with them. Enter submits; Shift+Enter, Alt+Enter/Esc+Enter and
@@ -489,7 +516,7 @@ class InteractiveShell:
             # patch above.
             multiline=True,
             style=style,
-            key_bindings=build_key_bindings(self._state, self._busy),
+            key_bindings=build_key_bindings(self._state, self._busy, self._paste_cache),
             # Soft-wrapped input lines align under the text, past the '> ' prefix
             # (the default is no indentation in single-line mode).
             prompt_continuation=lambda width, line_number, wrap_count: " " * width,
@@ -608,6 +635,7 @@ def run_interactive_shell(
     on_transcript: Callable[[OutputChunk], None] | None = None,
     drain_pending: Callable[[], list[str]] | None = None,
     slash_registry: SlashRegistry | None = None,
+    cwd: Path | None = None,
 ) -> None:
     InteractiveShell(
         state,
@@ -618,4 +646,5 @@ def run_interactive_shell(
         on_transcript,
         drain_pending,
         slash_registry,
+        cwd,
     ).run()
