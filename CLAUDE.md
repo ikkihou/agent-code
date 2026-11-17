@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv sync --dev           # install deps + pytest dev group (uv, Python 3.12)
 uv run agent-code "hi"  # one-shot run (module entry: python -m agent_code)
 uv run agent-code       # scrollback+Live interactive REPL
-uv run agent-code -c    # resume latest session — currently broken, see Sessions
+uv run agent-code -c    # resume latest session
 uv run agent-code --provider mock "hi"   # deterministic fake model, no API key needed
 uv run pytest           # full test suite
 uv run pytest tests/test_hooks.py -k test_name   # single test
@@ -77,7 +77,7 @@ The REPL is a **scrollback + Live** design implemented in `agent_code/ui/`: `she
 
 ### Persistence & memory
 
-- **Sessions** (`session.py`): append-only JSONL per turn under `.agent/sessions/<sanitized-abs-cwd>/<id>.jsonl`, plus a rendered-output sidecar `<id>.transcript.jsonl` the REPL replays into scrollback (styling + `full_width`; old records infer it from `bg:#444444` or `on #444444`). `--resume <id>` works; `--continue`/`-c` is currently broken — `Session.load_latest` globs `*.jsonl` and can pick the newer transcript file, after which `history` raises `KeyError: 'role'` and the replay is empty.
+- **Sessions** (`session.py`): append-only JSONL per turn under `.agent/sessions/<sanitized-abs-cwd>/<id>.jsonl`, plus a rendered-output sidecar `<id>.transcript.jsonl` the REPL replays into scrollback (styling + `full_width`; old records infer it from `bg:#444444` or `on #444444`). `--resume <id>` and `--continue`/`-c` both work; sidecars are excluded by name (`_is_session_file`), and `history` skips lines missing `role`/`content` instead of raising.
 - **Long-term memory** (`memdir/`): `.agent/memory/<type>/<slug>.md` (frontmatter + body) plus a `MEMORY.md` index. Types: user/feedback/project/reference. The index is loaded into the system prompt each run.
 - **System prompt** (`build_system_prompt` in `agent.py`): core instruction + `AGENT.md` (singular, via `project_memory.py`) + `MEMORY.md` index. Note the repo's own **`AGENTS.md`** (plural) is the developer guideline doc and is a different file from `AGENT.md`.
 - **File history** (`file_history.py`): pre-write backups under `.agent/history/<rel>/<ts>`.

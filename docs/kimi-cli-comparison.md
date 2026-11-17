@@ -90,7 +90,7 @@
 
 **kimi-cli**：每工作目录 `sessions/<id>/` 目录，context（消息 JSONL）/ wire（UI 事件日志）/ state（approval 设置、plan mode、custom_title、additional_dirs）分文件存；`--resume [ID]`、`--continue`、fork、通知队列。
 
-**agent-code**：单 JSONL + 渲染 sidecar。**已知 bug 要先修**：`-c`/`--continue` 坏了——`Session.load_latest` glob `*.jsonl` 会挑到更新的 `.transcript.jsonl` sidecar，随后 `history` 抛 `KeyError: 'role'`，replay 为空。
+**agent-code**：单 JSONL + 渲染 sidecar。~~已知 bug：`-c`/`--continue` 坏了——`Session.load_latest` glob `*.jsonl` 会挑到更新的 `.transcript.jsonl` sidecar，随后 `history` 抛 `KeyError: 'role'`，replay 为空。~~ **已修复**（2026-11-17）：glob 侧早在 c9ae829 加了 `_is_session_file` 过滤；本次又加固了 `Session.history`——跳过缺 `role`/`content` 的行（含 checkpoint 类记录）而非抛 `KeyError`，并修掉 `file_path.exists` 漏括号导致的 `FileNotFoundError`（原应返回空列表）。已补回归测试，`-c` 端到端验证通过。
 
 ### 8. 其他
 
@@ -143,7 +143,7 @@ agent-code 的核心问题：**diff/命令全文在 REPL 里根本看不到**（
 
 ## 三、改进路线（按性价比排序）
 
-1. **修 `-c` bug** + **输入历史持久化** —— 两个小修复，立刻改善日常使用。
+1. ~~**修 `-c` bug**~~（已完成，见上）+ **输入历史持久化** —— 输入历史持久化仍待做。
 2. **审批体验**：完整 diff 预览（行数预算）+ "approve for session" / "reject with feedback" 两选项。
 3. **循环防呆**：同参工具调用去重 + 连续重复检测强制停 turn + token 用量触发压缩。
 4. **web 工具注册** + SKILL.md 式 skills。

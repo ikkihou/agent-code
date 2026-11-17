@@ -95,3 +95,27 @@ def test_load_latest_ignores_newer_transcript_sidecar(tmp_path: Path) -> None:
     assert latest.file_path == session.file_path
     assert latest.history == messages
     assert [summary[0] for summary in _session_summaries(tmp_path)] == [session.session_id]
+
+
+def test_history_skips_lines_without_role_or_content(tmp_path: Path) -> None:
+    """A non-message record (or garbage line) in a session file must not break resume:
+    history skips it instead of raising KeyError."""
+    session = Session.create(tmp_path)
+    with session.file_path.open("a", encoding="utf-8") as f:
+        f.write('{"role": "user", "content": "hello"}\n')
+        f.write('{"kind": "checkpoint", "data": 1}\n')  # no role/content
+        f.write("not json at all\n")
+        f.write('{"role": "assistant", "content": "hi"}\n')
+
+    assert session.history == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+
+
+def test_history_empty_when_file_missing(tmp_path: Path) -> None:
+    """A deleted session file yields an empty history, not FileNotFoundError."""
+    session = Session.create(tmp_path)
+    session.file_path.unlink()
+
+    assert session.history == []

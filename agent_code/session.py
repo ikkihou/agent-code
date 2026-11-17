@@ -145,9 +145,13 @@ class Session:
 
     @property
     def history(self) -> list[dict[str, Any]]:
-        """Parse the jsonl file and return the list of messages."""
+        """Parse the jsonl file and return the list of messages.
+
+        Lines without a usable ``role``/``content`` are skipped rather than raising:
+        a stray non-message record in the file must not break resume.
+        """
         messages: list[dict[str, Any]] = []
-        if not self.file_path.exists:
+        if not self.file_path.exists():
             return messages
 
         for line in self.file_path.read_text(encoding="utf-8").splitlines():
@@ -157,6 +161,8 @@ class Session:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict) or "role" not in data or "content" not in data:
                 continue
             messages.append({"role": data["role"], "content": data["content"]})
 
