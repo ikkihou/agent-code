@@ -45,6 +45,64 @@ def test_mention_completes_basename_substring(tmp_path: Path) -> None:
     assert hits == ["src/main.py"]
 
 
+def test_mention_fuzzy_subsequence(tmp_path: Path) -> None:
+    """kimi-style subsequence fuzzy: 'mntxt' finds readme.md via its basename."""
+    root = _make_tree(tmp_path)
+    completer = FileMentionCompleter(root)
+
+    # Subsequence over the basename.
+    assert "readme.md" in _completions(completer, "@rmd")
+    # Skipped separator still matches as subsequence across the path ("@"->"/"
+    # elision: "srcmain" matches "src/main.py").
+    assert "src/main.py" in _completions(completer, "@srcmain")
+    # A character absent from the path in order -> no match.
+    assert _completions(completer, "@zzzzz") == []
+
+
+def test_mention_ranks_basename_prefix_first(tmp_path: Path) -> None:
+    """A basename prefix match outranks a fuzzy path match for the same query."""
+    root = _make_tree(tmp_path)
+    (root / "main.c").write_text("x\n", encoding="utf-8")
+    (root / "src" / "dominos").mkdir(parents=True)
+    (root / "src" / "dominos" / "main.txt").write_text("x\n", encoding="utf-8")
+    completer = FileMentionCompleter(root)
+
+    hits = _completions(completer, "@main")
+
+    # Tier 0 (basename prefix) before tier 1 (basename contains) before tier 2
+    # (path subsequence).
+    assert hits[:2] == ["main.c", "src/main.py"]
+    assert "src/dominos/main.txt" in hits
+
+
+def test_mention_guard_does_not_trigger_on_emails(tmp_path: Path) -> None:
+    """An '@' embedded in an identifier (email, decorator-ish text) is not a mention."""
+    root = _make_tree(tmp_path)
+    completer = FileMentionCompleter(root)
+
+    assert _completions(completer, "mail me at user@example.com") == []
+    assert _completions(completer, "price is 5@3") == []
+
+
+def test_mention_completed_file_short_circuits(tmp_path: Path) -> None:
+    """Once the fragment names an existing file, completion stops (mention done)."""
+    root = _make_tree(tmp_path)
+    completer = FileMentionCompleter(root)
+
+    assert _completions(completer, "read @readme.md") == []
+    # A prefix that is not yet a file still completes.
+    assert _completions(completer, "read @readme.m") == ["readme.md"]
+
+
+def test_mention_fragment_with_space_does_not_trigger(tmp_path: Path) -> None:
+    root = _make_tree(tmp_path)
+    completer = FileMentionCompleter(root)
+
+    # The fragment after @ runs to whitespace; "@read me" leaves "me" as the last
+    # word, which is not an @-word, so nothing fires.
+    assert _completions(completer, "read @read me") == []
+
+
 def test_mention_empty_query_lists_tree(tmp_path: Path) -> None:
     root = _make_tree(tmp_path)
     completer = FileMentionCompleter(root)
@@ -88,7 +146,7 @@ def test_mention_caches_scan(tmp_path: Path) -> None:
     """Two completions within the TTL reuse one filesystem walk."""
     root = _make_tree(tmp_path)
     completer = FileMentionCompleter(root)
-    _completions(completer, "@")
+    _completions(completer, "@brand")
 
     first_cache_time = completer._cache_at
     (tmp_path / "brand_new.py").write_text("x\n", encoding="utf-8")
@@ -96,6 +154,18 @@ def test_mention_caches_scan(tmp_path: Path) -> None:
 
     assert hits == []  # the fresh file is not visible until the TTL expires
     assert completer._cache_at == first_cache_time
+
+
+def test_mention_short_query_lists_top_level_only(tmp_path: Path) -> None:
+    """"@a" (short, no slash) lists top-level entries: instant first keystroke."""
+    root = _make_tree(tmp_path)
+    (root / "src" / "aardvark.txt").write_text("x\n", encoding="utf-8")
+    completer = FileMentionCompleter(root)
+
+    hits = _completions(completer, "@a")
+
+    assert "readme.md" in hits  # top-level basename match
+    assert "src/aardvark.txt" not in hits  # deep paths stay out of the short query
 
 
 def test_mention_directory_completion_keeps_trailing_slash(tmp_path: Path) -> None:

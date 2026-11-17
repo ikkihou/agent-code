@@ -1,17 +1,23 @@
 """Input completers: slash commands and @file mentions.
 
 ``SlashCompleter`` lists available commands when the input line starts with ``/``;
-``FileMentionCompleter`` completes file paths after an ``@`` mention (kimi-cli's
-``LocalFileMentionCompleter``). The REPL merges both with ``merge_completers`` --
-each one decides for itself whether the text at the cursor falls in its trigger.
+``FileMentionCompleter`` completes file paths after an ``@`` mention, modelled on
+kimi-cli's ``LocalFileMentionCompleter``: subsequence fuzzy matching with in-menu
+highlight, a lightweight top-level listing for the first keystroke, an
+``@``-guard that keeps emails from triggering, and a short-circuit once the
+fragment already names an existing file. File discovery reuses the agent's own
+``SkipPolicy`` (skip dirs + .gitignore) with an early-pruned scandir walk, so a
+mention can only ever reference what the agent could read. The REPL merges both
+completers with ``merge_completers``.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -28,8 +34,40 @@ _FILE_SCAN_TTL = 1.0
 # thread when the user types "@" in a directory like node_modules' sibling.
 _MAX_MENTION_FILES = 2000
 
-# Completions yielded per keystroke (prefix matches + substring matches together).
+# Completions yielded per keystroke.
 _MAX_MENTION_RESULTS = 32
+
+# The mention fragment: everything from the "@" up to the next whitespace. Used both
+# to extract the fragment from the buffer and as the WordCompleter word pattern.
+_FRAGMENT_PATTERN = re.compile(r"[^\s@]+")
+
+# Characters that, immediately before the "@", keep it from triggering. "@user@host"
+# or "cost@100" are not file mentions. (kimi-cli's _TRIGGER_GUARDS.)
+_TRIGGER_GUARDS = frozenset((".", "-", "_", "`", "'", '"', ":", "@", "#", "~"))
+
+# Path fragments shorter than this (with no "/") only get top-level entries: a deep
+# scan for "@a" is wasted work and floods the menu with irrelevant paths.
+_TOP_LEVEL_MAX_QUERY = 3
+
+
+def _extract_fragment(text: str) -> str | None:
+    """The mention fragment in ``text`` (after the last "@"), or None when not a mention.
+
+    Rules (kimi-cli's): the last "@" starts a fragment unless the character right
+    before it is alphanumeric or a guard character (email / identifier protection);
+    the fragment itself must not contain whitespace.
+    """
+    index = text.rfind("@")
+    if index == -1:
+        return None
+    if index > 0:
+        prev = text[index - 1]
+        if prev.isalnum() or prev in _TRIGGER_GUARDS:
+            return None
+    fragment = text[index + 1 :]
+    if any(ch.isspace() for ch in fragment):
+        return None
+    return fragment
 
 
 class SlashCompleter(Completer):
@@ -68,14 +106,21 @@ class SlashCompleter(Completer):
 class FileMentionCompleter(Completer):
     """Complete file paths after an ``@`` mention, e.g. ``read @agent_code/ma``.
 
-    Trigger: the word at the cursor starts with ``@`` (mid-line mentions count).
-    Completion text inserts the relative path (directories keep a trailing ``/``);
-    the display shows only the basename, meta shows the full relative path.
+    Matching is kimi-cli-style **subsequence fuzzy**: "agcomp" finds
+    ``agent_code/ui/completer.py`` ("ag"..."comp" in order), with the matched
+    characters highlighted in the menu. Candidates are re-ranked after matching
+    (basename-prefix > basename-substring > path-subsequence, stable within a tier)
+    so likely intents float to the top.
 
-    The scan respects ``should_skip`` (skip dirs + .gitignore), so git-ignored and
-    vendored paths never surface as mentions -- the same visibility the agent's own
-    read tools have. Scans are TTL-cached because completion runs on the UI thread
-    for every keystroke of the mention.
+    Two scan depths (kimi-cli's top/deep split): a short fragment without "/" only
+    lists top-level entries (one ``iterdir``, a few ms), so the first keystroke is
+    instant and the menu stays readable; longer fragments run the full pruned walk.
+    Both honor ``SkipPolicy`` -- git-ignored and vendored paths never surface.
+
+    Guards: an "@" preceded by an identifier character never triggers (emails), a
+    fragment containing whitespace never triggers, and once the fragment already
+    names an existing file completion stops (typing "@src/main.py " must not keep
+    offering menu noise around the finished mention).
     """
 
     def __init__(self, cwd: Path, policy: SkipPolicy | None = None) -> None:
@@ -83,11 +128,35 @@ class FileMentionCompleter(Completer):
         self._policy = policy
         self._cache_at: float = -_FILE_SCAN_TTL
         self._files: list[str] = []
+        self._top_cache_at: float = -_FILE_SCAN_TTL
+        self._top_files: list[str] = []
 
     def _policy_or_default(self) -> SkipPolicy:
         if self._policy is None:
             self._policy = SkipPolicy.default(gitignore=load_gitignore(self._cwd))
         return self._policy
+
+    def _scan_top(self) -> list[str]:
+        """Immediate children of cwd only (the "@" / "@a" case): one iterdir."""
+        now = time.monotonic()
+        if now - self._top_cache_at < _FILE_SCAN_TTL:
+            return self._top_files
+        self._top_cache_at = now
+
+        policy = self._policy_or_default()
+        entries: list[str] = []
+        try:
+            for entry in sorted(self._cwd.iterdir(), key=lambda p: p.name):
+                rel = Path(entry.name)
+                if should_skip(rel, policy):
+                    continue
+                entries.append(entry.name + ("/" if entry.is_dir() else ""))
+                if len(entries) >= _MAX_MENTION_FILES:
+                    break
+        except OSError:
+            return self._top_files
+        self._top_files = entries
+        return self._top_files
 
     def _scan(self) -> list[str]:
         """Relative paths of cwd files/dirs, sorted dirs-first (stable for the menu).
@@ -132,33 +201,68 @@ class FileMentionCompleter(Completer):
         self._files = sorted(found, key=lambda p: (not p.endswith("/"), p.casefold()))
         return self._files
 
-    def get_completions(self, document: Document, complete_event: Any) -> Any:
-        # The mention token is the last whitespace-delimited word before the cursor;
-        # this completer engages only when it starts with "@". (get_word_before_cursor
-        # would do, but the raw split also handles "@" alone as its own word.)
-        words = document.text_before_cursor.split()
-        token = words[-1] if words else ""
-        if not token.startswith("@"):
+    def _candidates(self, fragment: str) -> list[str]:
+        """Candidate paths for one fragment: top-level for short queries, full walk otherwise."""
+        if "/" not in fragment and len(fragment) < _TOP_LEVEL_MAX_QUERY:
+            return self._scan_top()
+        return self._scan()
+
+    @staticmethod
+    def _subsequence_ranks(fragment: str, path: str) -> tuple[int, int, int] | None:
+        """Rank a path against the fragment, or None when it is not a fuzzy match.
+
+        Returns ``(tier, first_index, depth)``: tier 0 = basename starts with the
+        fragment, 1 = all fragment chars in order inside the basename, 2 =
+        subsequence anywhere in the path. ``first_index`` breaks ties by earliest
+        match (FuzzyCompleter's "closest to the left" rule), ``depth`` by path
+        depth (``a/main.py`` outranks ``a/b/c/main.py`` when both match equally).
+        """
+        frag = fragment.casefold()
+        lower = path.casefold()
+        base = path.rstrip("/").rsplit("/", 1)[-1].casefold()
+        depth = path.count("/")
+
+        if base.startswith(frag):
+            return (0, 0, depth)
+        if frag in base:
+            return (1, base.index(frag), depth)
+
+        # Plain subsequence over the whole path (kimi's FuzzyCompleter semantics:
+        # all fragment characters in order, greedy-earliest).
+        pos = lower.find(frag[0])
+        if pos == -1:
+            return None
+        i = 0
+        for char in lower:
+            if char == frag[i]:
+                i += 1
+                if i == len(frag):
+                    return (2, pos, depth)
+        return None
+
+    def get_completions(self, document: Document, complete_event: Any) -> Iterable[Completion]:
+        fragment = _extract_fragment(document.text_before_cursor)
+        if fragment is None:
+            return
+        # The fragment already names an existing file: the mention is complete,
+        # stop offering matches (kimi-cli's _is_completed_file short-circuit).
+        candidate = fragment.rstrip("/")
+        if candidate and (self._cwd / candidate).is_file():
             return
 
-        query = token[1:].replace("\\", "/").casefold()
-        files = self._scan()
-        if "/" in query:
-            # A path with a separator is already specific: match against the whole
-            # relative path so "@ui/com" can complete to "agent_code/ui/completer.py".
-            candidates = [f for f in files if query in f.casefold()]
-        else:
-            basename_hits = [f for f in files if query in f.rsplit("/", 1)[-1].casefold()]
-            path_hits = [f for f in files if query in f.casefold() and f not in basename_hits]
-            # Two-tier ranking: basename matches first (what the user most likely
-            # means), whole-path matches after -- mirroring SlashCompleter's tiers.
-            candidates = basename_hits + path_hits
+        files = self._candidates(fragment)
+        ranked: list[tuple[tuple[int, int], str]] = []
+        for path in files:
+            ranks = self._subsequence_ranks(fragment, path)
+            if ranks is not None:
+                ranked.append((ranks, path))
+        ranked.sort(key=lambda item: item[0])
 
-        for path in candidates[:_MAX_MENTION_RESULTS]:
+        for _, path in ranked[:_MAX_MENTION_RESULTS]:
             display = path.rsplit("/", 1)[-1]
             yield Completion(
                 path,
-                start_position=-len(token),
+                start_position=-1 - len(fragment),  # from the "@" onward
                 display=display,
                 display_meta=path,
             )
