@@ -8,15 +8,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+The dev loop is wrapped in a `justfile`. `just check` is the gate: it must be green
+before a change counts as done.
+
 ```sh
-uv sync --dev           # install deps + pytest dev group (uv, Python 3.12)
+just                    # list the recipes
+just check              # lint + types + tests (the gate)
+just lint               # ruff check agent_code tests (line-length 100, double quotes)
+just types              # pyright + ty (both must pass)
+just types-pyright      # pyright only (config: pyrightconfig.json, standard mode)
+just types-ty           # ty only, Astral's checker (config: pyproject.toml [tool.ty])
+just types-pyright agent_code/ui   # one checker over a subtree
+just test               # full test suite
+just test tests/test_hooks.py -k test_name   # single test
+just fix                # ruff --fix + ruff format (writes files)
+just fmt-check          # formatting drift only (not part of check yet)
+just build              # build sdist/wheel via hatchling
+```
+
+Underlying commands, when `just` is not available:
+
+```sh
+uv sync --dev           # install deps + pytest/ruff/pyright/ty dev group (uv, Python 3.12)
 uv run agent-code "hi"  # one-shot run (module entry: python -m agent_code)
 uv run agent-code       # scrollback+Live interactive REPL
 uv run agent-code -c    # resume latest session
 uv run agent-code --provider mock "hi"   # deterministic fake model, no API key needed
 uv run pytest           # full test suite
-uv run pytest tests/test_hooks.py -k test_name   # single test
-uvx ruff check agent_code tests    # lint (line-length 100, double quotes)
+uv run ruff check agent_code tests    # lint
+uv run pyright          # type check, strict-ish (agent_code + tests)
+uv run ty check         # type check, Astral preview (agent_code + tests)
 uv build                # build sdist/wheel via hatchling
 ```
 
@@ -49,7 +70,7 @@ Protocol constraints that are easy to break:
 ### Tools (`tools/` package)
 
 Tools live in a package: `tools/core.py` defines the `Tool` dataclass `(name, description, run fn, JSON-schema parameters, is_read_only)`, plus `ToolContext` and `ToolRegistry` (maps name → Tool). Implementation and registration metadata are co-located in per-domain sub-modules, each exposing `tools() -> list[Tool]`:
-`read.py` (read_file, list_files, glob, grep, project_tree), `edit.py` (file_write, file_edit), `shell.py` (bash, git_status, git_diff), `memory.py` (memory_write, memory_recall), `todo.py` (todo_write, todo_read), `plan.py` (enter_plan_mode, exit_plan_mode), `misc.py` (echo, system_date, ask_user_question), `web.py` (web_fetch, web_search — implemented and referenced by `permissions.py`/`tool_execution.py`, but **not** registered by `default_tools()` yet). `tools/registry.py`'s `default_tools()` aggregates the modules above plus the cron tools (from `cron_tools.py`, imported lazily inside the function to break the `cron_tools → tools` cycle). New tools go into the matching sub-module (or a new one) and usually to the permission tables in `permissions.py`.
+`read.py` (read_file, list_files, glob, grep, project_tree), `edit.py` (file_write, file_edit), `shell.py` (bash, git_status, git_diff), `memory.py` (memory_write, memory_recall), `todo.py` (todo_write, todo_read), `plan.py` (enter_plan_mode, exit_plan_mode), `misc.py` (echo, system_date, ask_user_question), `web.py` (web_fetch, web_search — implemented and registered by `default_tools()`; permission-wise they live in `_ASK_TOOLS`, so every web_* call asks the user first). `tools/registry.py`'s `default_tools()` aggregates the modules above plus the cron tools (from `cron_tools.py`, imported lazily inside the function to break the `cron_tools → tools` cycle). New tools go into the matching sub-module (or a new one) and usually to the permission tables in `permissions.py`.
 
 Per-call execution lives in `tool_execution.py`, not `agent.py`: `execute_one_tool_call()` = permission decision → PreToolUse hooks → edit preflight → ask-mode confirmation → `tools.run()` → PostToolUse hooks. Two special cases:
 - `ask_user_question` never reaches its registered `run`: `_handle_ask()` answers it with `prompt_single_choice` and returns that answer as the tool_result.
@@ -98,3 +119,9 @@ The REPL is a **scrollback + Live** design implemented in `agent_code/ui/`: `she
 ## Testing & style
 
 Tests are pytest, named `test_*.py` mirroring the package (see `tests/`). Prefer pure-function tests with `tmp_path` and mock providers over network or real user files — `MockProvider` plus an explicit `Wire` with a recording sink make `run_agent` testable without a network. Keep the `.agent/` (sessions, memory, cron, history, bg output) and `.bg/` directories out of version control. Style follows `AGENTS.md`: type hints + `from __future__ import annotations`, `pathlib.Path`, Rich console for CLI output (not `print()`), Conventional Commit messages. Comments, docstrings and user-facing strings are all in English (CJK is kept only in tests that exercise non-ASCII or GBK handling) — keep new code consistent.
+
+Types are part of the gate: `just types` runs **both** checkers over `agent_code` + `tests` and both must stay at zero errors — pyright (standard mode) and ty (Astral's preview checker). pyright is the stricter of the two, so a ty-clean tree is not enough; if they ever disagree, satisfy pyright's reading (and file ty's gap upstream rather than silencing it). Fix a complaint by narrowing the real type — `assert isinstance(x, Dimension)`, a local variable, `getattr` for attributes prompt_toolkit only declares on concrete containers — rather than reaching for `# type: ignore`. Two traps worth knowing:
+
+- fragment lists are `output.StyleAndText` (`tuple[str, str]`), not prompt_toolkit's `StyleAndTextTuples`, because `list` is invariant; wrap in `FormattedText` only at the pt control boundary.
+- after `assert obj.prop is None`, pyright keeps `prop` narrowed for the rest of the scope; read a property through a local variable or a helper when a later access needs its real type.
+- a method named after a builtin (`ToolRegistry.list`) shadows it inside the class body, so later annotations of `list[...]` in that class resolve to the method; use a module-level alias (`ToolList`) there.

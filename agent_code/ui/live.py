@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import re
 
-from prompt_toolkit.formatted_text import FormattedText
-
+from ..output import StyleAndText
 from ..wire import CommandPreview, DiffPreview, WireEvent
 
 # Streaming tail lines shown in the Live area -- the whole paragraph is committed to
@@ -105,14 +104,14 @@ class LiveArea:
         self.stream_pending = ""
         self.open_paragraph = []
 
-    def formatted(self, columns: int, now: float) -> FormattedText:
+    def formatted(self, columns: int, now: float) -> list[StyleAndText]:
         """Render the Live window's formatted text (uncommitted content only).
 
         The first fragment is a blank line, then the spinner. This blank is the exact
         gap between the submitted prompt (scrollback) and the spinner (Live); the prompt
         echo itself ends with a single newline, not a blank line.
         """
-        out: list[tuple[str, str]] = []
+        out: list[StyleAndText] = []
         if self.turn_active:
             # The prompt echo ends with one newline; this leading newline is the single
             # blank separator line between that prompt and the spinner.
@@ -131,7 +130,7 @@ class LiveArea:
             out.append(("", tail[:columns] + "\n"))
         if self.stream_pending:
             out.append(("", self.stream_pending[:columns]))
-        return FormattedText(out)
+        return out
 
 
 def preview_lines(event: WireEvent) -> list[str] | None:

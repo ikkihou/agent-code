@@ -110,6 +110,7 @@ def run_agent(  ## AGENT LOOP
     )
 
     ## Load the conversation history
+    messages: list[dict[str, Any]]
     if session and session.history:
         messages = list(session.history)
         messages.append({"role": "user", "content": prompt})

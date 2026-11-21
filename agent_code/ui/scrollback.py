@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import shutil
 import sys
+from collections.abc import Iterable
 from io import StringIO
 
 from prompt_toolkit.application.current import get_app_or_none, get_app_session
-from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.utils import get_cwidth
 from rich.console import Console
 from rich.text import Text
 
-from ..output import OutputChunk, chunk_fragments
+from ..output import OutputChunk, StyleAndText, chunk_fragments
 
 _ansi_console = Console(
     file=StringIO(),
@@ -158,7 +158,7 @@ def _terminal_columns() -> int:
         return shutil.get_terminal_size((80, 24)).columns
 
 
-def _pad_full_width(fragments: StyleAndTextTuples, columns: int) -> list[tuple[str, str]]:
+def _pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[StyleAndText]:
     """Pad each *visual line* to ``columns`` display cells.
 
     Width is accumulated across all fragments (a line may be split into several
@@ -175,7 +175,7 @@ def _pad_full_width(fragments: StyleAndTextTuples, columns: int) -> list[tuple[s
     if columns <= 0:
         return list(fragments)
 
-    padded: list[tuple[str, str]] = []
+    padded: list[StyleAndText] = []
     line_width = 0
     line_has_text = False
     line_style = ""
@@ -222,7 +222,7 @@ def _pad_full_width(fragments: StyleAndTextTuples, columns: int) -> list[tuple[s
     return padded
 
 
-def _chunk_fragments(chunk: OutputChunk) -> StyleAndTextTuples:
+def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
     """OutputChunk -> (style string, text) fragments.
 
     Styles are Rich vocabulary by default. Fragments stored by older versions use

@@ -24,7 +24,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import PromptSession
 
-from ..output import OutputChunk
+from ..output import OutputChunk, StyleAndText
 from ..runtime import PromptFallback, PromptRequest, RuntimeState
 from ..slash import SlashContext, SlashRegistry, dispatch_slash
 from ..wire import (
@@ -336,7 +336,10 @@ class InteractiveShell:
         scrollback (if anything): the caller commits it once the prompt is settled, so
         nothing can land between the question and its answer.
         """
-        future: asyncio.Future[Any] = self._loop.create_future()  # type: ignore[union-attr]
+        loop = self._loop
+        if loop is None:  # only reachable if a tool asks before the REPL loop starts
+            raise RuntimeError("ask routed before the REPL event loop started")
+        future: asyncio.Future[Any] = loop.create_future()
         self._pending_answer_chunk = None
         self._pending_prompt = {"request": request, "future": future}
         self._live.pending_preview = render_prompt_request(request).rstrip().splitlines()
@@ -362,10 +365,18 @@ class InteractiveShell:
     def _terminal_asker(self, func: PromptFallback | PromptRequest) -> Any:
         """Asking entry point on the worker thread: structured requests go through the in-app
         asker, everything else falls back to run_in_terminal."""
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("asker used before the REPL event loop started")
         if isinstance(func, dict):
-            return asyncio.run_coroutine_threadsafe(self._ask_in_app(func), self._loop).result()
-        # run_in_terminal already returns a coroutine, no need to wrap it in another async fn.
-        return asyncio.run_coroutine_threadsafe(run_in_terminal(func), self._loop).result()
+            return asyncio.run_coroutine_threadsafe(self._ask_in_app(func), loop).result()
+
+        # run_in_terminal returns an arbitrary awaitable, which run_coroutine_threadsafe
+        # does not accept: wrap it so the caller gets a coroutine it can schedule.
+        async def run_fallback() -> None:
+            await run_in_terminal(func)
+
+        return asyncio.run_coroutine_threadsafe(run_fallback(), loop).result()
 
     # ---- input submission (UI thread) ---------------------------------------
 
@@ -574,7 +585,7 @@ class InteractiveShell:
 
     # ---- Live area rendering (own window, above the input frame) --------------
 
-    def _prompt_message(self) -> FormattedText:
+    def _prompt_message(self) -> list[StyleAndText]:
         """Input-box prompt: the pending question when asking, ``> `` otherwise.
 
         Putting the question IN the message puts the cursor right after it -- the
@@ -582,14 +593,14 @@ class InteractiveShell:
         """
         if self._pending_prompt is not None:
             request: PromptRequest = self._pending_prompt["request"]
-            return FormattedText([("class:prompt", prompt_for_request(request))])
-        return FormattedText([("class:prompt", "> ")])
+            return [("class:prompt", prompt_for_request(request))]
+        return [("class:prompt", "> ")]
 
     def _install_live_window(self, session: PromptSession[str]) -> None:
         """Put the Live area in its own window right above the input frame."""
         install_live_area_window(session, self._render_live)
 
-    def _render_live(self) -> FormattedText:
+    def _render_live(self) -> list[StyleAndText]:
         """Render the Live area: spinner / pending question body / streaming tail.
 
         Rendered as its own layout window above the input frame, NOT as the prompt
@@ -606,7 +617,7 @@ class InteractiveShell:
         app = get_app_or_none()
         if app is not None:
             columns = app.output.get_size().columns
-        fragments: list[tuple[str, str]] = []
+        fragments: list[StyleAndText] = []
         # While a question is pending, its content (options / diff / command / plan
         # panel) was parked in live.pending_preview by _ask_in_app and renders below
         # via live.formatted(); the question line itself is the prompt message. No
@@ -619,7 +630,7 @@ class InteractiveShell:
             fragments.pop()
         if fragments:
             fragments[-1] = (fragments[-1][0], fragments[-1][1].rstrip("\n"))
-        return FormattedText(fragments)
+        return fragments
 
     def run(self) -> None:
         asyncio.run(self._run_async())

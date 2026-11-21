@@ -66,6 +66,21 @@ def _collecting_wire() -> tuple[Wire, _RecordingSink]:
     return wire, sink
 
 
+def _no_slash_context() -> SlashContext:
+    """Placeholder slash factory: the tests that install it never dispatch a slash command."""
+    raise AssertionError("slash context must not be used here")
+
+
+def _completion_texts(complete_state: Any) -> list[str]:
+    """Completion texts offered by a buffer's completion state.
+
+    Kept in its own function because pyright narrows ``buffer.complete_state`` to
+    ``None`` for the rest of a scope after an ``assert ... is None``, which would make a
+    later read of the property look like ``Never``.
+    """
+    return [completion.text for completion in complete_state.completions]
+
+
 class _FragmentedProvider:
     def __init__(self, chunks: list[str], final_text: str) -> None:
         self.chunks = chunks
@@ -181,9 +196,7 @@ def test_run_agent_retries_empty_completion_once(tmp_path: Path) -> None:
     )
 
     assert result.final == "hello world"
-    assert any(
-        "continue: empty response" in e.text for e in sink.events if isinstance(e, Line)
-    )
+    assert any("continue: empty response" in e.text for e in sink.events if isinstance(e, Line))
 
 
 def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> None:
@@ -208,9 +221,7 @@ def test_run_agent_marks_final_empty_after_retries_exhausted(tmp_path: Path) -> 
     )
 
     assert result.final == ""
-    assert any(
-        "final: (empty response)" in e.text for e in sink.events if isinstance(e, Line)
-    )
+    assert any("final: (empty response)" in e.text for e in sink.events if isinstance(e, Line))
 
 
 def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None:
@@ -234,9 +245,7 @@ def test_run_agent_continues_after_max_tokens_truncation(tmp_path: Path) -> None
     )
 
     assert result.final == "The rest of the ending"
-    assert any(
-        "continue: max_tokens" in e.text for e in sink.events if isinstance(e, Line)
-    )
+    assert any("continue: max_tokens" in e.text for e in sink.events if isinstance(e, Line))
 
 
 def test_run_agent_recovers_final_from_streamed_text(tmp_path: Path) -> None:
@@ -345,9 +354,7 @@ def test_fragment_styles_are_rich_vocabulary_and_parseable() -> None:
         if not style:
             continue
         Style.parse(style)  # raises on anything Rich cannot consume
-        assert not any(
-            token.startswith(("ansi", "bg:", "fg:")) for token in style.split()
-        ), style
+        assert not any(token.startswith(("ansi", "bg:", "fg:")) for token in style.split()), style
 
     # Headings and links legitimately use underline; the regression is that code
     # tokens acquire it. Check the code fence content specifically.
@@ -411,7 +418,7 @@ def _shell_for_batch() -> Any:
     def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
-    return InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+    return InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
 
 
 def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
@@ -420,9 +427,7 @@ def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
     their own preamble."""
     shell = _shell_for_batch()
 
-    first = shell._handle_batch(
-        [TurnStarted(), TextDelta("Let me check git first.")]
-    )
+    first = shell._handle_batch([TurnStarted(), TextDelta("Let me check git first.")])
     assert first == []  # still the open paragraph in the Live area
 
     second = shell._handle_batch(
@@ -728,10 +733,16 @@ def test_transcript_full_width_inference_covers_both_vocabularies(tmp_path: Path
 
     session = Session.create(tmp_path)
     records = [
-        {"text": "\n\n> old\n", "format": "plain",
-         "fragments": [["", "\n\n"], ["bold ansiwhite bg:#444444", "> old"], ["", "\n"]]},
-        {"text": "\n\n> new\n", "format": "plain",
-         "fragments": [["", "\n\n"], ["bold white on #444444", "> new"], ["", "\n"]]},
+        {
+            "text": "\n\n> old\n",
+            "format": "plain",
+            "fragments": [["", "\n\n"], ["bold ansiwhite bg:#444444", "> old"], ["", "\n"]],
+        },
+        {
+            "text": "\n\n> new\n",
+            "format": "plain",
+            "fragments": [["", "\n\n"], ["bold white on #444444", "> new"], ["", "\n"]],
+        },
         {"text": "plain\n", "format": "plain"},
     ]
     with session.transcript_path.open("a", encoding="utf-8") as handle:
@@ -741,8 +752,8 @@ def test_transcript_full_width_inference_covers_both_vocabularies(tmp_path: Path
     resumed = Session.load_by_id(tmp_path, session.session_id)
     assert resumed is not None
     chunks = resumed.transcript_chunks
-    assert chunks[0].full_width is True   # legacy pt vocabulary
-    assert chunks[1].full_width is True   # current Rich vocabulary
+    assert chunks[0].full_width is True  # legacy pt vocabulary
+    assert chunks[1].full_width is True  # current Rich vocabulary
     assert chunks[2].full_width is False  # no prompt background, no inference
 
 
@@ -792,13 +803,7 @@ def test_prompt_request_helpers_render_detail_field() -> None:
         "default": False,
         "detail": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-hello\n+hi",
     }
-    assert render_prompt_request(request) == (
-        "--- a/a.py\n"
-        "+++ b/a.py\n"
-        "@@ -1 +1 @@\n"
-        "-hello\n"
-        "+hi\n"
-    )
+    assert render_prompt_request(request) == ("--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-hello\n+hi\n")
     # The message (question line) must NOT leak into the content: it renders once,
     # in the prompt message.
     assert "Apply this edit" not in render_prompt_request(request)
@@ -869,9 +874,7 @@ def test_sessions_slash_with_records_returns_text(tmp_path: Path) -> None:
 
 
 def test_slash_completer_suggests_command_prefixes() -> None:
-    completions = list(
-        SlashCompleter().get_completions(Document("/he"), CompleteEvent())
-    )
+    completions = list(SlashCompleter().get_completions(Document("/he"), CompleteEvent()))
 
     assert [completion.text for completion in completions] == ["/help"]
     assert completions[0].start_position == -3
@@ -920,7 +923,7 @@ def test_backspace_reopens_slash_completion() -> None:
         def noop(*args: Any, **kwargs: Any) -> None:
             return None
 
-        shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+        shell = InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
         kb = build_key_bindings(state, shell._busy)
         with create_pipe_input() as pipe:
             session = PromptSession(
@@ -945,9 +948,7 @@ def test_backspace_reopens_slash_completion() -> None:
                 await asyncio.sleep(0.02)
             complete_state = session.default_buffer.complete_state
             assert complete_state is not None
-            assert [completion.text for completion in complete_state.completions] == [
-                "/help"
-            ]
+            assert _completion_texts(complete_state) == ["/help"]
 
             pipe.send_text("\r")
             await asyncio.wait_for(task, timeout=2)
@@ -969,7 +970,7 @@ def test_shell_render_live_includes_pending_prompt() -> None:
     from agent_code.ui.shell import InteractiveShell
 
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-    shell = InteractiveShell(state, run_turn=lambda *a: None, make_slash_context=lambda: None)
+    shell = InteractiveShell(state, run_turn=lambda *a: None, make_slash_context=_no_slash_context)
     shell._pending_prompt = {
         "request": {"type": "confirm", "message": "Run this command?", "default": False},
         "future": None,
@@ -994,7 +995,7 @@ def test_shell_submit_text_routes_pending_choice_answer() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
+    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
     shell._commit_now = lambda text: None  # never touch the real terminal
 
     loop = asyncio.new_event_loop()
@@ -1021,7 +1022,7 @@ def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
+    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
     shell._commit_now = lambda text: None
 
     loop = asyncio.new_event_loop()
@@ -1153,7 +1154,7 @@ def test_multiline_key_bindings_insert_newline_and_enter_submits() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
-    shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+    shell = InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
     kb = build_key_bindings(state, shell._busy)
 
     def binding_for(*keys: Any) -> Any:
@@ -1293,7 +1294,10 @@ def test_menu_wrapper_keeps_a_gap_below_only() -> None:
     wrapped_menu, bottom_gap = wrapper.content.children
     assert wrapped_menu is menu
     assert isinstance(bottom_gap, Window)
-    assert bottom_gap.height.min == 1 and bottom_gap.height.max == 1
+    assert bottom_gap.height is not None
+    gap_height = bottom_gap.height
+    assert isinstance(gap_height, Dimension)
+    assert gap_height.min == 1 and gap_height.max == 1
     assert wrapper.preferred_height(80, 20).preferred == 4
 
     # Closing the menu collapses the wrapper (and therefore the reserved rows).
@@ -1306,12 +1310,18 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
     import asyncio
 
     from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.output import DummyOutput
     from prompt_toolkit.shortcuts import PromptSession
 
     from agent_code.ui.completer import SlashCompleter
     from agent_code.ui.keys import build_key_bindings
-    from agent_code.ui.layout import _frame_branch_index, relocate_completion_menus
+    from agent_code.ui.layout import (
+        _children,
+        _frame_branch_index,
+        relocate_completion_menus,
+    )
     from agent_code.ui.shell import InteractiveShell
 
     async def check() -> None:
@@ -1320,7 +1330,7 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
         def noop(*args: Any, **kwargs: Any) -> None:
             return None
 
-        shell = InteractiveShell(state, run_turn=noop, make_slash_context=noop)
+        shell = InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
         kb = build_key_bindings(state, shell._busy)
         with create_pipe_input() as pipe:
             session = PromptSession(
@@ -1334,14 +1344,18 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
                 bottom_toolbar=lambda: " STATUS ",
             )
             relocate_completion_menus(session)
-            root = session.layout.container
-            spacer = root.children[_frame_branch_index(session) + 1]
-            assert callable(spacer.height)
+            root_children = _children(session.layout.container) or []
+            spacer = root_children[_frame_branch_index(session) + 1]
+            assert isinstance(spacer, Window)
+            spacer_height = spacer.height
+            assert callable(spacer_height)
 
             task = asyncio.create_task(session.prompt_async(show_frame=True))
             await asyncio.sleep(0.1)
             # Closed: no rows reserved.
-            assert spacer.height().min == 0
+            closed = spacer_height()
+            assert isinstance(closed, Dimension)
+            assert closed.min == 0
 
             pipe.send_text("/")
             for _ in range(40):
@@ -1350,7 +1364,9 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
                 await asyncio.sleep(0.02)
             await asyncio.sleep(0.1)
             # Open: the spacer takes the menu's rows (7 slash commands).
-            assert spacer.height().min > 0
+            opened = spacer_height()
+            assert isinstance(opened, Dimension)
+            assert opened.min > 0
 
             pipe.send_text("\r")
             await asyncio.wait_for(task, timeout=2)
@@ -1361,8 +1377,9 @@ def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
 def test_strip_frame_side_borders_removes_vertical_bars() -> None:
     """Only the horizontal rules remain: both side-border windows collapse to width 0,
     while the body and the input buffer window stay untouched."""
-    from prompt_toolkit.layout.containers import VSplit
+    from prompt_toolkit.layout.containers import VSplit, Window
     from prompt_toolkit.layout.controls import BufferControl
+    from prompt_toolkit.layout.dimension import Dimension
 
     from agent_code.ui.layout import strip_frame_side_borders
 
@@ -1370,11 +1387,14 @@ def test_strip_frame_side_borders_removes_vertical_bars() -> None:
     middle = _frame_split(session).children[1]
     assert isinstance(middle, VSplit)
     left, body, right = middle.children
+    assert isinstance(left, Window) and isinstance(right, Window)
     assert left.width != 0 and right.width != 0  # side borders visible before
 
     strip_frame_side_borders(session)
 
     left, body_after, right = middle.children
+    assert isinstance(left, Window) and isinstance(right, Window)
+    assert isinstance(left.width, Dimension) and isinstance(right.width, Dimension)
     assert left.width.preferred == 0 and left.width.max == 0
     assert right.width.preferred == 0 and right.width.max == 0
     # The body (and therefore the input buffer window) is the same object as before.
@@ -1408,7 +1428,7 @@ def test_render_live_excludes_prompt_marker_and_live_content() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
+    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
     shell._live.open_paragraph = ["streamed line"]
     shell._live.stream_pending = "partial"
 
@@ -1430,7 +1450,7 @@ def test_render_live_is_empty_when_idle() -> None:
     def noop(*args: Any, **kwargs: Any) -> None:
         return None
 
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=noop)
+    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
 
     assert shell._render_live() == []
 

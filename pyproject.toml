@@ -42,4 +42,18 @@ line-length = 100
 quote-style = "double"
 
 [dependency-groups]
-dev = ["pyright>=1.1.414", "pytest>=9.1.0", "ruff>=0.16.0"]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.0",
+    "ruff>=0.16.0",
+    "ty>=0.0.107",
+]
+
+[tool.ty.environment]
+# Same target as pyright: the repo's requires-python pin, not whatever interpreter
+# ty happens to discover.
+python-version = "3.12"
+
+[tool.ty.src]
+# Only first-party code: .venv, .agent/ and .bg/ stay out of the check.
+include = ["agent_code", "tests"]

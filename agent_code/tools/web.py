@@ -66,7 +66,7 @@ def _resolve_host(host: str) -> list[str]:
         except Exception as exc:  # surface any lookup failure as a clear ValueError
             errors.append(exc)
             return
-        addresses.extend(info[4][0] for info in infos)
+        addresses.extend(str(info[4][0]) for info in infos)
 
     thread = threading.Thread(target=_lookup, daemon=True)
     thread.start()

@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterator
 
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.filters import to_filter
-from prompt_toolkit.formatted_text import AnyFormattedText
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.layout.containers import (
     ConditionalContainer,
     Float,
@@ -35,6 +35,8 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu, MultiColumnCompletionsMenu
 from prompt_toolkit.shortcuts import PromptSession
 from prompt_toolkit.widgets.base import Border
+
+from ..output import StyleAndText
 
 # Completion menus are Floats, so they do not need rows inside the input frame. This
 # is only the upper bound used when measuring the menu's own preferred height.
@@ -232,16 +234,27 @@ def relocate_completion_menus(session: PromptSession[str]) -> None:
         _install_menu_spacer(session, menu_content)
 
 
+def _children(container: Any) -> list[Any] | None:
+    """A container's child list, or None when it has none.
+
+    ``prompt_toolkit`` declares ``children`` only on its concrete split containers,
+    while this module reshapes the layout tree by shape (any ``Container`` may turn
+    out to be an ``HSplit``/``VSplit``), so the attribute is read defensively.
+    """
+    children = getattr(container, "children", None)
+    return children if isinstance(children, list) else None
+
+
 def _frame_branch_index(session: PromptSession[str]) -> int:
     """Index of the root child that wraps the input frame (default: append at end)."""
-    root = session.layout.container
+    root_children = _children(session.layout.container) or []
     frame_split = _find_frame_split(session)
     if frame_split is None:
-        return len(root.children)
-    for index, child in enumerate(root.children):
+        return len(root_children)
+    for index, child in enumerate(root_children):
         if any(node is frame_split for node in _iter_containers(child)):
             return index
-    return len(root.children)
+    return len(root_children)
 
 
 def _install_menu_spacer(session: PromptSession[str], menu_content: Any) -> None:
@@ -256,15 +269,15 @@ def _install_menu_spacer(session: PromptSession[str], menu_content: Any) -> None
     blank rows around it), i.e. exactly the rows the Float covers, so the status bar keeps
     the menu's own bottom gap.
     """
-    root = session.layout.container
-    if not hasattr(root, "children"):
+    root_children = _children(session.layout.container)
+    if root_children is None:
         return
 
     def height() -> Dimension:
         rows = _completion_menu_height(menu_content)
         return Dimension(min=rows, max=rows)
 
-    root.children.insert(
+    root_children.insert(
         _frame_branch_index(session) + 1,
         Window(
             content=FormattedTextControl(text=""),
@@ -296,13 +309,16 @@ def strip_frame_side_borders(session: PromptSession[str]) -> None:
     split = _find_frame_split(session)
     if split is None:
         return  # unexpected shape (pt upgrade?): fail soft, keep side borders
-    left, _body, right = split.children[1].children
+    middle_children = _children(split.children[1])
+    if middle_children is None or len(middle_children) != 3:
+        return  # unexpected shape (pt upgrade?): fail soft, keep side borders
+    left, _body, right = middle_children
     left.width = Dimension.exact(0)
     right.width = Dimension.exact(0)
 
 
 def install_live_area_window(
-    session: PromptSession[str], get_text: Callable[[], AnyFormattedText]
+    session: PromptSession[str], get_text: Callable[[], list[StyleAndText]]
 ) -> Window:
     """Insert a Live-area window directly above the input frame.
 
@@ -317,21 +333,24 @@ def install_live_area_window(
     while a turn streams.
     """
     live_window = Window(
-        FormattedTextControl(text=get_text),
+        # FormattedText wraps the fragment list so the control's AnyFormattedText
+        # contract is satisfied (a bare list[tuple[str, str]] is not a StyleAndTextTuples
+        # because of list invariance).
+        FormattedTextControl(text=lambda: FormattedText(get_text())),
         height=Dimension(min=0),
         dont_extend_height=True,
         wrap_lines=False,
     )
-    root = session.layout.container
+    root_children = _children(session.layout.container) or []
     frame_split = _find_frame_split(session)
-    insert_at = len(root.children)
+    insert_at = len(root_children)
     if frame_split is not None:
         # Place the Live area immediately above the root child that wraps the frame.
-        for index, child in enumerate(root.children):
+        for index, child in enumerate(root_children):
             if any(node is frame_split for node in _iter_containers(child)):
                 insert_at = index
                 break
-    root.children.insert(insert_at, live_window)
+    root_children.insert(insert_at, live_window)
     return live_window
 
 

@@ -157,7 +157,7 @@ def test_mention_caches_scan(tmp_path: Path) -> None:
 
 
 def test_mention_short_query_lists_top_level_only(tmp_path: Path) -> None:
-    """"@a" (short, no slash) lists top-level entries: instant first keystroke."""
+    """ "@a" (short, no slash) lists top-level entries: instant first keystroke."""
     root = _make_tree(tmp_path)
     (root / "src" / "aardvark.txt").write_text("x\n", encoding="utf-8")
     completer = FileMentionCompleter(root)

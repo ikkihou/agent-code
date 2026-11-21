@@ -184,8 +184,10 @@ class FileMentionCompleter(Completer):
             except OSError:
                 continue  # unreadable directory: skip it, keep scanning the rest
             for entry in listing:
-                name = entry.name if directory == self._cwd else (
-                    directory.relative_to(self._cwd) / entry.name
+                name = (
+                    entry.name
+                    if directory == self._cwd
+                    else (directory.relative_to(self._cwd) / entry.name)
                 )
                 rel = Path(name)
                 if should_skip(rel, policy):
@@ -251,7 +253,7 @@ class FileMentionCompleter(Completer):
             return
 
         files = self._candidates(fragment)
-        ranked: list[tuple[tuple[int, int], str]] = []
+        ranked: list[tuple[tuple[int, int, int], str]] = []
         for path in files:
             ranks = self._subsequence_ranks(fragment, path)
             if ranks is not None:

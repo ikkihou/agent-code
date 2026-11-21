@@ -18,7 +18,9 @@ def test_latest_backup_returns_newest(tmp_path: Path) -> None:
     (d / "20260101T000000.000Z").write_text("old", encoding="utf-8")
     (d / "20260102T000000.000Z").write_text("newer", encoding="utf-8")
 
-    assert latest_backup(tmp_path, Path("sub/f.txt")).name == "20260102T000000.000Z"
+    newest = latest_backup(tmp_path, Path("sub/f.txt"))
+    assert newest is not None
+    assert newest.name == "20260102T000000.000Z"
 
 
 def test_latest_backup_returns_none_without_history(tmp_path: Path) -> None:

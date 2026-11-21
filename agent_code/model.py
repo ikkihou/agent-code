@@ -64,12 +64,13 @@ class ModelStreamEvent:
 
 
 class ModelProvider(Protocol):
-    def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[Any] | None = None,
-        system: str | None = None,
-    ) -> ModelResponse: ...
+    """What the agent loop needs from a model: a streaming completion.
+
+    The loop never calls a blocking ``complete()``; concrete providers may offer one as
+    a convenience built on ``complete_stream()`` (both ``AnthropicProvider`` and
+    ``MockProvider`` do). Keeping the protocol at the streaming surface means a
+    streaming-only double is a valid provider.
+    """
 
     def complete_stream(
         self,

@@ -1,4 +1,19 @@
 {
+    "include": [
+        "agent_code",
+        "tests"
+    ],
+    "exclude": [
+        ".venv",
+        ".agent",
+        ".bg",
+        ".claude",
+        ".ruff_cache",
+        ".vscode",
+        ".pytest_cache"
+    ],
+    "typeCheckingMode": "standard",
+    "pythonVersion": "3.12",
     "venvPath": ".",
     "venv": ".venv"
 }

@@ -97,9 +97,7 @@ def test_execute_one_tool_call_bash_confirmation_sends_command_preview(tmp_path)
         _call("bash", command="echo hi"), ToolContext(cwd=tmp_path), state, reg, wire
     )
     assert block["is_error"] is False
-    assert any(
-        isinstance(e, CommandPreview) and e.command == "echo hi" for e in events
-    )
+    assert any(isinstance(e, CommandPreview) and e.command == "echo hi" for e in events)
 
 
 def test_execute_one_tool_call_edit_confirmation_sends_diff_preview(tmp_path):
@@ -120,9 +118,7 @@ def test_execute_one_tool_call_edit_confirmation_sends_diff_preview(tmp_path):
         wire,
     )
     assert block["is_error"] is False
-    assert any(
-        isinstance(e, DiffPreview) and e.path == "a.txt" and "hi" in e.new for e in events
-    )
+    assert any(isinstance(e, DiffPreview) and e.path == "a.txt" and "hi" in e.new for e in events)
 
 
 def test_execute_one_tool_call_edit_passes_diff_in_confirm_detail(tmp_path):
@@ -235,9 +231,7 @@ def test_execute_one_tool_call_edit_rejected_by_user(tmp_path):
 def test_execute_one_tool_call_bash_rejected_by_user(tmp_path):
     reg = _registry(_tool("bash"))
     state = RuntimeState(asker=lambda request: False)
-    block, _ = _run(
-        _call("bash", command="echo hi"), ToolContext(cwd=tmp_path), state, reg
-    )
+    block, _ = _run(_call("bash", command="echo hi"), ToolContext(cwd=tmp_path), state, reg)
     assert block["is_error"] is True
     assert "error: command rejected by user" in block["content"]
 
@@ -322,7 +316,6 @@ def test_cycle_permission_mode_includes_full_access():
     state = RuntimeState(permission_mode="plan")
     assert state.cycle_permission_mode() == "fullAccess"
     assert state.cycle_permission_mode() == "default"  # wraps around
-
 
 
 def test_execute_plan_boundary_calls_skips_other_tools(tmp_path):

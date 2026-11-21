@@ -200,8 +200,14 @@ def test_read_file_offset_rejects_bad_values(tmp_path) -> None:
     p.write_text("a\nb\nc\n", encoding="utf-8")
     ctx = ToolContext(cwd=tmp_path, skip_policy=SkipPolicy())
 
-    assert read_file({"path": "lines.txt", "offset": 0}, ctx) == "error: offset must be >= 1 (1-indexed)"
-    assert read_file({"path": "lines.txt", "offset": "x"}, ctx) == "error: offset/limit must be integers"
+    assert (
+        read_file({"path": "lines.txt", "offset": 0}, ctx)
+        == "error: offset must be >= 1 (1-indexed)"
+    )
+    assert (
+        read_file({"path": "lines.txt", "offset": "x"}, ctx)
+        == "error: offset/limit must be integers"
+    )
     assert read_file({"path": "lines.txt", "offset": 99}, ctx) == ""
 
 

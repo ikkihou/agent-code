@@ -127,7 +127,7 @@ class Session:
         return cls(cwd=cwd, session_id=sid, file_path=file_path, resumed=False)
 
     @classmethod
-    def load_latest(cls, cwd: Path) -> "Session" | None:
+    def load_latest(cls, cwd: Path) -> "Session | None":
         sessions_dir = _session_dir(cwd)
         jsonl_files = [path for path in sessions_dir.glob("*.jsonl") if _is_session_file(path)]
         if not jsonl_files:
@@ -137,7 +137,7 @@ class Session:
         return cls(cwd=cwd, session_id=sid, file_path=latest, resumed=True)
 
     @classmethod
-    def load_by_id(cls, cwd: Path, session_id: str) -> "Session" | None:
+    def load_by_id(cls, cwd: Path, session_id: str) -> "Session | None":
         file_path = _session_dir(cwd) / f"{session_id}.jsonl"
         if not file_path.exists():
             return None

@@ -37,6 +37,13 @@ class Tool:
     is_read_only: bool = False
 
 
+# Alias for the return annotation of ``ToolRegistry.list``: inside that class body the
+# method name shadows the builtin, so a bare ``list[Tool]`` would resolve to the method
+# itself once it is defined (static checkers flag this; ``from __future__ import
+# annotations`` hides it at runtime).
+ToolList = list[Tool]
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         # The registry is the harness boundary between a tool name and its Python fn.
@@ -45,7 +52,7 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
-    def list(self) -> list[Tool]:
+    def list(self) -> ToolList:
         return list(self._tools.values())
 
     def run(self, call: ToolCall, context: ToolContext) -> ToolResult:

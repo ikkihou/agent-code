@@ -9,7 +9,7 @@ from agent_code.runtime import RuntimeState
 def test_confirm_command_uses_structured_request_for_interactive_asker() -> None:
     requests: list[dict[str, Any]] = []
 
-    def asker(request: dict[str, Any]) -> bool:
+    def asker(request: Any) -> bool:
         requests.append(request)
         return True
 
@@ -29,7 +29,7 @@ def test_confirm_command_uses_structured_request_for_interactive_asker() -> None
 def test_prompt_single_choice_uses_structured_request_for_interactive_asker() -> None:
     requests: list[dict[str, Any]] = []
 
-    def asker(request: dict[str, Any]) -> str:
+    def asker(request: Any) -> str:
         requests.append(request)
         return "2"
 
@@ -49,7 +49,7 @@ def test_prompt_single_choice_uses_structured_request_for_interactive_asker() ->
 def test_confirm_edit_passes_detail_in_request() -> None:
     requests: list[dict[str, Any]] = []
 
-    def asker(request: dict[str, Any]) -> bool:
+    def asker(request: Any) -> bool:
         requests.append(request)
         return True
 

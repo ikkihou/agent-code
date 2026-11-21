@@ -197,7 +197,9 @@ def execute_one_tool_call(
     """
     wire.send(
         ToolCallStarted(
-            call_id=call.id, name=call.name, args_preview=_format_call_args(call.arguments)
+            call_id=call.id,
+            name=call.name,
+            args_preview=_format_call_args(call.arguments),
         )
     )
 
