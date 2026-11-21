@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`agent-code` is a from-scratch, Claude-Code-style AI coding agent CLI written in Python 3.12. It runs an agent loop against an Anthropic-compatible chat API (DeepSeek by default), with tools for file/bash/search, a three-tier permission system, JSONL session persistence, cross-session memory, shell hooks, cron jobs, and a scrollback+Live `prompt_toolkit` REPL. This repo is itself a toy clone of the harness you're running in — "the agent" here refers to the LLM agent this CLI drives, not Claude Code.
+`agent-code` is a from-scratch, Claude-Code-style AI coding agent CLI written in Python 3.14. It runs an agent loop against an Anthropic-compatible chat API (DeepSeek by default), with tools for file/bash/search, a three-tier permission system, JSONL session persistence, cross-session memory, shell hooks, cron jobs, and a scrollback+Live `prompt_toolkit` REPL. This repo is itself a toy clone of the harness you're running in — "the agent" here refers to the LLM agent this CLI drives, not Claude Code.
 
 ## Commands
 
@@ -29,7 +29,7 @@ just build              # build sdist/wheel via hatchling
 Underlying commands, when `just` is not available:
 
 ```sh
-uv sync --dev           # install deps + pytest/ruff/pyright/ty dev group (uv, Python 3.12)
+uv sync --dev           # install deps + pytest/ruff/pyright/ty dev group (uv, Python 3.14)
 uv run agent-code "hi"  # one-shot run (module entry: python -m agent_code)
 uv run agent-code       # scrollback+Live interactive REPL
 uv run agent-code -c    # resume latest session
@@ -42,6 +42,8 @@ uv build                # build sdist/wheel via hatchling
 ```
 
 Auth is read from `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` (env, or the `env` block of `~/.claude/settings.json`). The default `--provider anthropic` points at DeepSeek's Anthropic-compatible endpoint (`https://api.deepseek.com/anthropic`), overridable with `--base-url`. `--provider mock` needs no key and is used by tests.
+
+Python is pinned to 3.14 in four places that must move together when bumping: `.python-version` (drives `uv sync` / `uv run`), `requires-python` in `pyproject.toml`, `pythonVersion` in `pyrightconfig.json`, and `[tool.ty.environment].python-version` in `pyproject.toml`.
 
 ## Architecture
 

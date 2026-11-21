@@ -290,7 +290,9 @@ def load_gitignore(cwd: Path) -> pathspec.PathSpec | None:
     if not gitignore.exists():
         return None
     lines = gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
-    return pathspec.PathSpec.from_lines("gitwildmatch", lines)
+    # GitIgnoreSpec ("gitignore" factory) instead of PathSpec.from_lines("gitwildmatch"):
+    # pathspec 1.x deprecates the old alias name and warns on every parse.
+    return pathspec.GitIgnoreSpec.from_lines(lines)
 
 
 def ensure_read_before_edit(state: ReadFileState, path: Path) -> str | None:

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [{ name = "ikkihou", email = "oye20000101@gmail.com" }]
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "anthropic>=0.109.1",
     "click>=8.4.2",
@@ -52,7 +52,7 @@ dev = [
 [tool.ty.environment]
 # Same target as pyright: the repo's requires-python pin, not whatever interpreter
 # ty happens to discover.
-python-version = "3.12"
+python-version = "3.14"
 
 [tool.ty.src]
 # Only first-party code: .venv, .agent/ and .bg/ stay out of the check.
