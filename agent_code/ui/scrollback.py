@@ -222,11 +222,12 @@ def _pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[Sty
     return padded
 
 
-def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
+def _chunk_fragments(chunk: OutputChunk, columns: int | None = None) -> list[StyleAndText]:
     """OutputChunk -> (style string, text) fragments.
 
     Styles are Rich vocabulary by default. Fragments stored by older versions use
-    prompt_toolkit vocabulary and are translated through the legacy shim.
+    prompt_toolkit vocabulary and are translated through the legacy shim. ``columns``
+    is forwarded to the markdown renderer as its wrap width.
     """
     if chunk.fragments:
         fragments = list(chunk.fragments)
@@ -234,7 +235,7 @@ def _chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
             return [(_legacy_pt_style(style), text) for style, text in fragments]
         return fragments
     if chunk.format in ("rich", "markdown"):
-        return chunk_fragments(chunk)
+        return chunk_fragments(chunk, width=columns)
     return [("", chunk.text)]
 
 
@@ -244,13 +245,18 @@ def _chunk_to_ansi(chunk: OutputChunk, columns: int | None = None) -> str:
     Fragments are rebuilt into a Rich Text and rendered to ANSI; styles already use
     Rich's vocabulary, so no per-fragment translation is needed (legacy
     prompt_toolkit styles are normalized in ``_chunk_fragments``).
-    ``full_width`` chunks are padded to ``columns`` (current terminal width by default).
+
+    ``columns`` (current terminal width by default) is the render width: it is the
+    wrap target for markdown chunks, which Rich hard-wraps, and the padding target for
+    ``full_width`` chunks. Resolving it here -- at commit time -- is what keeps rendered
+    width equal to the terminal's.
     """
-    fragments = _chunk_fragments(chunk)
-    if chunk.full_width:
-        fragments = _pad_full_width(
-            fragments, columns if columns is not None else _terminal_columns()
-        )
+    width = columns
+    if width is None and (chunk.full_width or chunk.format == "markdown"):
+        width = _terminal_columns()
+    fragments = _chunk_fragments(chunk, width)
+    if chunk.full_width and width is not None:
+        fragments = _pad_full_width(fragments, width)
 
     text = Text()
     for style, fragment in fragments:

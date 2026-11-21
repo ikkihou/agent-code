@@ -81,7 +81,7 @@ def read_text_file(path: Path, *, encodings: tuple[str, ...] | None = None) -> t
     for encoding in encodings or SOURCE_FILE_ENCODINGS:
         try:
             return raw.decode(encoding), encoding
-        except (UnicodeDecodeError, LookupError):
+        except UnicodeDecodeError, LookupError:
             continue
     return raw.decode("utf-8", errors="replace"), "utf-8"
 

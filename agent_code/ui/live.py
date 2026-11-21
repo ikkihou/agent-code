@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 
+from prompt_toolkit.utils import get_cwidth
+
 from ..output import StyleAndText
 from ..wire import CommandPreview, DiffPreview, WireEvent
 
@@ -21,6 +23,28 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # A fenced code block delimiter (``` or ~~~, 3+, optional indent/info string).
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+
+def _fit_width(text: str, columns: int) -> str:
+    """Truncate ``text`` to at most ``columns`` terminal cells.
+
+    Character slicing is wrong for wide text: 40 CJK characters are 80 cells, so the
+    Live line would overflow a 40-column window and prompt_toolkit would wrap it into
+    extra rows, pushing the input frame down. Measure display cells instead.
+    """
+    if columns <= 0:
+        return ""
+    if get_cwidth(text) <= columns:
+        return text
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        width = get_cwidth(char)
+        if used + width > columns:
+            break
+        kept.append(char)
+        used += width
+    return "".join(kept)
 
 
 class LiveArea:
@@ -123,13 +147,13 @@ class LiveArea:
             line += f" · {elapsed}s"
             out.append(("class:spinner", line + "\n"))
         for preview_line in self.pending_preview:
-            out.append(("class:preview", preview_line[:columns] + "\n"))
+            out.append(("class:preview", _fit_width(preview_line, columns) + "\n"))
         # Show only the last few lines of the open paragraph -- closed content is
         # already in scrollback.
         for tail in self.open_paragraph[-STREAM_TAIL_LINES:]:
-            out.append(("", tail[:columns] + "\n"))
+            out.append(("", _fit_width(tail, columns) + "\n"))
         if self.stream_pending:
-            out.append(("", self.stream_pending[:columns]))
+            out.append(("", _fit_width(self.stream_pending, columns)))
         return out
 
 

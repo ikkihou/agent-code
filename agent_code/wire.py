@@ -8,8 +8,9 @@ pure event consumers: they decide how to render each event.
 
 Events fall into two families:
 
-- **Content events**: ``TextDelta`` (raw model streaming text; adjacent deltas merge
-  in place inside the queue, so a slow consumer never builds a backlog), ``Line``
+- **Content events**: ``TextDelta`` (raw model streaming text; in ``notify`` mode
+  adjacent deltas merge in place inside the queue so a slow consumer never builds a
+  backlog -- with a synchronous sink every delta is flushed on its own), ``Line``
   (one complete notification line, optionally Rich markup), ``PromptEcho`` (the echo
   block for user/cron input).
 - **Display events**: ``ToolCallStarted`` / ``DiffPreview`` / ``CommandPreview`` --
@@ -19,11 +20,12 @@ Events fall into two families:
 Wire consumption model: the producer (worker thread) sends; the consumer sets a
 ``sink`` that receives event batches. Two pacing modes:
 
-- Synchronous consumption (one-shot): ``sink`` only, every send flushes to it
-  immediately;
-- Asynchronous consumption (REPL): ``sink`` plus ``notify``, send only triggers
-  notify (the frontend schedules it onto the UI thread), and the UI thread hands the
-  drained batch to the sink -- which is what makes the merge buffer effective.
+- Synchronous consumption (one-shot and the REPL): ``sink`` only, every send drains
+  the queue and flushes immediately, so a batch normally holds a single event and
+  adjacent ``TextDelta``s never merge;
+- Asynchronous consumption (``notify``, no production frontend uses it today): send
+  only appends to the queue and fires notify, and the consumer drains on its own
+  thread. This is the only mode in which the merge buffer does anything.
 """
 
 # here put the import lib
@@ -147,7 +149,9 @@ class Wire:
 
     Merge semantics: when send(TextDelta) finds an unconsumed TextDelta at the tail, it
     concatenates in place instead of appending a new event -- so a slow UI during
-    streaming never accumulates hundreds of deltas.
+    streaming never accumulates hundreds of deltas. Only reachable in ``notify`` mode:
+    a synchronous sink drains on every send, so the queue never keeps a delta to merge
+    with (the REPL coalesces on the consumer side instead).
     """
 
     def __init__(self) -> None:

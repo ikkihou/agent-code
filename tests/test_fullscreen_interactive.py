@@ -674,6 +674,76 @@ def test_pad_full_width_expands_tabs_and_skips_overwide_lines() -> None:
     assert "".join(part for _, part in wide) == "x" * 30 + "\n"
 
 
+def _max_line_width(fragments: list[tuple[str, str]]) -> int:
+    """Widest visual line in a fragment list, in terminal cells."""
+    from prompt_toolkit.utils import get_cwidth
+
+    return max(get_cwidth(line) for line in "".join(t for _, t in fragments).split("\n"))
+
+
+def test_markdown_wraps_at_the_requested_width() -> None:
+    """Markdown is hard-wrapped by Rich, so the wrap width must be the terminal's.
+
+    Regression: markdown_fragments used a fixed 100 columns, so a wider terminal got
+    prose that stopped short of the right edge and a narrower one wrapped early.
+    """
+    prose = " ".join(["word"] * 200) + "\n"
+
+    narrow = _chunk_fragments(OutputChunk(prose, format="markdown"), 60)
+    wide = _chunk_fragments(OutputChunk(prose, format="markdown"), 120)
+
+    assert _max_line_width(narrow) <= 60
+    assert _max_line_width(wide) <= 120
+    assert _max_line_width(wide) > 100  # it really used the wider target
+    narrow_text = "".join(t for _, t in narrow)
+    wide_text = "".join(t for _, t in wide)
+    assert narrow_text.count("\n") > wide_text.count("\n")
+
+    # Callers without a terminal width keep the deterministic fallback.
+    default = _chunk_fragments(OutputChunk(prose, format="markdown"))
+    assert _max_line_width(default) <= 100
+
+
+def test_commit_width_reaches_the_markdown_renderer(monkeypatch: Any) -> None:
+    """_chunk_to_ansi resolves the terminal width itself and forwards it to markdown."""
+    import re
+
+    from agent_code.ui import scrollback
+
+    monkeypatch.setattr(scrollback, "_terminal_columns", lambda: 72)
+    prose = " ".join(["word"] * 200) + "\n"
+    rendered = scrollback._chunk_to_ansi(OutputChunk(prose, format="markdown"))
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
+    widths = [len(line) for line in plain.split("\n")]
+    assert max(widths) <= 72
+    assert max(widths) > 40  # wrapped at 72, not at some default
+
+
+def test_pad_full_width_targets_the_commit_width(monkeypatch: Any) -> None:
+    """full_width chunks still pad to the terminal width after the width plumbing."""
+    from agent_code.ui import scrollback
+
+    monkeypatch.setattr(scrollback, "_terminal_columns", lambda: 33)
+    chunk = render_user_prompt("hi")
+    rendered = scrollback._chunk_to_ansi(chunk)
+    bar = [line for line in rendered.split("\n") if "hi" in line][0]
+    # ANSI prefix + 2 visible chars + padding spaces.
+    assert bar.endswith(" " * (33 - len("> hi")) + "\x1b[0m")
+
+
+def test_live_tail_truncates_by_display_width() -> None:
+    """Wide text is cut by cells, not characters, so the Live window keeps one row."""
+    from prompt_toolkit.utils import get_cwidth
+
+    from agent_code.ui.live import _fit_width
+
+    assert _fit_width("abc", 10) == "abc"
+    assert _fit_width("中文中文", 5) == "中文"  # 4 cells fit, a third char would make 6
+    assert _fit_width("中文" * 20, 7) == "中文中"
+    assert get_cwidth(_fit_width("中文" * 20, 7)) <= 7
+    assert _fit_width("anything", 0) == ""
+
+
 def test_commit_chunk_through_patch_stdout_preserves_ansi() -> None:
     """The real StdoutProxy path must not replace ESC with '?' (P0 regression)."""
     from prompt_toolkit.application import create_app_session

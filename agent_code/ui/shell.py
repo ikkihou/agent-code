@@ -576,7 +576,7 @@ class InteractiveShell:
                         # False. Passing True each round keeps the frame on.
                         text = await session.prompt_async(show_frame=True)
                         self._submit_text(text)
-                    except (EOFError, KeyboardInterrupt):
+                    except EOFError, KeyboardInterrupt:
                         break
         finally:
             consume_task.cancel()

@@ -106,15 +106,20 @@ def rich_markup_fragments(markup_text: str) -> list[StyleAndText]:
 # ---------------------------------------------------------------------------
 
 
-def chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
+def chunk_fragments(chunk: OutputChunk, width: int | None = None) -> list[StyleAndText]:
     """Normalize any chunk into style fragments -- the single conversion entry point
-    for transcript / commit path. Fragment styles follow Rich's inline vocabulary."""
+    for transcript / commit path. Fragment styles follow Rich's inline vocabulary.
+
+    ``width`` is the wrap target for markdown chunks: the frontend passes the terminal
+    width it is about to render into, so prose wraps where the terminal wraps. Callers
+    without a terminal (tests, transcript inspection) leave it out.
+    """
     if chunk.fragments:
         return list(chunk.fragments)
     if chunk.format == "rich":
         return rich_markup_fragments(chunk.text)
     if chunk.format == "markdown":
-        return markdown_fragments(chunk.text)
+        return markdown_fragments(chunk.text, width=width)
     if chunk.text:
         return [("", chunk.text)]
     return []
@@ -124,23 +129,32 @@ def chunk_fragments(chunk: OutputChunk) -> list[StyleAndText]:
 # Markdown -> style fragments
 # ---------------------------------------------------------------------------
 
-_MD_CONSOLE_WIDTH = 100
+# Fallback wrap width for markdown when no terminal width is known (tests, transcript
+# tooling). The REPL commit path always passes the live terminal width instead: the
+# renderer hard-wraps, so a width baked in here would make prose stop short of (or
+# overshoot) the terminal's right edge.
+_MD_DEFAULT_WIDTH = 100
 
 
-def markdown_fragments(text: str) -> list[StyleAndText]:
+def markdown_fragments(text: str, width: int | None = None) -> list[StyleAndText]:
     """Render markdown into Rich-vocabulary style fragments (no ANSI round-trip).
 
     Uses rich.markdown.Markdown rendered on an offscreen console: headings, emphasis,
     tables and fenced code all come out as styled segments whose ``str(Style)`` form
-    is used verbatim as the fragment style. Width is fixed so transcript replay does
-    not re-wrap per terminal -- the terminal wraps over-wide lines itself, as
-    elsewhere in the commit path.
+    is used verbatim as the fragment style.
+
+    ``width`` is the column count to wrap at -- pass the terminal width at commit time
+    so paragraphs wrap where the terminal actually wraps. Rich hard-wraps (paragraph
+    fill, table sizing, code fences), so this width cannot be fixed for every
+    terminal; transcripts store the markdown source, never the rendered fragments, so
+    a resume re-renders at the width of the terminal doing the replay.
     """
     from rich.markdown import Markdown
 
+    wrap_width = width if width is not None and width > 0 else _MD_DEFAULT_WIDTH
     console = Console(
         file=StringIO(),
-        width=_MD_CONSOLE_WIDTH,
+        width=wrap_width,
         tab_size=4,
         highlight=False,
         legacy_windows=False,

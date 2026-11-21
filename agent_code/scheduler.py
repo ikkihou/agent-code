@@ -56,7 +56,7 @@ def _load_jobs(cwd: Path) -> list[CronJob]:
         return []
     try:
         data = json.loads(fpath.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except json.JSONDecodeError, OSError:
         return []
     jobs: list[CronJob] = []
     for item in data.get("jobs", []):
@@ -71,7 +71,7 @@ def _load_jobs(cwd: Path) -> list[CronJob]:
                     created_at=item.get("created_at"),
                 )
             )
-        except (KeyError, TypeError):
+        except KeyError, TypeError:
             continue  # Skip corrupt jobs instead of letting one bad record stall the scheduler
     return jobs
 

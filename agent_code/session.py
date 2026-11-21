@@ -63,7 +63,7 @@ def _session_summaries(cwd: Path) -> list[tuple[str, int, float]]:
                 }:
                     message_count += 1
             modified_at = file_path.stat().st_mtime
-        except (OSError, UnicodeError):
+        except OSError, UnicodeError:
             continue
 
         summaries.append((file_path.stem, message_count, modified_at))

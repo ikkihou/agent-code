@@ -188,7 +188,7 @@ def _cmd_loop_add(args: list[str], ctx: SlashContext) -> SlashResult:
         if args[i] == "--every" and i + 1 < len(args):
             try:
                 every_seconds = _parse_every(args[i + 1])
-            except (ValueError, IndexError):
+            except ValueError, IndexError:
                 return SlashResult(
                     handled=True,
                     message="--every needs whole seconds, or a form like 60s / 5m / 2h",

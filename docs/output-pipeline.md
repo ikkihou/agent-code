@@ -64,8 +64,9 @@ permission mode + model。Live 区不是 prompt 的 `message`：`layout._install
 
 `Wire` 的消费模型：
 
-- **合并语义**：队列内相邻的未消费 `TextDelta` 原地拼接——流式期间 UI 消费不及时也不积压几百条 delta（kimi-cli MergeableMixin 同款思路）。
-- **同步消费**（one-shot / 测试 / REPL）：只设 `sink`，`send()` 立刻 flush 事件批给 sink。REPL 的 sink 是 `_worker_sink`，它只做 `call_soon_threadsafe` 把批投进 UI 队列。
+- **合并语义只在队列里还留着未消费事件时生效**：`send(TextDelta)` 若发现队尾仍是 `TextDelta`，就原地拼接而不是追加（kimi-cli MergeableMixin 同款思路）。这条路径要求消费端**不即时 drain**，也就是异步（`notify`）模式。
+- **同步消费**（one-shot / 测试 / **REPL**）：设了 `sink` 就在 `send()` 里立刻 `drain()` 并 flush，队列永远是空的，**相邻 delta 从不合并**——每个 `TextDelta` 单独成批（通常只有一个元素）。当前正式代码里没有任何前端设 `notify`，所以合并逻辑实际是死代码，只由 `tests/test_fullscreen_interactive.py::test_wire_merges_adjacent_text_deltas_in_queue` 覆盖。
+- REPL 的 sink 是 `_worker_sink`，它只做 `call_soon_threadsafe` 把批投进 UI 队列。**防抖发生在消费侧，不在队列里**：`_consume_events` 一次排空整条 asyncio 队列、顺序处理所有事件，每轮最多 `_commit_chunks` 一次。
 - 只设 `notify` 时 `send()` 仅触发 notify，消费端 `drain()` 取走全部待处理事件（保 send 顺序）。
 - 两者都没设时事件落空（fire-and-forget），loop 对"有没有人在听"无感知。
 
@@ -119,7 +120,7 @@ Esc+Enter 的前缀，短超时让单独 Esc 仍能及时中断，同时 Esc+Ent
 
 1. **worker → UI 线程**：`_worker_sink` 只做 `loop.call_soon_threadsafe(_enqueue_events, batch)`；`_enqueue_events` 把事件灌进 `_event_queue` 并 `_live_dirty.set()`。**这是唯一的跨线程接缝**，sink 里不碰任何 UI。
 2. **`_consume_events`（UI 协程）**：等 `_live_dirty`，一次取空队列，逐事件翻译：
-   - `TextDelta` → `LiveArea.feed_stream()`：按空行切段，**已闭合的段落立刻返回**并提交 scrollback；未闭合段落只留在 Live 区（含半行）。
+   - `TextDelta` → `LiveArea.feed_stream()`：按空行切段，**已闭合的段落立刻返回**并提交 scrollback；未闭合段落只留在 Live 区（含半行）。**闭合判定跨事件批**：`feed_stream` 把文本累积进 `stream_pending` / `open_paragraph`（外加代码围栏状态），单个 delta 通常不含空行 → 返回空列表 → 本批 `commit` 为空 → `_commit_chunks` 根本不会被调用。真正把未闭合段落和半行推进 scrollback 的是 `_flush_prose()`：`TurnEnded`、`ToolCallStarted`、`TurnStarted`、`DiffPreview`/`CommandPreview`，以及任何 `Line`/`PromptEcho` 之前都会跑（排序规则见 `_handle_batch`）。
    - `TurnStarted` / `TurnEnded` → 开关 `turn_active`、重置/收尾；`TurnEnded` 把未闭合段落整段 `flush_paragraph()` 提交。turn 活跃时 `LiveArea.formatted()` 先输出一个空行再输出 spinner，这个空行就是它与已提交 prompt 之间的唯一 gap。
    - `ToolCallStarted` → `active_tool`（挂到 spinner 行）；`ToolCallCompleted` → 清 `active_tool`，随后落成 `✓ name` 行。
    - `DiffPreview` / `CommandPreview` → `ui/live.py::_preview_lines()` 生成一行 `⏸ … waiting for approval` 塞进 `pending_preview`，然后 **`continue`**——`ui/events.py::event_to_chunks()` 里虽写了完整 diff / Command 的渲染分支，但 REPL 永远走不到；只有 one-shot 的 `_ConsoleWireSink` 会打印完整内容。
@@ -141,7 +142,7 @@ cron 到点 prompt 在 worker 线程内直接 `_worker_sink([PromptEcho(...)])` 
 
 ## 4. 关键设计约束（踩坑提醒）
 
-1. **流式半行只在 Live 区攒**——`LiveArea.stream_pending` 持有未完成半行；只有空行闭合的段落才 `_commit_chunk`（整行保证），`TurnEnded` 才 flush 半行。
+1. **流式半行只在 Live 区攒**——`LiveArea.stream_pending` 持有未完成半行；delta 驱动的提交只发生在空行闭合段落时（`feed_stream()` 返回非空列表，`_consume_events` 的 `if commit:` 才落盘）。未闭合段落与半行由 `_flush_prose()` 收走：`TurnEnded`（无尾随空行、`close_fence=True`），以及 turn 中途任何非 delta 事件之前（`ToolCallStarted` / `Line` / 预览等，带一个尾随空行、保留围栏状态）——**不是只有 TurnEnded 才 flush**。
 2. **工具层不发字符串行**——`tool_execution.py` 只发 `ToolCallStarted/ToolCallCompleted/DiffPreview/CommandPreview` 事件；要改显示格式去 `ui/events.py::event_to_chunks` / `ui/live.py::_preview_lines`（REPL）或 `cli.py::_ConsoleWireSink`（one-shot）。
 3. **提交绝不能走 pt 的 `print_formatted_text`**——app 运行时它会 `loop.call_soon_threadsafe(run_in_terminal(...))` 且调用方无法 await；在"提交完立刻进下一轮 `prompt_async`"的循环里，它会和 prompt 的输入 detach/attach 竞争，表现为**后续输入全部失效**（实测踩过，排查成本很高）。正确路径是 `sys.stdout.write`，由 `patch_stdout` 的 `StdoutProxy` 负责落到 prompt 上方。
 4. **`FormattedText` 没有 `.fragments`**——`_render_live`（作为 `_install_live_area_window` 的 `get_text` 回调）必须返回新构造的 `FormattedText(list_of_tuples)`，不能修改已有实例。曾经在这里抛 `AttributeError`，导致渲染线程死掉、后续输入永不返回（看起来像 worker 死锁，实际是渲染异常）。

@@ -91,7 +91,7 @@ def _load_claude_settings() -> dict[str, str]:
         # keeps a bad read from taking the whole startup down.
         data = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
         return data.get("env", {})
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError, UnicodeError):
+    except FileNotFoundError, json.JSONDecodeError, PermissionError, UnicodeError:
         return {}
 
 

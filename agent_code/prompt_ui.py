@@ -191,5 +191,5 @@ def prompt_single_choice(state: RuntimeState, question: str, labels: list[str]) 
         if 1 <= idx <= len(labels):
             return labels[idx - 1]
         return None
-    except (ValueError, typer.Abort):
+    except ValueError, typer.Abort:
         return None

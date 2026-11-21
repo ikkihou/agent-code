@@ -60,7 +60,7 @@ def read_file(args: dict[str, Any], ctx: ToolContext) -> str:
     try:
         start_line = int(offset) if offset is not None else 1
         max_lines = int(limit) if limit is not None else None
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "error: offset/limit must be integers"
     if start_line < 1:
         return "error: offset must be >= 1 (1-indexed)"

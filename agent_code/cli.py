@@ -313,7 +313,7 @@ def _ensure_utf8_stdio() -> None:
             continue
         try:
             reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
+        except ValueError, OSError:
             continue
     # Make child processes (bash / hooks / rg) emit UTF-8, matching the decoding
     # convention above.
