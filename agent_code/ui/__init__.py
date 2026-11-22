@@ -35,6 +35,7 @@ Sub-modules by responsibility:
 - paste:      oversized bracketed-paste placeholdering ([Pasted text #N +K lines],
               expanded back to full text at submit time; the echo shows the token)
 - scrollback: commit path OutputChunk -> ANSI -> native terminal scrollback
+- banner:     startup logo + rounded info box (width-aware logo size, per-column gradient)
 - live:       Live area state (spinner / streaming tail / pending preview)
 - events:     translation of finished wire events -> OutputChunk
 - prompts:    rendering and answer parsing for prompt requests (confirm/choice)

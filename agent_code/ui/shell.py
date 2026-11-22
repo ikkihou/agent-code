@@ -74,7 +74,7 @@ class InteractiveShell:
         state: RuntimeState,
         run_turn: Callable[[str, Wire], None],
         make_slash_context: Callable[[], SlashContext],
-        initial_output: str = "",
+        initial_output: OutputChunk | str = "",
         initial_transcript: list[OutputChunk] | None = None,
         on_transcript: Callable[[OutputChunk], None] | None = None,
         drain_pending: Callable[[], list[str]] | None = None,
@@ -112,7 +112,10 @@ class InteractiveShell:
         # Initial transcript (resume replay): committed to scrollback right after startup.
         self._initial_chunks: list[OutputChunk] = list(initial_transcript or [])
         if initial_output:
-            self._initial_chunks.insert(0, OutputChunk(initial_output))
+            self._initial_chunks.insert(
+                0,
+                OutputChunk(initial_output) if isinstance(initial_output, str) else initial_output,
+            )
 
     # ---- worker thread side: turn execution and cron --------------------------
 
@@ -516,9 +519,7 @@ class InteractiveShell:
             # The Live area (spinner / streaming tail / question *body*) gets its own
             # window above the frame -- see install_live_area_window.
             message=self._prompt_message,
-            bottom_toolbar=lambda: FormattedText(
-                [("class:bottom-toolbar", bottom_toolbar(self._state))]
-            ),
+            bottom_toolbar=lambda: FormattedText(bottom_toolbar(self._state)),
             completer=self._build_completer(),
             complete_while_typing=True,
             # Multiline layout: the buffer can contain newlines, and the input frame
@@ -641,7 +642,7 @@ def run_interactive_shell(
     state: RuntimeState,
     run_turn: Callable[[str, Wire], None],
     make_slash_context: Callable[[], SlashContext],
-    initial_output: str = "",
+    initial_output: OutputChunk | str = "",
     initial_transcript: list[OutputChunk] | None = None,
     on_transcript: Callable[[OutputChunk], None] | None = None,
     drain_pending: Callable[[], list[str]] | None = None,

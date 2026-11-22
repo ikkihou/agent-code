@@ -21,6 +21,8 @@ from typing import Any, Literal, Protocol
 
 from anthropic import Anthropic
 
+from .context import TokenUsage, estimate_messages_tokens
+
 
 @dataclass
 class ToolCall:
@@ -42,6 +44,9 @@ class ModelResponse:
     tool_calls: list[ToolCall] | None = None
     assistant_content: list[dict[str, Any]] | None = None
     stop_reason: str = "end_turn"
+    # Token counts reported by the API for this response; None when the provider
+    # (or a test double) does not report usage. Consumers must treat it as optional.
+    usage: TokenUsage | None = None
 
 
 class CancellationSignal(Protocol):
@@ -125,6 +130,25 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
     return data
 
 
+def _to_token_usage(response: Any) -> TokenUsage | None:
+    """Read the API usage report, tolerating missing fields and missing usage."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    cache_read_tokens = getattr(usage, "cache_read_input_tokens", None)
+    if input_tokens is None and output_tokens is None and cache_read_tokens is None:
+        return None
+
+    return TokenUsage(
+        input_tokens=int(input_tokens or 0),
+        cache_read_tokens=int(cache_read_tokens or 0),
+        output_tokens=int(output_tokens or 0),
+    )
+
+
 def _to_model_response(response: Any) -> ModelResponse:
     """Convert an Anthropic-compatible response into the provider-neutral model."""
     text_parts: list[str] = []
@@ -151,6 +175,7 @@ def _to_model_response(response: Any) -> ModelResponse:
         tool_calls=tool_calls or None,
         assistant_content=assistant_content,
         stop_reason=response.stop_reason or "end_turn",
+        usage=_to_token_usage(response),
     )
 
 
@@ -182,8 +207,10 @@ class MockProvider:
             raise ModelRequestAborted()
 
         # A fake model that always returns a fixed line -- enough to exercise the
-        # CLI <-> Provider boundary.
-        response = ModelResponse(text="I am MockProvider; you said: mocking")
+        # CLI <-> Provider boundary. Usage is deterministic: a cheap estimate of the
+        # request plus 50 tokens, so a test can pad a message to cross a threshold.
+        usage = TokenUsage(input_tokens=estimate_messages_tokens(messages) + 50)
+        response = ModelResponse(text="I am MockProvider; you said: mocking", usage=usage)
         yield ModelStreamEvent(type="text_delta", text=response.text)
 
         if signal is not None and signal.is_set():

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .context import DEFAULT_COMPACT_THRESHOLD, ratio_bar, resolve_window
 from .runtime import RuntimeState
 
 
@@ -21,6 +22,8 @@ class SlashContext:
     session_id: str | None
     state: RuntimeState | None = None
     registry: SlashRegistry | None = None
+    # CLI override forwarded to resolve_window when no live budget exists (one-shot).
+    context_window: int = 0
 
 
 class SlashResult:
@@ -129,12 +132,42 @@ def _cmd_model(args: list[str], ctx: SlashContext) -> SlashResult:
 
 
 def _cmd_context(_args: list[str], ctx: SlashContext) -> SlashResult:
-    """Print the current session and permission mode."""
+    """Show the session/runtime info plus the live context-budget usage.
+
+    Without a live budget (the one-shot path dispatches before a RuntimeState
+    exists) it reports the static configuration instead of failing.
+    """
     session = ctx.session_id or "(none)"
-    return SlashResult(
-        handled=True,
-        message=f"cwd: {ctx.cwd}\nsession: {session}\npermission: {ctx.permission_mode}\nmodel: {ctx.provider}/{ctx.model}",
-    )
+    lines = [
+        f"cwd: {ctx.cwd}",
+        f"session: {session}",
+        f"permission: {ctx.permission_mode}",
+        f"model: {ctx.provider}/{ctx.model}",
+    ]
+
+    budget = ctx.state.context_budget if ctx.state is not None else None
+    if budget is None:
+        window = resolve_window(ctx.provider, override=ctx.context_window)
+        lines.append(f"context window: {window:,} tokens (provider default)")
+        lines.append(f"compact threshold: {DEFAULT_COMPACT_THRESHOLD:.0%}")
+        lines.append("context usage: (no live budget in this mode)")
+    else:
+        lines.append(f"context window: {budget.window_tokens:,} tokens")
+        lines.append(
+            f"context usage: {ratio_bar(budget.usage_ratio)} "
+            f"({budget.estimated_tokens:,} tokens estimated)"
+        )
+        lines.append(f"compact threshold: {budget.compact_threshold:.0%}")
+        if budget.compactions:
+            lines.append(
+                f"last compaction: {budget.last_before_ratio:.0%} → "
+                f"{budget.last_after_ratio:.0%} "
+                f"({budget.last_summarized_messages} messages summarized)"
+            )
+        else:
+            lines.append("last compaction: (none)")
+
+    return SlashResult(handled=True, message="\n".join(lines))
 
 
 def _cmd_permissions(args: list[str], ctx: SlashContext) -> SlashResult:
@@ -297,7 +330,7 @@ def default_slash_registry() -> SlashRegistry:
     registry = SlashRegistry()
     registry.register("help", "show all available slash commands", _cmd_help)
     registry.register("model", "show the current model/provider", _cmd_model)
-    registry.register("context", "show the current session, cwd and permission mode", _cmd_context)
+    registry.register("context", "show session, model and context usage", _cmd_context)
     registry.register(
         "permissions", "show the permission mode (default/acceptEdits/plan)", _cmd_permissions
     )

@@ -16,7 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .compact_basic import compact
+from .compact_basic import compact_to_budget
+from .context import (
+    ContextBudget,
+    estimate_message_tokens,
+    estimate_messages_tokens,
+    resolve_window,
+)
 from .fs_safety import SkipPolicy, load_gitignore
 from .model import ModelProvider, ModelRequestAborted, ModelResponse
 from .project_memory import load_agent_md
@@ -29,7 +35,7 @@ from .tool_execution import (
     partition_tool_calls,
 )
 from .tools import ToolContext, ToolRegistry
-from .wire import Line, TextDelta, Wire
+from .wire import ContextCompacted, Line, TextDelta, Wire
 
 # Worker count for the parallel read-only tool batch. Read-only calls are safe to run
 # concurrently; write tools form their own serial batch and are not affected.
@@ -99,9 +105,19 @@ def run_agent(  ## AGENT LOOP
     session: Session | None = None,
     system_prompt: str | None = None,
     wire: Wire | None = None,
+    budget: ContextBudget | None = None,
 ) -> AgentResult:
     ## Resolve the cwd
     resolved_cwd = cwd or Path.cwd()
+
+    ## Context budget: callers pass one built from resolve_window(); otherwise reuse the
+    ## state's live budget (the REPL keeps it across turns) or build the provider default.
+    if budget is None:
+        budget = state.context_budget
+    if budget is None:
+        budget = ContextBudget(resolve_window(state.provider))
+    state.context_budget = budget
+
     ## Build the tool context
     ctx = ToolContext(
         cwd=resolved_cwd,
@@ -119,6 +135,12 @@ def run_agent(  ## AGENT LOOP
 
     if session:
         session.append_messages([messages[-1]])
+
+    ## Re-seed the estimate from the messages that will actually be sent. This runs at
+    ## the start of every run: compaction rewrites only the local list while the session
+    ## file stays append-only, so a budget reused across REPL turns must not keep the
+    ## small post-compaction estimate for a full history reloaded next turn.
+    budget.reset(estimate_messages_tokens(messages))
 
     # Event channel: wire is the only boundary between the loop and the frontend. When
     # none is supplied, use an empty channel whose events simply go nowhere
@@ -152,6 +174,7 @@ def run_agent(  ## AGENT LOOP
         continuation_count += 1
         emit(f"continue: {reason}")
         messages.append({"role": "user", "content": prompt})
+        budget.add_estimate(estimate_message_tokens(messages[-1]))
         if session:
             session.append_messages(messages[-2:])
 
@@ -161,11 +184,33 @@ def run_agent(  ## AGENT LOOP
         if state.abort_event.is_set():
             return interrupted_result()
 
-        ## 1. sending api request
-        if len(messages) > 40:
-            messages = compact(messages, keep=8)
-            emit(f"compacted: {len(messages)} messages remaining", markup=True)
+        ## compact session history when the context budget is exceeded.
+        ## Pairing-safe: compact_to_budget returns None rather than orphaning a
+        ## tool_use/tool_result pair, and compaction never runs mid-tool-batch (this
+        ## point is always between a completed batch and the next request).
+        if budget.should_compact():
+            before_ratio = budget.usage_ratio
+            compacted = compact_to_budget(
+                messages,
+                budget.target_tokens(),
+                max(1, budget.target_tokens() // 2),
+            )
+            if compacted is None:
+                emit("context compaction skipped: no safe boundary", markup=True)
+            else:
+                summarized = len(messages) - len(compacted) + 1
+                after_ratio = estimate_messages_tokens(compacted) / budget.window_tokens
+                messages = compacted
+                budget.record_compaction(before_ratio, after_ratio, summarized)
+                event = ContextCompacted(
+                    before_ratio=before_ratio,
+                    after_ratio=after_ratio,
+                    summarized_messages=summarized,
+                )
+                trace.append(event.describe())
+                wire.send(event)
 
+        ## 1. sending api request
         response = None
         streamed_parts: list[str] = []
         try:
@@ -195,7 +240,12 @@ def run_agent(  ## AGENT LOOP
             return interrupted_result()
 
         ## 2. add complete LLM response to history
+        budget.observe(response.usage)
         messages.append(_assistant_message(response))
+        if response.usage is None:
+            # No authoritative report: keep the heuristic growing instead of stalling at
+            # a stale estimate, so a usage-less provider still compacts eventually.
+            budget.add_estimate(estimate_message_tokens(messages[-1]))
 
         ## 3(1). tool call or end execution
         if not response.tool_calls:
@@ -213,6 +263,7 @@ def run_agent(  ## AGENT LOOP
                             "content": "Plan not approved. Revise the plan and present it again.",
                         }
                     )
+                budget.add_estimate(estimate_message_tokens(messages[-1]))
                 if session:
                     session.append_messages(messages[-2:])
                 continue
@@ -299,6 +350,7 @@ def run_agent(  ## AGENT LOOP
                     tool_result_blocks.extend(results)
 
         messages.append({"role": "user", "content": tool_result_blocks})
+        budget.add_estimate(estimate_message_tokens(messages[-1]))
         if session:
             session.append_messages(messages[-2:])
 

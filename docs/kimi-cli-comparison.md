@@ -30,9 +30,9 @@
 - 手动 `/compact` 支持自定义指令；压缩后注入仍在运行的后台任务快照。
 - token 预算：`llm.py` `compute_max_completion_tokens` / `estimate_request_tokens` 按需计算输出上限。
 
-**agent-code**：`compact_basic.py` 的 `compact()` 是纯机械替换（无 LLM），触发信号是 `len(messages) > 40`——消息数而非 token 数。
+**agent-code**：`context.py` 的 `ContextBudget` 按 API `usage` + chars/4 估算跟踪 token 占比（无 usage 时以组装好的历史 seed），达到窗口 80% 时由 `compact_basic.compact_to_budget()` 做纯机械替换——无 LLM，且只在 `tool_use`/`tool_result` 安全边界切分。
 
-**改进**：优先把触发信号换成 token 用量（streaming 响应的 `usage` 现成可得）；其次再做 LLM 摘要压缩。
+**改进**：token 触发已实现；下一步可做 LLM 摘要压缩。
 
 ### 3. 循环健壮性
 

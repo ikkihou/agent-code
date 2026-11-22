@@ -1281,7 +1281,56 @@ def test_bottom_toolbar_only_shows_mode_and_model() -> None:
 
     state = RuntimeState(permission_mode="plan", model="mock")
     state.todo_store = [TodoItem(content="task", status="in_progress", active_form="working")]
-    assert bottom_toolbar(state) == " plan · mock "
+    fragments = bottom_toolbar(state)
+    assert "".join(text for _style, text in fragments) == " plan · mock "
+
+
+def test_bottom_toolbar_shows_context_usage() -> None:
+    """With a live budget the toolbar gains a token bar; hot styling at threshold."""
+    from agent_code.context import ContextBudget
+    from agent_code.ui.theme import bottom_toolbar
+
+    state = RuntimeState(permission_mode="default", model="mock")
+    budget = ContextBudget(window_tokens=100_000)
+    budget.reset(42_000)
+    state.context_budget = budget
+    fragments = bottom_toolbar(state)
+    text = "".join(t for _s, t in fragments)
+    assert "[#####-------] 42% 42k/100k tokens" in text
+    assert all("ctx.hot" not in s for s, _t in fragments)
+    # Each of the three segments carries its own color class.
+    assert any("mode.default" in s for s, _t in fragments)
+    assert any("seg.model" in s for s, _t in fragments)
+    assert any("seg.ctx" in s for s, _t in fragments)
+
+    # At/above the compact threshold the segment switches to the warning style.
+    budget.reset(95_000)
+    hot = bottom_toolbar(state)
+    assert "[###########-] 95% 95k/100k tokens" in "".join(t for _s, t in hot)
+    assert any("ctx.hot" in s for s, _t in hot)
+
+
+def test_bottom_toolbar_mode_segment_tint_tracks_permission_mode() -> None:
+    """The mode segment's color class follows the permission mode."""
+    from agent_code.ui.theme import bottom_toolbar
+
+    for mode, cls in [
+        ("default", "mode.default"),
+        ("acceptEdits", "mode.edits"),
+        ("plan", "mode.plan"),
+        ("fullAccess", "mode.full"),
+    ]:
+        state = RuntimeState(permission_mode=mode, model="mock")
+        assert any(cls in s for s, _t in bottom_toolbar(state)), mode
+
+
+def test_bottom_toolbar_omits_context_without_budget() -> None:
+    """No budget (one-shot state) -> no context segment, no misleading zero."""
+    from agent_code.ui.theme import bottom_toolbar
+
+    state = RuntimeState(permission_mode="default", model="mock")
+    text = "".join(t for _s, t in bottom_toolbar(state))
+    assert "tokens" not in text
 
 
 def test_collapse_input_height_never_reserves_menu_rows() -> None:

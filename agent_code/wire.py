@@ -113,6 +113,25 @@ class CommandPreview:
 
 
 @dataclass(frozen=True)
+class ContextCompacted:
+    """The history was deterministically compacted (no LLM involved).
+
+    Frontends render one dim line; ``describe()`` is the canonical plain-text form
+    (also recorded in ``AgentResult.trace``).
+    """
+
+    before_ratio: float
+    after_ratio: float
+    summarized_messages: int
+
+    def describe(self) -> str:
+        return (
+            f"context compacted: {self.before_ratio:.0%} → {self.after_ratio:.0%} "
+            f"({self.summarized_messages} messages summarized)"
+        )
+
+
+@dataclass(frozen=True)
 class TurnStarted:
     """A turn starts (the frontend starts the Live spinner/timer)."""
 
@@ -130,6 +149,7 @@ WireEvent = (
     | ToolCallCompleted
     | DiffPreview
     | CommandPreview
+    | ContextCompacted
     | TurnStarted
     | TurnEnded
 )

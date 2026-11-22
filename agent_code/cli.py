@@ -17,17 +17,22 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.text import Text
 
 from .agent import build_system_prompt, run_agent
+from .context import ContextBudget, resolve_window
 from .model import create_provider
+from .output import OutputChunk
 from .runtime import RuntimeState
 from .scheduler import CronScheduler
 from .session import Session
 from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
+from .ui.banner import build_banner
 from .ui.shell import run_interactive_shell
 from .wire import (
     CommandPreview,
+    ContextCompacted,
     DiffPreview,
     Line,
     PromptEcho,
@@ -43,23 +48,16 @@ app = typer.Typer(add_completion=False)
 
 
 def render_header(cwd: Path, provider: str, model: str, base_url: str | None) -> None:
-    console.print("[bold]Agent Code[/bold]")
-    console.print(f"[dim]cwd: {cwd}[/dim]")
-    console.print(f"[dim]provider: {provider}  model: {model}[/dim]")
-    if base_url:
-        console.print(f"[dim]base_url: {base_url}[/dim]")
-    console.print()
+    """One-shot frontend: print the same banner the REPL commits into scrollback."""
+    console.print(_banner_text(build_banner(cwd, provider, model, base_url)), end="")
 
 
-def header_text(cwd: Path, provider: str, model: str, base_url: str | None) -> str:
-    lines = [
-        "Agent Code",
-        f"cwd: {cwd}",
-        f"provider: {provider}  model: {model}",
-    ]
-    if base_url:
-        lines.append(f"base_url: {base_url}")
-    return "\n".join(lines) + "\n\n"
+def _banner_text(chunk: OutputChunk) -> Text:
+    """Banner chunk -> Rich Text (fragments are already in Rich's vocabulary)."""
+    text = Text()
+    for style, piece in chunk.fragments:
+        text.append(piece, style=style)
+    return text
 
 
 def run_once(
@@ -74,18 +72,21 @@ def run_once(
     system_prompt: str | None = None,
     signal: threading.Event | None = None,
     scheduler: CronScheduler | None = None,
+    context_window: int = 0,
 ) -> None:
     render_header(cwd, provider_name, model, base_url)
     if session:
         suffix = " (resumed)" if session.resumed else ""
         console.print(f"[dim]session: {session.session_id}{suffix}[/dim]")
     provider = create_provider(provider_name, model, base_url)
+    budget = ContextBudget(resolve_window(provider_name, override=context_window))
     state = RuntimeState(
         permission_mode=permission_mode,
         model=model,
         provider=provider_name,
         abort_event=signal if signal is not None else threading.Event(),
         scheduler=scheduler,
+        context_budget=budget,
     )
     run_agent(
         prompt,
@@ -97,6 +98,7 @@ def run_once(
         session=session,
         system_prompt=system_prompt,
         wire=_console_wire(),
+        budget=budget,
     )
 
 
@@ -135,6 +137,8 @@ class _ConsoleWireSink:
                 console.print(render_diff(event.old, event.new, event.path), markup=True)
             elif isinstance(event, CommandPreview):
                 console.print(f"\nCommand: {event.command}", markup=True)
+            elif isinstance(event, ContextCompacted):
+                console.print(f"[dim]{event.describe()}[/dim]")
 
 
 def _console_wire() -> Wire:
@@ -159,6 +163,11 @@ def main_command(
     resume: str | None = typer.Option(None, "--resume", help="resume the given session id"),
     continue_: bool = typer.Option(
         False, "--continue", "-c", help="resume the latest session in cwd"
+    ),
+    context_window: int = typer.Option(
+        0,
+        "--context-window",
+        help="Model context window in tokens (0 = provider default / env)",
     ),
 ) -> None:
 
@@ -200,6 +209,7 @@ def main_command(
                 provider=provider,
                 session_id=session.session_id if session else None,
                 registry=slash_registry,
+                context_window=context_window,
             ),
         )
         if slash_result.handled:
@@ -220,6 +230,7 @@ def main_command(
                     session=session,
                     system_prompt=system_prompt,
                     scheduler=scheduler,
+                    context_window=context_window,
                 )
             return
 
@@ -236,6 +247,7 @@ def main_command(
             session=session,
             system_prompt=system_prompt,
             scheduler=scheduler,
+            context_window=context_window,
         )
 
     # (1) One-shot branch.
@@ -253,6 +265,12 @@ def main_command(
         model=model,
         provider=provider,
         scheduler=scheduler,
+        context_budget=ContextBudget(
+            resolve_window(
+                provider,
+                override=context_window,
+            )
+        ),
     )
     tools = default_tools()
 
@@ -268,6 +286,7 @@ def main_command(
             session=session,
             system_prompt=system_prompt,
             wire=wire,
+            budget=state.context_budget,
         )
 
     def make_slash_context() -> SlashContext:
@@ -279,9 +298,10 @@ def main_command(
             session_id=session.session_id if session else None,
             state=state,
             registry=slash_registry,
+            context_window=context_window,
         )
 
-    initial_output = header_text(resolved_cwd, provider, model, base_url)
+    initial_output = build_banner(resolved_cwd, provider, model, base_url)
     run_interactive_shell(
         state,
         run_turn,

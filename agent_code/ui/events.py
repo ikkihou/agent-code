@@ -14,6 +14,7 @@ from ..output import OutputChunk
 from ..prompt_ui import render_diff
 from ..wire import (
     CommandPreview,
+    ContextCompacted,
     DiffPreview,
     Line,
     PromptEcho,
@@ -102,6 +103,8 @@ def event_to_chunks(event: WireEvent) -> list[OutputChunk]:
         ]
     if isinstance(event, CommandPreview):
         return [OutputChunk(f"\nCommand: {event.command}\n", format="rich")]
+    if isinstance(event, ContextCompacted):
+        return [OutputChunk(f"[dim]{event.describe()}[/dim]\n", format="rich")]
     return []
 
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from queue import Queue
 from typing import Any, Callable
 
+from .context import ContextBudget
 from .scheduler import CronScheduler
 
 PromptRequest = dict[str, Any]
@@ -31,6 +32,9 @@ class RuntimeState:
     permission_mode: str = "default"
     model: str = "deepseek-v4-flash"
     provider: str = "anthropic"
+    # Live context-usage tracker, reused across turns by the REPL so /context can
+    # report between turns. run_agent fills it when the caller passes no budget.
+    context_budget: ContextBudget | None = None
     abort_event: threading.Event = field(default_factory=threading.Event)
     input_queue: Queue[str] = field(default_factory=Queue)
     todo_store: list[TodoItem] = field(default_factory=list)
