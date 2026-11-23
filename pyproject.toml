@@ -12,9 +12,9 @@ dependencies = [
     "html2text>=2025.4.15",
     "httpx[socks]>=0.28.1",
     "pathspec>=1.1.1",
-    "prompt-toolkit>=3.0.52",
     "pyperclip>=1.11.0",
     "rich>=15.0.0",
+    "textual>=8.2.8",
     "typer>=0.26.7",
 ]
 

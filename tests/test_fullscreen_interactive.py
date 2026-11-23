@@ -1,19 +1,17 @@
-"""Event translation and state-machine tests for the scrollback+Live REPL.
+"""Event translation, transcript state-machine, and rendering tests (frontend-agnostic).
 
-Never touches a real terminal: LiveArea / event_to_chunks / the prompt state machine
-are pure functions or injectable state objects, and run_agent is driven by a fake
-provider.
+Never touches a real terminal: LiveArea / event_to_chunks / TranscriptSink / the
+scrollback fragment pipeline are pure functions or injectable state objects, and
+run_agent is driven by a fake provider. These are the pieces the prompt_toolkit shell
+and the Textual frontend share.
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
-from prompt_toolkit.completion import CompleteEvent
-from prompt_toolkit.document import Document
+from rich.cells import cell_len
 
 from agent_code.agent import run_agent
 from agent_code.model import ModelResponse, ModelStreamEvent
@@ -21,6 +19,7 @@ from agent_code.output import OutputChunk, markdown_fragments
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
+from agent_code.tui.transcript import TranscriptSink
 from agent_code.ui.completer import SlashCompleter
 from agent_code.ui.events import event_to_chunks, render_user_prompt
 from agent_code.ui.live import LiveArea
@@ -66,19 +65,9 @@ def _collecting_wire() -> tuple[Wire, _RecordingSink]:
     return wire, sink
 
 
-def _no_slash_context() -> SlashContext:
-    """Placeholder slash factory: the tests that install it never dispatch a slash command."""
-    raise AssertionError("slash context must not be used here")
-
-
-def _completion_texts(complete_state: Any) -> list[str]:
-    """Completion texts offered by a buffer's completion state.
-
-    Kept in its own function because pyright narrows ``buffer.complete_state`` to
-    ``None`` for the rest of a scope after an ``assert ... is None``, which would make a
-    later read of the property look like ``Never``.
-    """
-    return [completion.text for completion in complete_state.completions]
+def _sink_for_batch() -> TranscriptSink:
+    """Fresh TranscriptSink for consume-batch ordering tests."""
+    return TranscriptSink()
 
 
 class _FragmentedProvider:
@@ -410,27 +399,16 @@ def test_live_area_mid_turn_flush_keeps_fence_state() -> None:
 # ---- consume-batch ordering: scrollback must read in event order -------------
 
 
-def _shell_for_batch() -> Any:
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-    def noop(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    return InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
-
-
 def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
     """The reported bug: prose streamed before a tool call stayed in the Live area until
     a blank line closed it, so the tool lines (committed immediately) appeared ABOVE
     their own preamble."""
-    shell = _shell_for_batch()
+    sink = _sink_for_batch()
 
-    first = shell._handle_batch([TurnStarted(), TextDelta("Let me check git first.")])
+    first = sink.handle_batch([TurnStarted(), TextDelta("Let me check git first.")])
     assert first == []  # still the open paragraph in the Live area
 
-    second = shell._handle_batch(
+    second = sink.handle_batch(
         [
             ToolCallStarted(call_id="1", name="git_status", args_preview="{}"),
             ToolCallCompleted(call_id="1", name="git_status"),
@@ -439,36 +417,36 @@ def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
     # Prose is committed at once; the tool burst stays open (the model may call more
     # tools) and its summary lands when the burst closes.
     assert [chunk.text for chunk in second] == ["Let me check git first.\n\n"]
-    assert shell._tool_fold == [("git_status", "ok")]
+    assert sink.tool_fold == [("git_status", "ok")]
 
-    third = shell._handle_batch([TextDelta("Done. Nothing to report."), TurnEnded()])
+    third = sink.handle_batch([TextDelta("Done. Nothing to report."), TurnEnded()])
     assert [chunk.text for chunk in third] == [
         "✓ git_status\n",
         "Done. Nothing to report.\n",
     ]
-    assert shell._live.open_paragraph == []
-    assert shell._tool_fold == []
+    assert sink.live.open_paragraph == []
+    assert sink.tool_fold == []
 
 
 def test_consume_batch_folds_a_tool_burst_into_one_line() -> None:
     """Twenty tool calls must not occupy twenty rows: one burst -> one summary line."""
-    shell = _shell_for_batch()
+    sink = _sink_for_batch()
     calls: list[Any] = [TurnStarted()]
     for index in range(4):
         calls.append(ToolCallStarted(call_id=str(index), name="bash", args_preview="{}"))
         calls.append(ToolCallCompleted(call_id=str(index), name="bash"))
     calls.append(TurnEnded())
 
-    chunks = shell._handle_batch(calls)
+    chunks = sink.handle_batch(calls)
 
     assert [chunk.text for chunk in chunks] == ["✓ 4 tools: bash ×4\n"]
-    assert shell._tool_fold == []
+    assert sink.tool_fold == []
 
 
 def test_consume_batch_tool_summary_before_resumed_prose() -> None:
     """The burst closes when the model speaks again, so the summary precedes that prose."""
-    shell = _shell_for_batch()
-    shell._handle_batch(
+    sink = _sink_for_batch()
+    sink.handle_batch(
         [
             TurnStarted(),
             ToolCallStarted(call_id="1", name="read_file", args_preview="{}"),
@@ -476,15 +454,15 @@ def test_consume_batch_tool_summary_before_resumed_prose() -> None:
         ]
     )
 
-    chunks = shell._handle_batch([TextDelta("The file says hi."), TurnEnded()])
+    chunks = sink.handle_batch([TextDelta("The file says hi."), TurnEnded()])
     assert [chunk.text for chunk in chunks] == ["✓ read_file\n", "The file says hi.\n"]
 
 
 def test_consume_batch_records_declined_tools_in_the_fold() -> None:
     """A rejected confirmation settles the call (no hanging spinner) and is visible in
     the folded summary."""
-    shell = _shell_for_batch()
-    chunks = shell._handle_batch(
+    sink = _sink_for_batch()
+    chunks = sink.handle_batch(
         [
             TurnStarted(),
             ToolCallStarted(call_id="1", name="bash", args_preview="{}"),
@@ -676,9 +654,7 @@ def test_pad_full_width_expands_tabs_and_skips_overwide_lines() -> None:
 
 def _max_line_width(fragments: list[tuple[str, str]]) -> int:
     """Widest visual line in a fragment list, in terminal cells."""
-    from prompt_toolkit.utils import get_cwidth
-
-    return max(get_cwidth(line) for line in "".join(t for _, t in fragments).split("\n"))
+    return max(cell_len(line) for line in "".join(t for _, t in fragments).split("\n"))
 
 
 def test_markdown_wraps_at_the_requested_width() -> None:
@@ -733,50 +709,13 @@ def test_pad_full_width_targets_the_commit_width(monkeypatch: Any) -> None:
 
 def test_live_tail_truncates_by_display_width() -> None:
     """Wide text is cut by cells, not characters, so the Live window keeps one row."""
-    from prompt_toolkit.utils import get_cwidth
-
     from agent_code.ui.live import _fit_width
 
     assert _fit_width("abc", 10) == "abc"
     assert _fit_width("中文中文", 5) == "中文"  # 4 cells fit, a third char would make 6
     assert _fit_width("中文" * 20, 7) == "中文中"
-    assert get_cwidth(_fit_width("中文" * 20, 7)) <= 7
+    assert cell_len(_fit_width("中文" * 20, 7)) <= 7
     assert _fit_width("anything", 0) == ""
-
-
-def test_commit_chunk_through_patch_stdout_preserves_ansi() -> None:
-    """The real StdoutProxy path must not replace ESC with '?' (P0 regression)."""
-    from prompt_toolkit.application import create_app_session
-    from prompt_toolkit.input.base import DummyInput
-    from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.patch_stdout import patch_stdout
-
-    from agent_code.ui.scrollback import commit_chunk
-
-    class _RecordingOutput(DummyOutput):
-        def __init__(self) -> None:
-            self.raw_chunks: list[str] = []
-            self.written_chunks: list[str] = []
-
-        def write_raw(self, data: str) -> None:
-            self.raw_chunks.append(data)
-
-        def write(self, data: str) -> None:
-            # Mirror Vt100_Output.write: the non-raw StdoutProxy path escapes ESC.
-            self.written_chunks.append(data.replace("\x1b", "?"))
-
-        def flush(self) -> None:
-            pass
-
-    output = _RecordingOutput()
-    with create_app_session(input=DummyInput(), output=output):
-        with patch_stdout(raw=True):
-            commit_chunk(render_user_prompt("hello"), columns=40)
-
-    raw = "".join(output.raw_chunks)
-    assert "\x1b[1;37;48;2;68;68;68m" in raw
-    assert "?[" not in raw
-    assert output.written_chunks == []
 
 
 def test_transcript_prompt_style_survives_resume(tmp_path: Path) -> None:
@@ -944,11 +883,10 @@ def test_sessions_slash_with_records_returns_text(tmp_path: Path) -> None:
 
 
 def test_slash_completer_suggests_command_prefixes() -> None:
-    completions = list(SlashCompleter().get_completions(Document("/he"), CompleteEvent()))
+    suggestions = SlashCompleter().suggestions("/he")
 
-    assert [completion.text for completion in completions] == ["/help"]
-    assert completions[0].start_position == -3
-    assert str(completions[0].display_meta_text) == "show all available slash commands"
+    assert [s.insert for s in suggestions] == ["/help"]
+    assert suggestions[0].meta == "show all available slash commands"
 
 
 def test_slash_completer_prefix_first_contains_fallback() -> None:
@@ -957,327 +895,25 @@ def test_slash_completer_prefix_first_contains_fallback() -> None:
     via the contains fallback."""
     completer = SlashCompleter()
 
-    ex_names = [
-        completion.text
-        for completion in completer.get_completions(Document("/ex"), CompleteEvent())
-    ]
+    ex_names = [s.insert for s in completer.suggestions("/ex")]
     assert ex_names.index("/exit") < ex_names.index("/context")
 
-    assert [
-        completion.text
-        for completion in completer.get_completions(Document("/ELP"), CompleteEvent())
-    ] == ["/help"]
+    assert [s.insert for s in completer.suggestions("/ELP")] == ["/help"]
 
 
 def test_slash_completer_ignores_non_command_input() -> None:
     completer = SlashCompleter()
 
-    assert list(completer.get_completions(Document("hello"), CompleteEvent())) == []
-    assert list(completer.get_completions(Document("/loop "), CompleteEvent())) == []
+    assert completer.suggestions("hello") == []
+    assert completer.suggestions("/loop ") == []
 
 
-def test_backspace_reopens_slash_completion() -> None:
-    """complete_while_typing only fires on inserts; our backspace binding must re-run it."""
-    import asyncio
-
-    from prompt_toolkit.input import create_pipe_input
-    from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.shortcuts import PromptSession
-
-    from agent_code.ui.keys import build_key_bindings
-    from agent_code.ui.shell import InteractiveShell
-
-    async def check() -> None:
-        state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-        def noop(*args: Any, **kwargs: Any) -> None:
-            return None
-
-        shell = InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
-        kb = build_key_bindings(state, shell._busy)
-        with create_pipe_input() as pipe:
-            session = PromptSession(
-                completer=SlashCompleter(),
-                complete_while_typing=True,
-                key_bindings=kb,
-                input=pipe,
-                output=DummyOutput(),
-                multiline=True,
-                reserve_space_for_menu=0,
-            )
-            task = asyncio.create_task(session.prompt_async(show_frame=True))
-            await asyncio.sleep(0.05)
-            pipe.send_text("/helx")
-            await asyncio.sleep(0.3)
-            assert session.default_buffer.complete_state is None
-
-            pipe.send_text("\x7f")  # backspace -> /hel
-            for _ in range(20):
-                if session.default_buffer.complete_state is not None:
-                    break
-                await asyncio.sleep(0.02)
-            complete_state = session.default_buffer.complete_state
-            assert complete_state is not None
-            assert _completion_texts(complete_state) == ["/help"]
-
-            pipe.send_text("\r")
-            await asyncio.wait_for(task, timeout=2)
-
-    asyncio.run(check())
-
-
-# ---- prompt state machine (the pending branch of submit_text, driven by a fake future) ----
-
-
-def test_shell_render_live_includes_pending_prompt() -> None:
-    """While a prompt is pending, Live-area rendering must include the input prompt and must
-    never raise.
-
-    We once mutated the return value with FormattedText.fragments.insert -- FormattedText
-    has no fragments attribute, the exception killed the prompt render thread, and
-    subsequent input never came back.
-    """
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-    shell = InteractiveShell(state, run_turn=lambda *a: None, make_slash_context=_no_slash_context)
-    shell._pending_prompt = {
-        "request": {"type": "confirm", "message": "Run this command?", "default": False},
-        "future": None,
-    }
-
-    text = "".join(t for _, t in shell._render_live())
-    # The Live area must NOT duplicate the question line -- it lives in the prompt
-    # message (_prompt_message). With no content parked (bare confirm, no preview), the
-    # Live area is empty.
-    assert "Confirm [y/N]:" not in text
-    assert "Run this command?" not in text
-    prompt_text = "".join(t for _, t in shell._prompt_message())
-    assert prompt_text == "? Run this command? [y/N]: "
-
-
-def test_shell_submit_text_routes_pending_choice_answer() -> None:
-    """Pending choice prompt: the answer goes straight into the future and the state machine clears."""
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-    def noop(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
-    shell._commit_now = lambda text: None  # never touch the real terminal
-
-    loop = asyncio.new_event_loop()
-    try:
-        future = loop.create_future()
-        shell._pending_prompt = {
-            "request": {"type": "choice", "labels": ["a", "b", "c"], "default": 0},
-            "future": future,
-        }
-
-        shell._submit_text("2")
-
-        assert future.done() and future.result() == "2"
-        assert shell._pending_prompt is None
-    finally:
-        loop.close()
-
-
-def test_shell_submit_text_rejects_invalid_choice_and_keeps_pending() -> None:
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-    def noop(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
-    shell._commit_now = lambda text: None
-
-    loop = asyncio.new_event_loop()
-    try:
-        future = loop.create_future()
-        entry = {
-            "request": {"type": "choice", "labels": ["a", "b"], "default": 0},
-            "future": future,
-        }
-        shell._pending_prompt = dict(entry)
-
-        shell._submit_text("9")  # invalid
-
-        assert not future.done()
-        assert shell._pending_prompt == entry  # stays pending, waiting for the next input
-    finally:
-        loop.close()
-
-
-# ---- layout reshaping: input area Frame ---------------------------------------
-
-
-def _build_framed_session(multiline: bool = False) -> Any:
-    """PromptSession in the production shape: the frame branch exists in the layout
-    (pt builds it unconditionally) even though ``show_frame`` is only enabled per
-    ``prompt_async(show_frame=True)`` call."""
-    from prompt_toolkit.input.base import DummyInput
-    from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.shortcuts import PromptSession
-
-    from agent_code.ui.completer import SlashCompleter
-
-    return PromptSession[str](
-        message="> ",
-        completer=SlashCompleter(),
-        input=DummyInput(),
-        output=DummyOutput(),
-        reserve_space_for_menu=0,
-        multiline=multiline,
-    )
-
-
-def _frame_split(session: Any) -> Any:
-    """Return the Frame's HSplit [top rule, middle VSplit, bottom rule].
-
-    Located by shape (not position) even before the side borders are stripped.
-    """
-    from prompt_toolkit.layout.containers import HSplit, VSplit, Window
-    from prompt_toolkit.widgets.base import Border
-
-    def is_bar(node: Any) -> bool:
-        return isinstance(node, Window) and node.char == Border.VERTICAL
-
-    for node in _all_containers(session.layout.container):
-        if not (isinstance(node, HSplit) and len(node.children) == 3):
-            continue
-        middle = node.children[1]
-        if (
-            isinstance(middle, VSplit)
-            and len(middle.children) == 3
-            and is_bar(middle.children[0])
-            and is_bar(middle.children[2])
-        ):
-            return node
-    raise AssertionError("Frame split not found")
-
-
-def _default_buffer_window(session: Any) -> Any:
-    """The Window holding the input buffer (the layout has several BufferControls)."""
-    from prompt_toolkit.layout.controls import BufferControl
-
-    return next(
-        w
-        for w in _all_windows(session.layout.container)
-        if isinstance(w.content, BufferControl) and w.content.buffer is session.default_buffer
-    )
-
-
-def test_collapse_input_height_stops_at_content() -> None:
-    """The input area must not absorb the rest of the screen: with a bare Dimension() the
-    buffer window stretches to the bottom_toolbar, the frame encloses a tall empty box,
-    and run_in_terminal commits land inside it instead of scrolling above the prompt."""
-    from agent_code.ui.layout import collapse_input_height
-
-    session = _build_framed_session()
-    buffer_window = _default_buffer_window(session)
-    assert not buffer_window.dont_extend_height()
-
-    collapse_input_height(session)
-
-    assert buffer_window.dont_extend_height()
-    # In place: the focus stack keeps its reference, so the same object must be in the tree.
-    assert _default_buffer_window(session) is buffer_window
-
-
-def test_collapse_input_height_grows_with_multiline_content() -> None:
-    """The input frame must grow with the buffer instead of staying one line high."""
-    from prompt_toolkit.application import create_app_session
-    from prompt_toolkit.application.current import set_app
-    from prompt_toolkit.input.base import DummyInput
-    from prompt_toolkit.output import DummyOutput
-
-    from agent_code.ui.layout import collapse_input_height
-
-    async def check() -> None:
-        with create_app_session(input=DummyInput(), output=DummyOutput()):
-            session = _build_framed_session(multiline=True)
-            set_app(session.app)
-            collapse_input_height(session)
-            buffer_window = _default_buffer_window(session)
-
-            assert buffer_window.preferred_height(80, 24).preferred == 1
-            session.default_buffer.text = "line one\nline two\nline three"
-            assert buffer_window.preferred_height(80, 24).preferred == 3
-
-    asyncio.run(check())
-
-
-def test_multiline_key_bindings_insert_newline_and_enter_submits() -> None:
-    """Alt+Enter / Ctrl+J insert a newline; Enter submits the whole prompt."""
-    from prompt_toolkit.buffer import Buffer
-    from prompt_toolkit.keys import Keys
-
-    from agent_code.ui.keys import build_key_bindings
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-    def noop(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    shell = InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
-    kb = build_key_bindings(state, shell._busy)
-
-    def binding_for(*keys: Any) -> Any:
-        return next(b for b in kb.bindings if b.keys == keys).handler
-
-    accepted: list[str] = []
-
-    def accept(buffer: Buffer) -> bool:
-        accepted.append(buffer.text)
-        return False
-
-    buffer = Buffer(accept_handler=accept)
-    buffer.text = "line one"
-    buffer.cursor_position = len(buffer.text)
-    event = SimpleNamespace(current_buffer=buffer)
-
-    binding_for(Keys.Escape, Keys.ControlM)(event)
-    assert buffer.text == "line one\n"
-    binding_for(Keys.ControlJ)(event)
-    assert buffer.text == "line one\n\n"
-    assert accepted == []
-
-    binding_for(Keys.ControlM)(event)
-    assert accepted == ["line one\n\n"]
-
-
-def test_shift_enter_sequences_map_to_control_j() -> None:
-    """Standard Shift+Enter encodings must surface as ControlJ, not ControlM."""
-    from prompt_toolkit.input.vt100_parser import Vt100Parser
-    from prompt_toolkit.keys import Keys
-
-    from agent_code.ui import shell as shell_module  # noqa: F401 - installs the mapping
-
-    def parse(sequence: str) -> list[Any]:
-        keys: list[Any] = []
-        parser = Vt100Parser(keys.append)
-        parser.feed(sequence)
-        parser.flush()
-        return [key.key for key in keys]
-
-    assert parse("\r") == [Keys.ControlM]
-    assert parse("\n") == [Keys.ControlJ]
-    for sequence in (
-        "\x1b[13;2u",  # kitty CSI-u
-        "\x1b[27;2;13u",  # kitty legacy
-        "\x1b[27;2;13~",  # xterm modifyOtherKeys
-    ):
-        assert parse(sequence) == [Keys.ControlJ]
+# ---- bottom status bar ------------------------------------------------------
 
 
 def test_bottom_toolbar_only_shows_mode_and_model() -> None:
     from agent_code.runtime import TodoItem
-    from agent_code.ui.theme import bottom_toolbar
+    from agent_code.ui.status import bottom_toolbar
 
     state = RuntimeState(permission_mode="plan", model="mock")
     state.todo_store = [TodoItem(content="task", status="in_progress", active_form="working")]
@@ -1288,7 +924,7 @@ def test_bottom_toolbar_only_shows_mode_and_model() -> None:
 def test_bottom_toolbar_shows_context_usage() -> None:
     """With a live budget the toolbar gains a token bar; hot styling at threshold."""
     from agent_code.context import ContextBudget
-    from agent_code.ui.theme import bottom_toolbar
+    from agent_code.ui.status import bottom_toolbar
 
     state = RuntimeState(permission_mode="default", model="mock")
     budget = ContextBudget(window_tokens=100_000)
@@ -1312,7 +948,7 @@ def test_bottom_toolbar_shows_context_usage() -> None:
 
 def test_bottom_toolbar_mode_segment_tint_tracks_permission_mode() -> None:
     """The mode segment's color class follows the permission mode."""
-    from agent_code.ui.theme import bottom_toolbar
+    from agent_code.ui.status import bottom_toolbar
 
     for mode, cls in [
         ("default", "mode.default"),
@@ -1326,369 +962,8 @@ def test_bottom_toolbar_mode_segment_tint_tracks_permission_mode() -> None:
 
 def test_bottom_toolbar_omits_context_without_budget() -> None:
     """No budget (one-shot state) -> no context segment, no misleading zero."""
-    from agent_code.ui.theme import bottom_toolbar
+    from agent_code.ui.status import bottom_toolbar
 
     state = RuntimeState(permission_mode="default", model="mock")
     text = "".join(t for _s, t in bottom_toolbar(state))
     assert "tokens" not in text
-
-
-def test_collapse_input_height_never_reserves_menu_rows() -> None:
-    """The menu is a Float below the frame, so it never grows the input window."""
-    from agent_code.ui.layout import collapse_input_height
-
-    session = _build_framed_session()
-    collapse_input_height(session)
-    buffer_window = _default_buffer_window(session)
-
-    assert buffer_window.height.min == 0
-
-    session.default_buffer.complete_state = object()  # any non-None completion state
-    try:
-        assert buffer_window.height.min == 0
-    finally:
-        session.default_buffer.complete_state = None
-
-
-def test_completion_menu_floats_anchor_below_frame() -> None:
-    from prompt_toolkit.layout.containers import FloatContainer
-    from prompt_toolkit.layout.menus import (
-        CompletionsMenu,
-        MultiColumnCompletionsMenu,
-    )
-
-    from agent_code.ui.layout import (
-        _CompletionMenuFloat,
-        relocate_completion_menus,
-    )
-
-    session = _build_framed_session()
-    relocate_completion_menus(session)
-
-    seen: set[int] = set()
-    floats = []
-    for node in _all_containers(session.layout.container):
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        if not isinstance(node, FloatContainer):
-            continue
-        floats.extend(
-            float_
-            for float_ in node.floats
-            if any(
-                isinstance(menu, (CompletionsMenu, MultiColumnCompletionsMenu))
-                for menu in _all_containers(float_.content)
-            )
-        )
-    assert len(floats) == 2
-    for float_ in floats:
-        assert isinstance(float_, _CompletionMenuFloat)
-        assert float_.xcursor is True
-        assert float_.ycursor is False
-        # No render has happened yet, so the body-height fallback is one row, and the
-        # wrapped menu starts right below the frame's bottom rule (body + 1). The blank
-        # row that separates it from the rule is part of the wrapped content.
-        assert float_.top == 2
-
-    # The dynamic top offset follows the actual input-window body height.
-    input_window = _default_buffer_window(session)
-    input_window.render_info = SimpleNamespace(window_height=3)
-    for float_ in floats:
-        assert float_.top == 4
-
-
-def test_menu_wrapper_keeps_a_gap_below_only() -> None:
-    """The menu float's content owns its spacing: no blank row above (the frame's bottom
-    rule already delimits the input), one blank row below (keeping it off the status bar)."""
-    from prompt_toolkit.filters import Condition
-    from prompt_toolkit.layout.containers import Window
-    from prompt_toolkit.layout.dimension import Dimension
-
-    from agent_code.ui.layout import _menu_with_gaps
-
-    menu = Window(height=Dimension.exact(3))  # stands in for a 3-row completion menu
-    wrapper = _menu_with_gaps(menu)
-
-    wrapped_menu, bottom_gap = wrapper.content.children
-    assert wrapped_menu is menu
-    assert isinstance(bottom_gap, Window)
-    assert bottom_gap.height is not None
-    gap_height = bottom_gap.height
-    assert isinstance(gap_height, Dimension)
-    assert gap_height.min == 1 and gap_height.max == 1
-    assert wrapper.preferred_height(80, 20).preferred == 4
-
-    # Closing the menu collapses the wrapper (and therefore the reserved rows).
-    wrapper.filter = Condition(lambda: False)
-    assert wrapper.preferred_height(80, 20).preferred == 0
-
-
-def test_menu_spacer_reserves_rows_only_while_completions_are_open() -> None:
-    """A spacer between the frame and the status bar grows with the menu, then collapses."""
-    import asyncio
-
-    from prompt_toolkit.input import create_pipe_input
-    from prompt_toolkit.layout.containers import Window
-    from prompt_toolkit.layout.dimension import Dimension
-    from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.shortcuts import PromptSession
-
-    from agent_code.ui.completer import SlashCompleter
-    from agent_code.ui.keys import build_key_bindings
-    from agent_code.ui.layout import (
-        _children,
-        _frame_branch_index,
-        relocate_completion_menus,
-    )
-    from agent_code.ui.shell import InteractiveShell
-
-    async def check() -> None:
-        state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-        def noop(*args: Any, **kwargs: Any) -> None:
-            return None
-
-        shell = InteractiveShell(state, run_turn=noop, make_slash_context=_no_slash_context)
-        kb = build_key_bindings(state, shell._busy)
-        with create_pipe_input() as pipe:
-            session = PromptSession(
-                completer=SlashCompleter(),
-                complete_while_typing=True,
-                key_bindings=kb,
-                input=pipe,
-                output=DummyOutput(),
-                multiline=True,
-                reserve_space_for_menu=0,
-                bottom_toolbar=lambda: " STATUS ",
-            )
-            relocate_completion_menus(session)
-            root_children = _children(session.layout.container) or []
-            spacer = root_children[_frame_branch_index(session) + 1]
-            assert isinstance(spacer, Window)
-            spacer_height = spacer.height
-            assert callable(spacer_height)
-
-            task = asyncio.create_task(session.prompt_async(show_frame=True))
-            await asyncio.sleep(0.1)
-            # Closed: no rows reserved.
-            closed = spacer_height()
-            assert isinstance(closed, Dimension)
-            assert closed.min == 0
-
-            pipe.send_text("/")
-            for _ in range(40):
-                if session.default_buffer.complete_state is not None:
-                    break
-                await asyncio.sleep(0.02)
-            await asyncio.sleep(0.1)
-            # Open: the spacer takes the menu's rows (7 slash commands).
-            opened = spacer_height()
-            assert isinstance(opened, Dimension)
-            assert opened.min > 0
-
-            pipe.send_text("\r")
-            await asyncio.wait_for(task, timeout=2)
-
-    asyncio.run(check())
-
-
-def test_strip_frame_side_borders_removes_vertical_bars() -> None:
-    """Only the horizontal rules remain: both side-border windows collapse to width 0,
-    while the body and the input buffer window stay untouched."""
-    from prompt_toolkit.layout.containers import VSplit, Window
-    from prompt_toolkit.layout.controls import BufferControl
-    from prompt_toolkit.layout.dimension import Dimension
-
-    from agent_code.ui.layout import strip_frame_side_borders
-
-    session = _build_framed_session()
-    middle = _frame_split(session).children[1]
-    assert isinstance(middle, VSplit)
-    left, body, right = middle.children
-    assert isinstance(left, Window) and isinstance(right, Window)
-    assert left.width != 0 and right.width != 0  # side borders visible before
-
-    strip_frame_side_borders(session)
-
-    left, body_after, right = middle.children
-    assert isinstance(left, Window) and isinstance(right, Window)
-    assert isinstance(left.width, Dimension) and isinstance(right.width, Dimension)
-    assert left.width.preferred == 0 and left.width.max == 0
-    assert right.width.preferred == 0 and right.width.max == 0
-    # The body (and therefore the input buffer window) is the same object as before.
-    assert body_after is body
-    assert any(isinstance(w.content, BufferControl) for w in _all_windows(body_after))
-
-
-def test_strip_frame_side_borders_keeps_horizontal_rules() -> None:
-    """The top and bottom rule rows must survive: the first and last children of the
-    Frame split are untouched."""
-    from agent_code.ui.layout import strip_frame_side_borders
-
-    session = _build_framed_session()
-    frame_split = _frame_split(session)
-    top_before, _, bottom_before = frame_split.children
-
-    strip_frame_side_borders(session)
-
-    assert frame_split.children[0] is top_before
-    assert frame_split.children[2] is bottom_before
-
-
-def test_render_live_excludes_prompt_marker_and_live_content() -> None:
-    """The Live area window shows in-progress content only: no '> ' marker (the input
-    prompt belongs to the frame's message), and no trailing blank line (which would
-    reserve a row while idle)."""
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-    def noop(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
-    shell._live.open_paragraph = ["streamed line"]
-    shell._live.stream_pending = "partial"
-
-    fragments = shell._render_live()
-    text = "".join(t for _, t in fragments)
-
-    assert ">" not in text
-    assert "streamed line" in text
-    assert not fragments[-1][1].endswith("\n")
-
-
-def test_render_live_is_empty_when_idle() -> None:
-    """Idle: nothing in progress -> no fragments at all, so the Live window's preferred
-    height is zero and it occupies no rows."""
-    from agent_code.ui.shell import InteractiveShell
-
-    state = RuntimeState(permission_mode="default", model="mock", provider="mock")
-
-    def noop(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    shell = InteractiveShell(state=state, run_turn=noop, make_slash_context=_no_slash_context)
-
-    assert shell._render_live() == []
-
-
-def test_live_window_is_above_the_input_frame() -> None:
-    """The Live area must be a sibling of the frame branch placed immediately above it --
-    not part of the prompt message, which pt renders inside the frame."""
-    from agent_code.ui.layout import install_live_area_window
-
-    session = _build_framed_session()
-    from agent_code.ui.layout import _find_frame_split
-
-    frame_split = _find_frame_split(session)
-    assert frame_split is not None
-    root_before = session.layout.container
-
-    live_window = install_live_area_window(session, lambda: [("", "live")])
-
-    root = session.layout.container
-    assert root is root_before
-    live_index = root.children.index(live_window)
-    frame_index = next(
-        i
-        for i, child in enumerate(root.children)
-        if any(node is frame_split for node in _all_containers(child))
-    )
-    assert live_index == frame_index - 1  # immediately above the frame
-    assert live_window.dont_extend_height()  # content height, not the full width
-
-
-# ---- regressions: prompt_async argument handling / erase_when_done -----------
-
-
-def test_prompt_async_overwrites_show_frame_unless_passed_explicitly() -> None:
-    """Guard the trap that made the frame never appear.
-
-    ``PromptSession(show_frame=True)`` alone is not enough: ``prompt_async`` declares
-    ``show_frame: FilterOrBool = False`` and assigns it unconditionally (the code is
-    ``if show_frame is not None: self.show_frame = show_frame``, and the default is
-    False, not None). So every call resets it to False. The shell must pass
-    ``show_frame=True`` on each ``prompt_async()`` call -- this test pins the pt
-    behaviour that forces that.
-    """
-    import inspect
-
-    from prompt_toolkit.shortcuts import PromptSession
-
-    signature = inspect.signature(PromptSession.prompt_async)
-    default = signature.parameters["show_frame"].default
-    assert default is not None, "pt now uses None as the default: the workaround can go"
-    assert not default, "pt default is falsy -> a constructor-only show_frame is reset"
-
-
-def test_shell_passes_show_frame_on_every_prompt_call() -> None:
-    """The prompt loop must pass show_frame=True per call (source-level check)."""
-    import inspect
-
-    from agent_code.ui import shell as shell_module
-
-    source = inspect.getsource(shell_module.InteractiveShell._run_async)
-    assert "prompt_async(show_frame=True)" in source
-
-
-def test_shell_uses_raw_patch_stdout() -> None:
-    """raw=True is required or StdoutProxy turns ANSI ESC into literal '?'."""
-    import inspect
-
-    from agent_code.ui import shell as shell_module
-
-    source = inspect.getsource(shell_module.InteractiveShell._run_async)
-    assert "patch_stdout(raw=True)" in source
-
-
-def test_shell_uses_multiline_prompt_layout() -> None:
-    """The production PromptSession must be multiline so the frame can grow."""
-    import inspect
-
-    from agent_code.ui import shell as shell_module
-
-    source = inspect.getsource(shell_module.InteractiveShell._run_async)
-    assert "multiline=True" in source
-
-
-def test_shell_erases_prompt_when_done() -> None:
-    """erase_when_done must be True, or the typed line stays on screen and the styled
-    echo we commit duplicates the user prompt."""
-    from prompt_toolkit.input.base import DummyInput
-    from prompt_toolkit.output import DummyOutput
-    from prompt_toolkit.shortcuts import PromptSession
-
-    # Mirrors the construction in _run_async (PromptSession exposes it via .app, so
-    # assert on the same parameter the shell passes).
-    session = PromptSession[str](
-        message="> ",
-        input=DummyInput(),
-        output=DummyOutput(),
-        erase_when_done=True,
-    )
-    assert session.app.erase_when_done is True
-
-
-def _all_windows(root: Any) -> list[Any]:
-    from prompt_toolkit.layout.containers import Window
-
-    stack: list[Any] = [root]
-    out: list[Any] = []
-    while stack:
-        node = stack.pop()
-        if isinstance(node, Window):
-            out.append(node)
-        stack.extend(node.get_children())
-    return out
-
-
-def _all_containers(root: Any) -> list[Any]:
-    stack: list[Any] = [root]
-    out: list[Any] = []
-    while stack:
-        node = stack.pop()
-        out.append(node)
-        stack.extend(node.get_children())
-    return out

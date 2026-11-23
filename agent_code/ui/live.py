@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from prompt_toolkit.utils import get_cwidth
+from rich.cells import cell_len
 
 from ..output import StyleAndText
 from ..wire import CommandPreview, DiffPreview, WireEvent
@@ -29,17 +29,17 @@ def _fit_width(text: str, columns: int) -> str:
     """Truncate ``text`` to at most ``columns`` terminal cells.
 
     Character slicing is wrong for wide text: 40 CJK characters are 80 cells, so the
-    Live line would overflow a 40-column window and prompt_toolkit would wrap it into
-    extra rows, pushing the input frame down. Measure display cells instead.
+    Live line would overflow a 40-column window and wrap it into extra rows, pushing
+    the input down. Measure display cells instead.
     """
     if columns <= 0:
         return ""
-    if get_cwidth(text) <= columns:
+    if cell_len(text) <= columns:
         return text
     kept: list[str] = []
     used = 0
     for char in text:
-        width = get_cwidth(char)
+        width = cell_len(char)
         if used + width > columns:
             break
         kept.append(char)

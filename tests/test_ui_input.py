@@ -1,14 +1,13 @@
 """Tests for REPL input ergonomics: @file mention completion and paste placeholdering.
 
-Pure-function tests: the completer is exercised through prompt_toolkit's Document
-(no live app), and the paste cache / key-binding logic through direct calls.
+Pure-function tests: the completer is exercised through its frontend-agnostic
+``suggestions(text)`` API (no live app, no prompt_toolkit), and the paste cache /
+key-binding logic through direct calls.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-
-from prompt_toolkit.document import Document
 
 from agent_code.ui.completer import FileMentionCompleter
 from agent_code.ui.paste import PasteCache, is_oversized_paste
@@ -29,8 +28,7 @@ def _make_tree(tmp_path: Path) -> Path:
 
 
 def _completions(completer: FileMentionCompleter, text: str) -> list[str]:
-    doc = Document(text, len(text))
-    return [c.text for c in completer.get_completions(doc, None)]
+    return [s.insert for s in completer.suggestions(text)]
 
 
 # ---- @file mention completion ----------------------------------------------

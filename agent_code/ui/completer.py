@@ -1,26 +1,24 @@
-"""Input completers: slash commands and @file mentions.
+"""Input completers: slash commands and @file mentions (frontend-agnostic).
 
 ``SlashCompleter`` lists available commands when the input line starts with ``/``;
 ``FileMentionCompleter`` completes file paths after an ``@`` mention, modelled on
-kimi-cli's ``LocalFileMentionCompleter``: subsequence fuzzy matching with in-menu
-highlight, a lightweight top-level listing for the first keystroke, an
-``@``-guard that keeps emails from triggering, and a short-circuit once the
-fragment already names an existing file. File discovery reuses the agent's own
-``SkipPolicy`` (skip dirs + .gitignore) with an early-pruned scandir walk, so a
-mention can only ever reference what the agent could read. The REPL merges both
-completers with ``merge_completers``.
+kimi-cli's ``LocalFileMentionCompleter``: subsequence fuzzy matching, a lightweight
+top-level listing for the first keystroke, an ``@``-guard that keeps emails from
+triggering, and a short-circuit once the fragment already names an existing file. File
+discovery reuses the agent's own ``SkipPolicy`` (skip dirs + .gitignore) with an
+early-pruned scandir walk.
+
+The public API is ``suggestions(text_before_cursor) -> list[Suggestion]`` -- no
+prompt_toolkit protocol -- so both the Textual frontend and tests consume plain
+dataclasses.
 """
 
 from __future__ import annotations
 
 import os
-import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.document import Document
 
 from ..fs_safety import SkipPolicy, load_gitignore, should_skip
 from ..slash import SlashRegistry, default_slash_registry
@@ -37,10 +35,6 @@ _MAX_MENTION_FILES = 2000
 # Completions yielded per keystroke.
 _MAX_MENTION_RESULTS = 32
 
-# The mention fragment: everything from the "@" up to the next whitespace. Used both
-# to extract the fragment from the buffer and as the WordCompleter word pattern.
-_FRAGMENT_PATTERN = re.compile(r"[^\s@]+")
-
 # Characters that, immediately before the "@", keep it from triggering. "@user@host"
 # or "cost@100" are not file mentions. (kimi-cli's _TRIGGER_GUARDS.)
 _TRIGGER_GUARDS = frozenset((".", "-", "_", "`", "'", '"', ":", "@", "#", "~"))
@@ -48,6 +42,19 @@ _TRIGGER_GUARDS = frozenset((".", "-", "_", "`", "'", '"', ":", "@", "#", "~"))
 # Path fragments shorter than this (with no "/") only get top-level entries: a deep
 # scan for "@a" is wasted work and floods the menu with irrelevant paths.
 _TOP_LEVEL_MAX_QUERY = 3
+
+
+@dataclass(frozen=True)
+class Suggestion:
+    """One completion candidate.
+
+    ``insert`` is what replaces the active word; ``display`` is the short menu label;
+    ``meta`` is the longer description shown dimmed on the right.
+    """
+
+    insert: str
+    display: str
+    meta: str = ""
 
 
 def _extract_fragment(text: str) -> str | None:
@@ -70,57 +77,52 @@ def _extract_fragment(text: str) -> str | None:
     return fragment
 
 
-class SlashCompleter(Completer):
+class SlashCompleter:
     def __init__(self, registry: SlashRegistry | None = None) -> None:
         self._registry = registry or default_slash_registry()
 
-    def get_completions(self, document: Document, complete_event: Any) -> Any:
-        text_before_cursor = document.text_before_cursor
+    def suggestions(self, text_before_cursor: str) -> list[Suggestion]:
         if not text_before_cursor.startswith("/") or any(
             char.isspace() for char in text_before_cursor
         ):
-            return
+            return []
 
         prefix = text_before_cursor[1:].casefold()
-        prefix_hits: list[Completion] = []
-        contains_hits: list[Completion] = []
+        prefix_hits: list[Suggestion] = []
+        contains_hits: list[Suggestion] = []
         for command in self._registry.commands():
             name = command.name.casefold()
-            completion = Completion(
-                f"/{command.name}",
-                start_position=-len(text_before_cursor),
+            suggestion = Suggestion(
+                insert=f"/{command.name}",
                 display=f"/{command.name}",
-                display_meta=command.description,
+                meta=command.description,
             )
             # Two-tier matching: prefix matches first (what the user most likely
             # meant), contains matches kept as a fallback so a typo mid-word
             # ("/elp" -> /help) still surfaces the command -- just ranked lower.
             if name.startswith(prefix):
-                prefix_hits.append(completion)
+                prefix_hits.append(suggestion)
             elif prefix in name:
-                contains_hits.append(completion)
-        yield from prefix_hits
-        yield from contains_hits
+                contains_hits.append(suggestion)
+        return prefix_hits + contains_hits
 
 
-class FileMentionCompleter(Completer):
+class FileMentionCompleter:
     """Complete file paths after an ``@`` mention, e.g. ``read @agent_code/ma``.
 
     Matching is kimi-cli-style **subsequence fuzzy**: "agcomp" finds
-    ``agent_code/ui/completer.py`` ("ag"..."comp" in order), with the matched
-    characters highlighted in the menu. Candidates are re-ranked after matching
-    (basename-prefix > basename-substring > path-subsequence, stable within a tier)
-    so likely intents float to the top.
+    ``agent_code/ui/completer.py`` ("ag"..."comp" in order). Candidates are re-ranked
+    after matching (basename-prefix > basename-substring > path-subsequence) so likely
+    intents float to the top.
 
     Two scan depths (kimi-cli's top/deep split): a short fragment without "/" only
-    lists top-level entries (one ``iterdir``, a few ms), so the first keystroke is
-    instant and the menu stays readable; longer fragments run the full pruned walk.
-    Both honor ``SkipPolicy`` -- git-ignored and vendored paths never surface.
+    lists top-level entries (one ``iterdir``, a few ms); longer fragments run the full
+    pruned walk. Both honor ``SkipPolicy`` -- git-ignored and vendored paths never
+    surface.
 
     Guards: an "@" preceded by an identifier character never triggers (emails), a
-    fragment containing whitespace never triggers, and once the fragment already
-    names an existing file completion stops (typing "@src/main.py " must not keep
-    offering menu noise around the finished mention).
+    fragment containing whitespace never triggers, and once the fragment already names
+    an existing file completion stops.
     """
 
     def __init__(self, cwd: Path, policy: SkipPolicy | None = None) -> None:
@@ -159,15 +161,7 @@ class FileMentionCompleter(Completer):
         return self._top_files
 
     def _scan(self) -> list[str]:
-        """Relative paths of cwd files/dirs, sorted dirs-first (stable for the menu).
-
-        Iterative ``os.scandir`` walk with **early pruning**: a skipped directory is
-        never entered, so .venv/.git/node_modules cost nothing. This matters by three
-        orders of magnitude -- ``Path.rglob`` enumerates every entry inside those
-        trees first and filters afterwards (~1200 ms here), while the pruned walk
-        visits only kept entries (~5 ms). ``DirEntry.is_dir()`` is also free here
-        (no extra stat, unlike ``Path.is_dir()`` on a rglob yield).
-        """
+        """Relative paths of cwd files/dirs, sorted dirs-first (stable for the menu)."""
         now = time.monotonic()
         if now - self._cache_at < _FILE_SCAN_TTL:
             return self._files
@@ -215,9 +209,7 @@ class FileMentionCompleter(Completer):
 
         Returns ``(tier, first_index, depth)``: tier 0 = basename starts with the
         fragment, 1 = all fragment chars in order inside the basename, 2 =
-        subsequence anywhere in the path. ``first_index`` breaks ties by earliest
-        match (FuzzyCompleter's "closest to the left" rule), ``depth`` by path
-        depth (``a/main.py`` outranks ``a/b/c/main.py`` when both match equally).
+        subsequence anywhere in the path.
         """
         frag = fragment.casefold()
         lower = path.casefold()
@@ -229,8 +221,6 @@ class FileMentionCompleter(Completer):
         if frag in base:
             return (1, base.index(frag), depth)
 
-        # Plain subsequence over the whole path (kimi's FuzzyCompleter semantics:
-        # all fragment characters in order, greedy-earliest).
         pos = lower.find(frag[0])
         if pos == -1:
             return None
@@ -242,15 +232,14 @@ class FileMentionCompleter(Completer):
                     return (2, pos, depth)
         return None
 
-    def get_completions(self, document: Document, complete_event: Any) -> Iterable[Completion]:
-        fragment = _extract_fragment(document.text_before_cursor)
+    def suggestions(self, text_before_cursor: str) -> list[Suggestion]:
+        fragment = _extract_fragment(text_before_cursor)
         if fragment is None:
-            return
-        # The fragment already names an existing file: the mention is complete,
-        # stop offering matches (kimi-cli's _is_completed_file short-circuit).
+            return []
+        # The fragment already names an existing file: the mention is complete, stop.
         candidate = fragment.rstrip("/")
         if candidate and (self._cwd / candidate).is_file():
-            return
+            return []
 
         files = self._candidates(fragment)
         ranked: list[tuple[tuple[int, int, int], str]] = []
@@ -260,11 +249,7 @@ class FileMentionCompleter(Completer):
                 ranked.append((ranks, path))
         ranked.sort(key=lambda item: item[0])
 
-        for _, path in ranked[:_MAX_MENTION_RESULTS]:
-            display = path.rsplit("/", 1)[-1]
-            yield Completion(
-                path,
-                start_position=-1 - len(fragment),  # from the "@" onward
-                display=display,
-                display_meta=path,
-            )
+        return [
+            Suggestion(insert=path, display=path.rsplit("/", 1)[-1], meta=path)
+            for _, path in ranked[:_MAX_MENTION_RESULTS]
+        ]

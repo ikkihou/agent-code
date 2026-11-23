@@ -28,8 +28,8 @@ from .scheduler import CronScheduler
 from .session import Session
 from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
+from .tui import run_interactive_shell
 from .ui.banner import build_banner
-from .ui.shell import run_interactive_shell
 from .wire import (
     CommandPreview,
     ContextCompacted,

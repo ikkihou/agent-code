@@ -10,12 +10,10 @@ only fragments persisted by older versions go through the legacy pt shim.
 from __future__ import annotations
 
 import shutil
-import sys
 from collections.abc import Iterable
 from io import StringIO
 
-from prompt_toolkit.application.current import get_app_or_none, get_app_session
-from prompt_toolkit.utils import get_cwidth
+from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
 
@@ -148,14 +146,8 @@ def _looks_legacy_pt_style(style: str) -> bool:
 
 
 def _terminal_columns() -> int:
-    """Current terminal width, with a fallback for replay before the prompt app starts."""
-    app = get_app_or_none()
-    if app is not None:
-        return app.output.get_size().columns
-    try:
-        return get_app_session().output.get_size().columns
-    except Exception:
-        return shutil.get_terminal_size((80, 24)).columns
+    """Current terminal width, with a fallback for replay before the app starts."""
+    return shutil.get_terminal_size((80, 24)).columns
 
 
 def _pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[StyleAndText]:
@@ -163,7 +155,7 @@ def _pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[Sty
 
     Width is accumulated across all fragments (a line may be split into several
     styled pieces), and padding is emitted only when the line ends at ``\n``. Tabs are
-    expanded before measuring because ``get_cwidth("\t")`` is 0 while terminals expand
+    expanded before measuring because ``cell_len("\t")`` is 1 while terminals expand
     tabs to real columns. Over-wide lines are left unpadded; Rich is configured with a
     4096-column offscreen width, so it does not wrap them and the terminal handles the
     overflow (wrapped continuation lines intentionally get no synthetic background).
@@ -197,7 +189,7 @@ def _pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[Sty
             segment = text[start:index]
             if segment:
                 emit(style, segment)
-                line_width += get_cwidth(segment)
+                line_width += cell_len(segment)
                 line_has_text = True
                 if style:
                     line_style = style
@@ -212,7 +204,7 @@ def _pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[Sty
         tail = text[start:]
         if tail:
             emit(style, tail)
-            line_width += get_cwidth(tail)
+            line_width += cell_len(tail)
             line_has_text = True
             if style:
                 line_style = style
@@ -264,19 +256,3 @@ def _chunk_to_ansi(chunk: OutputChunk, columns: int | None = None) -> str:
     with _ansi_console.capture() as capture:
         _ansi_console.print(text, end="")
     return capture.get()
-
-
-def commit_chunk(chunk: OutputChunk, columns: int | None = None) -> None:
-    """Write an OutputChunk into the terminal scrollback above the prompt.
-
-    Uses ``sys.stdout.write``: ``patch_stdout`` replaces stdout with a StdoutProxy that
-    draws above the prompt through run_in_terminal on its own flush thread -- the only
-    thread-safe commit path that does not fight prompt_async over input.
-
-    Do not use pt's ``print_formatted_text``: while an app is running it goes through
-    ``loop.call_soon_threadsafe(run_in_terminal(...))`` and the caller cannot wait, so in
-    a loop of "commit, then immediately await the next prompt_async" it races the
-    prompt's input detach/attach and all subsequent input stops working.
-    """
-    sys.stdout.write(_chunk_to_ansi(chunk, columns=columns))
-    sys.stdout.flush()

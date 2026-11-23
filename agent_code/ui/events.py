@@ -8,8 +8,6 @@ the consumer (the REPL commits the fold when prose resumes or the turn ends).
 
 from __future__ import annotations
 
-from prompt_toolkit.formatted_text import StyleAndTextTuples
-
 from ..output import OutputChunk
 from ..prompt_ui import render_diff
 from ..wire import (
