@@ -39,6 +39,10 @@ class TranscriptSink:
         # Consecutive thinking deltas form one block; the buffer flushes when any other
         # event arrives (the next text block, a tool call, or the turn boundary).
         self.thinking: list[str] = []
+        # Producer timestamps (time.monotonic) of the current thinking block; used to
+        # report its duration. Stays 0.0 when the producer does not stamp.
+        self.thinking_started_at: float = 0.0
+        self.thinking_last_at: float = 0.0
         # call_id -> (name, args_preview, args_full) captured at ToolCallStarted, so the
         # finished item can carry the arguments even when parallel calls settle out of
         # order.
@@ -57,6 +61,10 @@ class TranscriptSink:
                 # reasoning lands before the answer that follows.
                 if not self.thinking:
                     self._flush_prose(commit)
+                if event.at:
+                    if not self.thinking_started_at:
+                        self.thinking_started_at = event.at
+                    self.thinking_last_at = event.at
                 self.thinking.append(event.text)
                 continue
             if isinstance(event, TextDelta):
@@ -124,9 +132,16 @@ class TranscriptSink:
         if not self.thinking:
             return
         text = "".join(self.thinking)
+        duration = (
+            max(0.0, self.thinking_last_at - self.thinking_started_at)
+            if self.thinking_started_at and self.thinking_last_at
+            else 0.0
+        )
         self.thinking = []
+        self.thinking_started_at = 0.0
+        self.thinking_last_at = 0.0
         if text.strip():
-            commit.append(ThinkingItem(text))
+            commit.append(ThinkingItem(text, duration=duration))
 
     def _flush_prose(
         self,

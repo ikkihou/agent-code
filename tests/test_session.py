@@ -109,7 +109,8 @@ def test_structured_transcript_roundtrip(tmp_path: Path) -> None:
     """The sidecar keeps thinking/tool structure (and tool detail) across a resume."""
     session = Session.create(tmp_path)
     session.append_transcript(OutputChunk("text\n"))
-    session.append_transcript(ThinkingItem("pondering"))
+    thinking = ThinkingItem("pondering", duration=1.5)
+    session.append_transcript(thinking)
     tool = ToolCallItem(
         name="bash",
         args_preview='{"command": "ls"}',
@@ -119,7 +120,7 @@ def test_structured_transcript_roundtrip(tmp_path: Path) -> None:
     )
     session.append_transcript(tool)
 
-    assert session.transcript_items == [OutputChunk("text\n"), ThinkingItem("pondering"), tool]
+    assert session.transcript_items == [OutputChunk("text\n"), thinking, tool]
     # The flat view stays text-only for callers that only want plain chunks.
     assert session.transcript_chunks == [OutputChunk("text\n")]
 

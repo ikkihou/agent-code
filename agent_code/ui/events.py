@@ -8,6 +8,8 @@ the consumer (the REPL commits the fold when prose resumes or the turn ends).
 
 from __future__ import annotations
 
+import json
+
 from rich.markup import escape
 
 from ..output import OutputChunk, StyleAndText
@@ -36,6 +38,58 @@ def tool_outcome(event: ToolCallCompleted) -> str:
     if event.outcome in ("declined", "skipped"):
         return event.outcome
     return "error" if event.is_error else "ok"
+
+
+# Arguments that best describe what a tool call is doing, in preference order.
+_SUMMARY_KEYS = (
+    "command",
+    "file_path",
+    "path",
+    "pattern",
+    "query",
+    "url",
+    "name",
+    "title",
+    "prompt",
+)
+_SUMMARY_MAX_CELLS = 48
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _summarize_args(args_preview: str, args_full: str) -> str:
+    """Pick the most informative argument value for a collapsed tool-call line."""
+    for raw in (args_full, args_preview):
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            for key in _SUMMARY_KEYS:
+                value = parsed.get(key)
+                if isinstance(value, str) and value.strip():
+                    return _one_line(value)[: _SUMMARY_MAX_CELLS]
+        elif isinstance(parsed, str) and parsed.strip():
+            return _one_line(parsed)[: _SUMMARY_MAX_CELLS]
+    return ""
+
+
+def format_tool_call(
+    name: str,
+    args_preview: str,
+    status: str,
+    args_full: str = "",
+) -> str:
+    """One compact title for a single tool call: ``✓ bash · rg -n foo``."""
+    mark = _TOOL_MARKS.get(status, "✓")
+    summary = _summarize_args(args_preview, args_full)
+    suffix = f" ({status})" if status in ("declined", "skipped") else ""
+    detail = f" · {summary}" if summary else ""
+    return f"{mark} {name}{detail}{suffix}"
 
 
 def format_tool_fold(items: list[tuple[str, str]]) -> str:

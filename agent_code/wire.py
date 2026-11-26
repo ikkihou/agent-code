@@ -52,9 +52,15 @@ class TextDelta:
 @dataclass(frozen=True)
 class ThinkingDelta:
     """A model extended-thinking increment (raw text; the consumer renders it as a
-    collapsible reasoning block)."""
+    collapsible reasoning block).
+
+    ``at`` is a ``time.monotonic()`` stamp from the producer; the consumer uses the
+    first/last stamps to report how long the model actually spent thinking (0.0 when
+    the producer does not stamp, e.g. a test double).
+    """
 
     text: str
+    at: float = 0.0
 
 
 @dataclass(frozen=True)

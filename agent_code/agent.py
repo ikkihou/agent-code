@@ -11,6 +11,7 @@
 # here put the import lib
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -230,7 +231,7 @@ def run_agent(  ## AGENT LOOP
                     # Extended thinking streams ahead of the answer in the same block
                     # order the model produced it; it is display-only and never feeds
                     # the final-text fallback (``streamed_parts``).
-                    wire.send(ThinkingDelta(text=event.text))
+                    wire.send(ThinkingDelta(text=event.text, at=time.monotonic()))
                 elif event.type == "completed":
                     response = event.response
         except ModelRequestAborted:

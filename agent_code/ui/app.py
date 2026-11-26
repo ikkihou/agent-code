@@ -45,7 +45,7 @@ from .prompts import (
 )
 from .render import render_live
 from .transcript import TranscriptSink
-from .widgets import LivePanel, PromptInput, QuestionLine, StatusBar
+from .widgets import HintBar, LivePanel, PromptInput, QuestionLine, StatusBar
 
 
 class AgentApp(App[None]):
@@ -132,7 +132,8 @@ class AgentApp(App[None]):
             yield QuestionLine(id="question")
             yield OptionList(id="completion")
             yield PromptInput(id="prompt")
-            yield StatusBar(self._state, id="status")
+            yield HintBar(id="hints")
+            yield StatusBar(self._state, self._cwd, id="status")
 
     # ---- mount --------------------------------------------------------------
 
@@ -147,6 +148,7 @@ class AgentApp(App[None]):
         self._prompt = self.query_one(PromptInput)
         self._completion_list = self.query_one(OptionList)
         self._prompt.completion_handler = self._handle_completion_key
+        self._prompt.set_permission_mode(self._state.permission_mode)
         self._prompt.focus()
         self.set_terminal_cursor(True)
 
@@ -549,6 +551,7 @@ class AgentApp(App[None]):
 
     def action_cycle_mode(self) -> None:
         self._state.cycle_permission_mode()
+        self.query_one(PromptInput).set_permission_mode(self._state.permission_mode)
         self.query_one(StatusBar).refresh_status()
 
     # ---- message handlers ---------------------------------------------------

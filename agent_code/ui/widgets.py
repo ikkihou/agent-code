@@ -9,15 +9,18 @@ Completion is handled by the app through a separate ``OptionList``.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
+from pathlib import Path
 
 from rich.text import Text
 from textual.binding import Binding
-from textual.events import Blur, Focus, Key
+from textual.events import Blur, Focus, Key, Resize
 from textual.message import Message
 from textual.widgets import Static, TextArea
 
 from ..runtime import RuntimeState
+from .gitinfo import GitInfo, read_git
 from .render import render_status
 
 
@@ -64,8 +67,24 @@ class PromptInput(TextArea):
             classes=classes,
             disabled=disabled,
         )
-        self.border_title = "input"
         self.completion_handler: Callable[[str], bool] | None = None
+        self._mode_class: str | None = None
+
+    def set_permission_mode(self, mode: str) -> None:
+        """Tint the border after the active permission mode (Pi's editor affordance)."""
+        classes = {
+            "default": "mode-default",
+            "acceptEdits": "mode-edits",
+            "plan": "mode-plan",
+            "fullAccess": "mode-full",
+        }
+        new_class = classes.get(mode, "mode-default")
+        if self._mode_class == new_class:
+            return
+        if self._mode_class is not None:
+            self.remove_class(self._mode_class)
+        self.add_class(new_class)
+        self._mode_class = new_class
 
     async def _on_key(self, event: Key) -> None:
         # TextArea's own _on_key inserts "\n" on Enter and lets Ctrl+J fall through.
@@ -148,11 +167,16 @@ class QuestionLine(Static):
 
 
 class StatusBar(Static):
-    """Bottom status bar: permission mode · model · context usage."""
+    """Bottom status bar: mode · cwd · git · context usage · model."""
+
+    # A git probe runs two short-lived processes; throttle it instead of doing it on
+    # every streamed batch.
+    GIT_TTL = 2.0
 
     def __init__(
         self,
         state: RuntimeState,
+        cwd: Path | None = None,
         *,
         name: str | None = None,
         id: str | None = None,
@@ -160,7 +184,7 @@ class StatusBar(Static):
         disabled: bool = False,
     ) -> None:
         super().__init__(
-            render_status(state),
+            render_status(state, cwd=cwd),
             markup=False,
             name=name,
             id=id,
@@ -168,6 +192,65 @@ class StatusBar(Static):
             disabled=disabled,
         )
         self._state = state
+        self._cwd = cwd
+        self._git = GitInfo()
+        self._git_at = 0.0
+
+    def on_mount(self) -> None:
+        self.call_after_refresh(self.refresh_status)
 
     def refresh_status(self) -> None:
-        self.update(render_status(self._state))
+        now = time.monotonic()
+        if now - self._git_at >= self.GIT_TTL:
+            self._git = read_git(self._cwd)
+            self._git_at = now
+        self.update(
+            render_status(
+                self._state,
+                cwd=self._cwd,
+                git=self._git,
+                width=self.content_size.width,
+            )
+        )
+
+    def on_resize(self, _event: Resize) -> None:
+        self.refresh_status()
+
+
+class HintBar(Static):
+    """One dim line of key hints, Pi-style, under the prompt."""
+
+    HINTS: tuple[tuple[str, str], ...] = (
+        ("esc", "interrupt"),
+        ("ctrl+c", "quit"),
+        ("/", "commands"),
+        ("@", "files"),
+        ("shift+tab", "mode"),
+    )
+
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            self._render_hints(),
+            markup=False,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
+
+    @classmethod
+    def _render_hints(cls) -> Text:
+        text = Text()
+        for index, (key, description) in enumerate(cls.HINTS):
+            if index:
+                text.append(" · ", style="dim")
+            text.append(key, style="bold #e5c07b")
+            text.append(f" {description}", style="dim")
+        return text

@@ -34,6 +34,12 @@ Screen:inline {
     background: $surface;
 }
 
+#hints {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+}
+
 #completion {
     height: auto;
     max-height: 16;
@@ -48,8 +54,26 @@ Screen:inline {
     border: solid #556677;
 }
 
+/* The prompt border follows the permission mode, like Pi's editor border. */
+#prompt.mode-default {
+    border: solid #4a6076;
+}
+
+#prompt.mode-edits {
+    border: solid #7ee787;
+}
+
+#prompt.mode-plan {
+    border: solid #e5c07b;
+}
+
+#prompt.mode-full {
+    border: solid #ff6b6b;
+}
+
 #status {
     height: 1;
+    padding: 0 1;
     background: $surface;
 }
 
@@ -65,6 +89,57 @@ Screen:inline {
     scrollbar-color: #556677;
     scrollbar-color-hover: #6b7f99;
     scrollbar-color-active: #7f95b3;
+}
+
+/* One blank row between committed blocks (Pi inserts a spacer before each content
+   block). Only top margins are used, so two adjacent blocks never double up. */
+.gap {
+    margin-top: 1;
+}
+
+/* Foldable block chrome: no card border or background. Thinking reads as quiet inline
+   reasoning (the title carries the model's thinking duration); tool calls keep a
+   title, so a collapsed call is still one compact line. */
+.thinking,
+.tool {
+    border-top: none;
+    background: transparent;
+    background-tint: transparent;
+    padding-bottom: 0;
+    padding-left: 0;
+}
+
+.thinking CollapsibleTitle,
+.tool CollapsibleTitle {
+    padding: 0;
+    background: transparent;
+}
+
+.thinking CollapsibleTitle {
+    color: #8a8a8a;
+    text-style: italic;
+}
+
+/* Tool-call outcome is readable without expanding: green success, red error,
+   amber declined/skipped. */
+.tool.ok CollapsibleTitle {
+    color: #7ee787;
+}
+
+.tool.error CollapsibleTitle {
+    color: #ff6b6b;
+}
+
+.tool.declined CollapsibleTitle,
+.tool.skipped CollapsibleTitle {
+    color: #e5c07b;
+}
+
+.thinking CollapsibleTitle:hover,
+.thinking CollapsibleTitle:focus,
+.tool CollapsibleTitle:hover,
+.tool CollapsibleTitle:focus {
+    background: transparent;
 }
 
 /* The dark theme's default selection color has identical fg/bg, which makes selected

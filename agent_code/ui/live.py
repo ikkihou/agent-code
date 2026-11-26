@@ -148,6 +148,7 @@ class LiveArea:
             line = f"{spinner} "
             line += self.active_tool if self.active_tool else "thinking"
             line += f" · {elapsed}s"
+            line += "  esc to interrupt"
             out.append(("class:spinner", line + "\n"))
         for preview_line in self.pending_preview:
             out.append(("class:preview", _fit_width(preview_line, columns) + "\n"))

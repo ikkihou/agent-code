@@ -26,7 +26,7 @@ from agent_code.ui.completion import CompletionSource
 from agent_code.ui.events import render_user_prompt
 from agent_code.ui.render import chunk_to_text, render_status
 from agent_code.ui.transcript import ThinkingItem, ToolCallItem, TranscriptSink
-from agent_code.ui.widgets import PromptInput
+from agent_code.ui.widgets import HintBar, PromptInput
 from agent_code.wire import (
     TextDelta,
     ToolCallCompleted,
@@ -276,13 +276,17 @@ def test_app_shift_tab_cycles_permission_mode(tmp_path: Path) -> None:
         app = _make_app(tmp_path)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            prompt = app.query_one(PromptInput)
             assert app._state.permission_mode == "default"
+            assert prompt.has_class("mode-default")
             await pilot.press("shift+tab")
             await pilot.pause()
             assert app._state.permission_mode == "acceptEdits"
+            assert prompt.has_class("mode-edits")
             await pilot.press("shift+tab")
             await pilot.pause()
             assert app._state.permission_mode == "plan"
+            assert prompt.has_class("mode-plan")
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -426,9 +430,38 @@ def test_block_log_selects_across_lines(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_block_selection_handles_wrapped_lines(tmp_path: Path) -> None:
+    """Regression: a paragraph that wraps to more visual rows than logical lines must
+    not raise IndexError when the selection starts on wrapped row 1."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(30, 12)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+            log.append_chunk(
+                OutputChunk(
+                    "当前分支 master（与 origin/master 同步），工作区有 9 个已修改文件 "
+                    "+ 1 个未跟踪目录，未暂存。\n"
+                )
+            )
+            await pilot.pause()
+            block = app.query_one(TextBlock)
+            assert block.size.height >= 2  # the paragraph wrapped
+
+            # First widget of a multi-widget selection: from wrapped row 1 to its end.
+            app.screen.selections = {block: Selection(Offset(0, 1), None)}
+            await pilot.pause()
+
+            selected = app.screen.get_selected_text()
+            assert selected is not None and selected != ""
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
 def test_text_block_reports_selection_text(tmp_path: Path) -> None:
     """A Static text block extracts the text under the selection (copy support)."""
-
     async def run() -> None:
         app = _make_app(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -513,6 +546,132 @@ def test_app_renders_thinking_and_tool_as_collapsed_blocks(tmp_path: Path) -> No
             await pilot.pause()
             assert thinking.collapsed is False
             assert tool.collapsed is False
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_thinking_block_shows_duration_in_title(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._append_item(ThinkingItem("pondering", duration=2.3))
+            await pilot.pause()
+            assert app.query_one(ThinkingBlock).title == "✻ Thought for 2.3s"
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_thinking_title_uses_milliseconds_under_a_second(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._append_item(ThinkingItem("pondering", duration=0.184))
+            await pilot.pause()
+            assert app.query_one(ThinkingBlock).title == "✻ Thought for 184ms"
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_tool_title_summarizes_the_command_argument(tmp_path: Path) -> None:
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._append_item(
+                ToolCallItem(
+                    name="bash",
+                    args_preview='{"command": "rg -n foo src"}',
+                    status="ok",
+                    args_full='{"command": "rg -n foo src"}',
+                )
+            )
+            await pilot.pause()
+            block = app.query_one(ToolCallBlock)
+            assert block.title == "✓ bash · rg -n foo src"
+            assert block.has_class("ok")
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_footer_aligns_the_model_on_the_right() -> None:
+    state = RuntimeState(permission_mode="default", model="mock", provider="anthropic")
+    plain = render_status(state, cwd=Path("/tmp/project"), width=80).plain
+    assert plain.endswith("anthropic/mock")
+    assert len(plain) == 80
+
+
+def test_hint_bar_lists_the_pi_style_bindings() -> None:
+    plain = HintBar._render_hints().plain
+    assert "esc interrupt" in plain
+    assert "/ commands" in plain
+    assert "shift+tab mode" in plain
+
+
+def test_thinking_block_is_borderless_and_transparent(tmp_path: Path) -> None:
+    """Thinking must not look like a boxed card: no border, no background fill."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._append_item(ThinkingItem("pondering", duration=1.0))
+            await pilot.pause()
+            block = app.query_one(ThinkingBlock)
+            assert block.styles.border_top[0] == ""
+            assert block.styles.background.is_transparent
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_block_log_puts_one_blank_row_between_blocks(tmp_path: Path) -> None:
+    """Committed blocks are separated by a single gap; prompt echoes bring their own."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(80, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+            log.append_chunk(OutputChunk("one\n"))
+            log.append_thinking(ThinkingItem("ponder"))
+            log.append_tool(ToolCallItem(name="bash", args_preview="{}", status="ok"))
+            log.append_chunk(OutputChunk("two\n"))
+            log.append_chunk(render_user_prompt("hello"))
+            await pilot.pause()
+
+            blocks = list(log.children)
+            assert [block.has_class("gap") for block in blocks] == [
+                False,  # first block: no leading blank
+                False,  # prose already ends with a blank row
+                True,  # thinking -> tool needs a separator
+                True,  # tool -> prose needs a separator
+                False,  # prompt echo carries its own leading blanks
+            ]
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_block_log_caps_mounted_widgets(tmp_path: Path) -> None:
+    """Very long sessions must not keep an unbounded number of block widgets."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+            log.MAX_BLOCKS = 3
+            for index in range(6):
+                log.append_chunk(OutputChunk(f"line {index}\n"))
+            await pilot.pause()
+            await pilot.pause()
+            assert len(log.children) <= 3
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())

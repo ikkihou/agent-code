@@ -59,9 +59,14 @@ class OutputChunk:
 
 @dataclass(frozen=True)
 class ThinkingItem:
-    """One contiguous extended-thinking block (a frontend renders it collapsed)."""
+    """One contiguous extended-thinking block (a frontend renders it collapsed).
+
+    ``duration`` is how long the model spent thinking (seconds), measured from the
+    producer's delta timestamps; 0.0 when unknown.
+    """
 
     text: str
+    duration: float = 0.0
 
 
 @dataclass(frozen=True)

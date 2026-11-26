@@ -23,15 +23,18 @@ Toolkit-agnostic sub-modules:
               public API is ``suggestions(text) -> list[Suggestion]`` -- no toolkit.
 - paste:      oversized bracketed-paste placeholdering ([Pasted text #N +K lines],
               expanded back to full text at submit time; the echo shows the token)
-- banner:     startup bao logo + startup info in one rounded, width-clamped box
+- banner:     compact startup header (mascot · wordmark · cwd · key hints)
 - live:       Live area state (spinner / streaming tail / pending preview)
 - events:     translation of finished wire events -> OutputChunk
 - prompts:    rendering and answer parsing for prompt requests (confirm/choice)
-- status:     bottom status bar text (mode · model · context usage)
+- status:     bottom footer text (mode · cwd · git · context usage · model)
+- gitinfo:    timeout-bounded git branch/dirty probe for the footer
+- textfit:    terminal-cell clipping and path shortening helpers
 
 Textual frontend:
 - app:        ``AgentApp`` + ``run_interactive_shell`` (worker thread, event drain)
-- widgets:    ``LivePanel`` / ``PromptInput`` / ``QuestionLine`` / ``StatusBar``
+- widgets:    ``LivePanel`` / ``PromptInput`` / ``QuestionLine`` / ``HintBar`` /
+              ``StatusBar``
 - blocks:     ``BlockLog`` + static ``TextBlock`` and foldable ``ThinkingBlock`` /
               ``ToolCallBlock`` (committed conversation)
 - transcript: ``TranscriptSink`` state machine (wire events -> render items)

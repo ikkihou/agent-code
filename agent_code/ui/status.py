@@ -1,53 +1,133 @@
-"""Bottom status-bar text (permission mode · model · context usage).
+"""Bottom status-bar text (permission mode · cwd · git · context · model).
 
 The fragment styles carry the REPL's class tokens (``class:mode.*`` / ``class:seg.*`` /
-``class:ctx.hot``); the frontend maps those tokens to concrete colors.
+``class:ctx.*``); the frontend maps those tokens to concrete colors and the widget
+paints the row background.
+
+Layout follows Pi's footer: identity on the left, context usage in the middle and the
+model right-aligned when the terminal is wide enough.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..context import ratio_bar
 from ..output import StyleAndText
 from ..runtime import RuntimeState
+from .gitinfo import GitInfo
+from .textfit import (
+    clip_fragments,
+    display_path,
+    middle_truncate,
+    visible_width,
+)
+
+_MODE_LABELS = {
+    "default": "default",
+    "acceptEdits": "accept edits",
+    "plan": "plan",
+    "fullAccess": "full access",
+}
+
+_MODE_TOKENS = {
+    "default": "mode.default",
+    "acceptEdits": "mode.edits",
+    "plan": "mode.plan",
+    "fullAccess": "mode.full",
+}
+
+_CWD_MAX_CELLS = 40
 
 
 def _fmt_k(tokens: int) -> str:
-    """Format a token count in k units: 131072 -> "131k", 950 -> "0.9k"."""
+    """Format a token count compactly: 131072 -> "131K", 950 -> "0.9K"."""
     if tokens >= 100_000 or tokens % 1000 == 0:
-        return f"{tokens // 1000}k"
-    return f"{tokens / 1000:.1f}k"
+        return f"{tokens // 1000}K"
+    return f"{tokens / 1000:.1f}K"
 
 
-def bottom_toolbar(state: RuntimeState) -> list[StyleAndText]:
-    """Bottom status bar: current mode + model + context usage.
+def _style(token: str) -> str:
+    return f"class:bottom-toolbar class:{token}"
 
-    Returns Rich-vocabulary fragments whose styles are class tokens the frontend maps
-    to colors. The context segment shows the live token estimate from
-    ``RuntimeState.context_budget`` (kept across turns by the REPL); without a budget
-    the segment is omitted rather than rendering a misleading zero. At or above the
-    budget's compact threshold the segment switches to ``ctx.hot``.
-    """
-    mode = {
-        "default": "default",
-        "acceptEdits": "accept edits",
-        "plan": "plan",
-        "fullAccess": "full access",
-    }.get(state.permission_mode, state.permission_mode)
-    mode_style = {
-        "default": "class:bottom-toolbar class:mode.default",
-        "acceptEdits": "class:bottom-toolbar class:mode.edits",
-        "plan": "class:bottom-toolbar class:mode.plan",
-        "fullAccess": "class:bottom-toolbar class:mode.full",
-    }.get(state.permission_mode, "class:bottom-toolbar class:mode.default")
-    fragments: list[StyleAndText] = [(mode_style, f" {mode}")]
-    fragments.append(("class:bottom-toolbar class:seg.model", f" · {state.model}"))
-    budget = state.context_budget
-    if budget is not None:
-        style = "class:bottom-toolbar class:seg.ctx"
-        if budget.should_compact():
-            style = "class:bottom-toolbar class:ctx.hot"
-        bar = ratio_bar(budget.usage_ratio, width=12)
-        ctx = f" · {bar} {_fmt_k(budget.estimated_tokens)}/{_fmt_k(budget.window_tokens)} tokens"
-        fragments.append((style, ctx))
-    fragments.append(("class:bottom-toolbar", " "))
+
+def _cwd_fragments(cwd: Path) -> list[StyleAndText]:
+    text = middle_truncate(display_path(cwd), _CWD_MAX_CELLS)
+    cut = max(text.rfind("/"), text.rfind("\\"))
+    if cut < 0:
+        return [(_style("seg.project"), text)]
+    prefix, name = text[: cut + 1], text[cut + 1 :]
+    fragments: list[StyleAndText] = [(_style("seg.cwd"), prefix)]
+    if name:
+        fragments.append((_style("seg.project"), name))
     return fragments
+
+
+def _context_fragments(state: RuntimeState) -> list[StyleAndText]:
+    budget = state.context_budget
+    if budget is None:
+        return []
+    ratio = budget.usage_ratio
+    if ratio >= 0.9:
+        token = "ctx.critical"
+    elif budget.should_compact() or ratio >= 0.7:
+        token = "ctx.hot"
+    else:
+        token = "seg.ctx"
+    bar = ratio_bar(ratio, width=10)
+    return [(_style(token), f"  {bar} ({_fmt_k(budget.window_tokens)})")]
+
+
+def _model_fragments(state: RuntimeState) -> list[StyleAndText]:
+    fragments: list[StyleAndText] = []
+    if state.provider:
+        fragments.append((_style("seg.provider"), state.provider))
+        fragments.append((_style("seg.sep"), "/"))
+    fragments.append((_style("seg.model"), state.model))
+    return fragments
+
+
+def _align(
+    left: list[StyleAndText], right: list[StyleAndText], width: int
+) -> list[StyleAndText]:
+    if width <= 0:
+        return [*left, (_style("seg.gap"), "  "), *right]
+
+    left_width = visible_width(left)
+    right_width = visible_width(right)
+    if left_width >= width:
+        return clip_fragments(left, width)
+
+    gap = width - left_width - right_width
+    if gap >= 1:
+        return [*left, (_style("seg.gap"), " " * gap), *right]
+
+    room = width - left_width - 1
+    if room <= 0:
+        return left
+    return [*left, (_style("seg.gap"), " "), *clip_fragments(right, room)]
+
+
+def bottom_toolbar(
+    state: RuntimeState,
+    *,
+    cwd: Path | None = None,
+    git: GitInfo | None = None,
+    width: int = 0,
+) -> list[StyleAndText]:
+    """Bottom status bar: mode, cwd, git, context usage and right-aligned model."""
+    mode_key = state.permission_mode if state.permission_mode in _MODE_LABELS else "default"
+    mode = _MODE_LABELS[mode_key]
+    mode_token = _MODE_TOKENS[mode_key]
+
+    left: list[StyleAndText] = [(_style(mode_token), f" {mode} ")]
+    if cwd is not None:
+        left.append((_style("seg.sep"), " "))
+        left.extend(_cwd_fragments(cwd))
+    if git is not None and git.branch:
+        left.append((_style("seg.branch"), f"  git:{git.branch}"))
+        if git.dirty:
+            left.append((_style("seg.branch.dirty"), "*"))
+    left.extend(_context_fragments(state))
+
+    return _align(left, _model_fragments(state), width)

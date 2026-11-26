@@ -38,7 +38,10 @@ def _transcript_item(data: dict[str, Any]) -> TranscriptItem:
     """
     kind = data.get("kind", "text")
     if kind == "thinking":
-        return ThinkingItem(str(data.get("text", "")))
+        return ThinkingItem(
+            str(data.get("text", "")),
+            duration=float(data.get("duration", 0.0)),
+        )
     if kind == "tool":
         return ToolCallItem(
             name=str(data.get("name", "")),
@@ -231,7 +234,11 @@ class Session:
         if isinstance(item, ThinkingItem):
             if not item.text.strip():
                 return
-            record: dict[str, Any] = {"kind": "thinking", "text": item.text}
+            record: dict[str, Any] = {
+                "kind": "thinking",
+                "text": item.text,
+                "duration": item.duration,
+            }
         elif isinstance(item, ToolCallItem):
             record = {
                 "kind": "tool",

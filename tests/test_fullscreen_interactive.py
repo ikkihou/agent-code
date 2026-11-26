@@ -942,7 +942,7 @@ def test_bottom_toolbar_only_shows_mode_and_model() -> None:
     state = RuntimeState(permission_mode="plan", model="mock")
     state.todo_store = [TodoItem(content="task", status="in_progress", active_form="working")]
     fragments = bottom_toolbar(state)
-    assert "".join(text for _style, text in fragments) == " plan · mock "
+    assert "".join(text for _style, text in fragments) == " plan   anthropic/mock"
 
 
 def test_bottom_toolbar_shows_context_usage() -> None:
@@ -956,9 +956,9 @@ def test_bottom_toolbar_shows_context_usage() -> None:
     state.context_budget = budget
     fragments = bottom_toolbar(state)
     text = "".join(t for _s, t in fragments)
-    assert "[#####-------] 42% 42k/100k tokens" in text
+    assert "[####------] 42% (100K)" in text
     assert all("ctx.hot" not in s for s, _t in fragments)
-    # Each of the three segments carries its own color class.
+    # Each segment carries its own color class.
     assert any("mode.default" in s for s, _t in fragments)
     assert any("seg.model" in s for s, _t in fragments)
     assert any("seg.ctx" in s for s, _t in fragments)
@@ -966,8 +966,8 @@ def test_bottom_toolbar_shows_context_usage() -> None:
     # At/above the compact threshold the segment switches to the warning style.
     budget.reset(95_000)
     hot = bottom_toolbar(state)
-    assert "[###########-] 95% 95k/100k tokens" in "".join(t for _s, t in hot)
-    assert any("ctx.hot" in s for s, _t in hot)
+    assert "[##########] 95% (100K)" in "".join(t for _s, t in hot)
+    assert any("ctx.critical" in s for s, _t in hot)
 
 
 def test_bottom_toolbar_mode_segment_tint_tracks_permission_mode() -> None:

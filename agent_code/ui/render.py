@@ -8,10 +8,13 @@ in a ``rich.text.Text`` and maps the REPL's status/live class names to concrete 
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from rich.text import Text
 
 from ..output import OutputChunk, StyleAndText, chunk_fragments, pad_full_width
 from ..runtime import RuntimeState
+from .gitinfo import GitInfo
 from .live import LiveArea
 from .status import bottom_toolbar
 
@@ -59,20 +62,35 @@ def render_live(live: LiveArea, columns: int, now: float) -> Text:
 # background unset lets the widget paint the whole row uniformly, including the empty
 # space after the last segment.
 _STATUS_COLORS: dict[str, str] = {
-    "mode.default": "#4fd6ff",
-    "mode.edits": "#7ee787",
-    "mode.plan": "#e5c07b",
-    "mode.full": "#ff6b6b",
+    "mode.default": "bold #0b0e14 on #4fd6ff",
+    "mode.edits": "bold #0b0e14 on #7ee787",
+    "mode.plan": "bold #0b0e14 on #e5c07b",
+    "mode.full": "bold #0b0e14 on #ff6b6b",
+    "seg.branch.dirty": "#e5c07b",
+    "seg.branch": "#7ee787",
+    "seg.project": "bold #4fd6ff",
+    "seg.cwd": "#6b7280",
     "seg.model": "#c678dd",
+    "seg.provider": "#8899aa",
     "seg.ctx": "#61afef",
     "ctx.hot": "#e5c07b",
+    "ctx.critical": "#ff6b6b",
 }
 _STATUS_FG = "#e5e5e5"
 
 
-def render_status(state: RuntimeState) -> Text:
-    """Bottom status bar (mode · model · context) as Rich Text."""
-    fragments: list[StyleAndText] = bottom_toolbar(state)
+def render_status(
+    state: RuntimeState,
+    *,
+    cwd: Path | None = None,
+    git: GitInfo | None = None,
+    width: int = 0,
+) -> Text:
+    """Bottom status bar as Rich Text.
+
+    ``width`` enables right-aligning the model; the widget passes its laid-out width.
+    """
+    fragments: list[StyleAndText] = bottom_toolbar(state, cwd=cwd, git=git, width=width)
     text = Text()
     for style, piece in fragments:
         color = _STATUS_FG
