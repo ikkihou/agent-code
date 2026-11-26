@@ -2,11 +2,11 @@
 
 A worker thread runs ``run_agent`` / cron handling and posts wire events to the UI
 through a thread-safe queue + ``call_from_thread``; the UI thread owns the ``LiveArea``
-state machine, the output log and the input widget.
+state machine, the block log and the input widget.
 
-Layout: ``OutputLog`` (committed history), ``LivePanel`` (in-progress content),
-``QuestionLine`` (pending question), ``OptionList`` (completion), ``PromptInput``, and
-``StatusBar``.
+Layout: ``BlockLog`` (committed history: static text + foldable thinking/tool blocks),
+``LivePanel`` (in-progress content), ``QuestionLine`` (pending question), ``OptionList``
+(completion), ``PromptInput``, and ``StatusBar``.
 """
 
 from __future__ import annotations
@@ -28,23 +28,24 @@ from textual.containers import Vertical
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
-from ..output import OutputChunk
+from ..output import OutputChunk, TranscriptItem
 from ..runtime import PromptFallback, PromptRequest, RuntimeState
 from ..slash import SlashContext, SlashRegistry, dispatch_slash
-from ..ui.events import render_user_prompt
-from ..ui.live import cap_preview_lines
-from ..ui.paste import PasteCache
-from ..ui.prompts import (
+from ..wire import Line, PromptEcho, TurnEnded, TurnStarted, Wire, WireEvent
+from .blocks import BlockLog
+from .completion import CompletionSource, Suggestion
+from .events import render_user_prompt
+from .live import cap_preview_lines
+from .paste import PasteCache
+from .prompts import (
     parse_choice_index,
     parse_confirm_answer,
     prompt_for_request,
     render_prompt_request,
 )
-from ..wire import Line, PromptEcho, TurnEnded, TurnStarted, Wire, WireEvent
-from .completion import CompletionSource, Suggestion
 from .render import render_live
 from .transcript import TranscriptSink
-from .widgets import LivePanel, OutputLog, PromptInput, QuestionLine, StatusBar
+from .widgets import LivePanel, PromptInput, QuestionLine, StatusBar
 
 
 class AgentApp(App[None]):
@@ -54,21 +55,9 @@ class AgentApp(App[None]):
     # widget, so that line shows up as an empty row above the conversation; drop it.
     INLINE_PADDING = 0
 
-    CSS = """
-    /* Inline mode gives the screen a "tall" (half-cell) border top and bottom. The top
-       one paints as an empty line above the log, so remove both and let the log fill
-       the terminal. */
-    Screen:inline { border-top: none; border-bottom: none; }
-    #log { border: none; padding: 0 0; }
-    #live { height: auto; }
-    #question { height: auto; color: #4fd6ff; }
-    #completion { height: auto; max-height: 16; display: none; border: solid #556677; }
-    #prompt { height: auto; min-height: 1; border: solid #556677; }
-    #status { height: 1; }
-    /* The dark theme's default selection color has identical fg/bg, which makes
-       selected text unreadable (in the log and in the prompt alike). */
-    Screen > .screen--selection { background: #264f78; color: #ffffff; }
-    """
+    # Styles live under styles/ so the look can be tuned, or themed, without touching
+    # Python. Textual resolves CSS_PATH relative to this file.
+    CSS_PATH = "styles/default.tcss"
 
     BINDINGS = [
         Binding("escape", "escape_key", "abort / close completion", show=False),
@@ -90,8 +79,8 @@ class AgentApp(App[None]):
         run_turn: Callable[[str, Wire], None],
         make_slash_context: Callable[[], SlashContext],
         initial_output: OutputChunk | str = "",
-        initial_transcript: list[OutputChunk] | None = None,
-        on_transcript: Callable[[OutputChunk], None] | None = None,
+        initial_transcript: list[TranscriptItem] | None = None,
+        on_transcript: Callable[[TranscriptItem], None] | None = None,
         drain_pending: Callable[[], list[str]] | None = None,
         slash_registry: SlashRegistry | None = None,
         cwd: Path | None = None,
@@ -127,7 +116,7 @@ class AgentApp(App[None]):
         self._replace_len = 0
 
         # Initial transcript (resume replay) + header, committed right after mount.
-        self._initial_chunks: list[OutputChunk] = list(initial_transcript or [])
+        self._initial_chunks: list[TranscriptItem] = list(initial_transcript or [])
         if initial_output:
             self._initial_chunks.insert(
                 0,
@@ -138,7 +127,7 @@ class AgentApp(App[None]):
 
     def compose(self) -> Any:
         with Vertical():
-            yield OutputLog(id="log")
+            yield BlockLog(id="log")
             yield LivePanel(id="live")
             yield QuestionLine(id="question")
             yield OptionList(id="completion")
@@ -255,8 +244,8 @@ class AgentApp(App[None]):
         if not batches:
             return
         for batch in batches:
-            for chunk in self._transcript.handle_batch(batch):
-                self._commit_chunk(chunk)
+            for item in self._transcript.handle_batch(batch):
+                self._append_item(item)
         self._refresh_live()
         self.query_one(StatusBar).refresh_status()
 
@@ -267,18 +256,26 @@ class AgentApp(App[None]):
 
     # ---- commit / refresh ---------------------------------------------------
 
-    def _commit_chunk(self, chunk: OutputChunk) -> None:
+    def _append_item(self, item: TranscriptItem) -> None:
+        """Route one render item to the block log and the structured transcript sidecar.
+
+        The sidecar keeps the item structure (text / thinking / tool), so a resume can
+        rebuild the collapsible blocks instead of flattening them to text.
+        """
         if self._on_transcript is not None:
-            self._on_transcript(chunk)
-        self.query_one(OutputLog).write_chunk(chunk)
+            self._on_transcript(item)
+        self.query_one(BlockLog).append_item(item)
+
+    def _commit_chunk(self, chunk: OutputChunk) -> None:
+        self._append_item(chunk)
 
     def _commit_initial_chunks(self) -> None:
         """Draw the banner and resumed history (no transcript append)."""
         if not self._initial_chunks:
             return
-        log = self.query_one(OutputLog)
-        for chunk in self._initial_chunks:
-            log.write_chunk(chunk)
+        log = self.query_one(BlockLog)
+        for item in self._initial_chunks:
+            log.append_item(item)
         self._initial_chunks.clear()
 
     def _commit_now(self, text: str) -> None:
@@ -583,8 +580,8 @@ def run_interactive_shell(
     run_turn: Callable[[str, Wire], None],
     make_slash_context: Callable[[], SlashContext],
     initial_output: OutputChunk | str = "",
-    initial_transcript: list[OutputChunk] | None = None,
-    on_transcript: Callable[[OutputChunk], None] | None = None,
+    initial_transcript: list[TranscriptItem] | None = None,
+    on_transcript: Callable[[TranscriptItem], None] | None = None,
     drain_pending: Callable[[], list[str]] | None = None,
     slash_registry: SlashRegistry | None = None,
     cwd: Path | None = None,

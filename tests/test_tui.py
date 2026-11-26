@@ -12,21 +12,21 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-from rich.color import Color
 from textual.driver import Driver
 from textual.geometry import Offset
 from textual.selection import Selection
 from textual.widgets import OptionList
 
-from agent_code.output import OutputChunk
+from agent_code.output import OutputChunk, TranscriptItem
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, default_slash_registry
-from agent_code.tui.app import AgentApp
-from agent_code.tui.completion import CompletionSource
-from agent_code.tui.render import chunk_to_text, render_status
-from agent_code.tui.transcript import TranscriptSink
-from agent_code.tui.widgets import OutputLog, PromptInput
+from agent_code.ui.app import AgentApp
+from agent_code.ui.blocks import BlockLog, TextBlock, ThinkingBlock, ToolCallBlock
+from agent_code.ui.completion import CompletionSource
 from agent_code.ui.events import render_user_prompt
+from agent_code.ui.render import chunk_to_text, render_status
+from agent_code.ui.transcript import ThinkingItem, ToolCallItem, TranscriptSink
+from agent_code.ui.widgets import PromptInput
 from agent_code.wire import (
     TextDelta,
     ToolCallCompleted,
@@ -89,19 +89,22 @@ def test_completion_no_suggestions_for_plain_text(tmp_path: Path) -> None:
 # ---- transcript state machine ----------------------------------------------
 
 
-def test_transcript_folds_tool_burst_into_one_line() -> None:
+def test_transcript_emits_one_item_per_tool_call() -> None:
     sink = TranscriptSink()
-    chunks = sink.handle_batch(
+    items = sink.handle_batch(
         [
             TurnStarted(),
             ToolCallStarted(call_id="1", name="bash", args_preview="{}"),
             ToolCallCompleted(call_id="1", name="bash"),
+            ToolCallStarted(call_id="2", name="bash", args_preview="{}"),
             ToolCallCompleted(call_id="2", name="bash"),
             TurnEnded(),
         ]
     )
 
-    assert [chunk.text for chunk in chunks] == ["✓ 2 tools: bash ×2\n"]
+    assert [type(item).__name__ for item in items] == ["ToolCallItem", "ToolCallItem"]
+    tool_items = [item for item in items if isinstance(item, ToolCallItem)]
+    assert all(item.name == "bash" and item.status == "ok" for item in tool_items)
 
 
 def test_transcript_commits_prose_before_the_tool_that_followed_it() -> None:
@@ -115,8 +118,11 @@ def test_transcript_commits_prose_before_the_tool_that_followed_it() -> None:
         ]
     )
 
-    assert [chunk.text for chunk in second] == ["Let me check.\n\n"]
-    assert sink.tool_fold == [("git_status", "ok")]
+    assert [type(item).__name__ for item in second] == ["OutputChunk", "ToolCallItem"]
+    prose = second[0]
+    assert isinstance(prose, OutputChunk)
+    assert prose.text == "Let me check.\n\n"
+    assert second[1] == ToolCallItem(name="git_status", args_preview="{}", status="ok")
 
 
 # ---- headless app ----------------------------------------------------------
@@ -126,8 +132,8 @@ def _make_app(
     tmp_path: Path,
     *,
     initial_output: OutputChunk | str = "",
-    initial_transcript: list[OutputChunk] | None = None,
-    on_transcript: Callable[[OutputChunk], None] | None = None,
+    initial_transcript: list[TranscriptItem] | None = None,
+    on_transcript: Callable[[TranscriptItem], None] | None = None,
 ) -> AgentApp:
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
     registry = default_slash_registry()
@@ -157,7 +163,7 @@ def _make_app(
 
 
 def _log_text(app: AgentApp) -> str:
-    return "\n".join(str(line) for line in app.query_one(OutputLog).lines)
+    return app.query_one(BlockLog).plain_text()
 
 
 def test_app_opens_slash_completion_menu(tmp_path: Path) -> None:
@@ -290,7 +296,7 @@ def test_app_does_not_reappend_replayed_history(tmp_path: Path) -> None:
     """
 
     async def run() -> None:
-        persisted: list[OutputChunk] = []
+        persisted: list[TranscriptItem] = []
         app = _make_app(
             tmp_path,
             initial_output=OutputChunk("BANNER\n"),
@@ -318,12 +324,14 @@ def test_app_replays_history_at_the_log_width(tmp_path: Path) -> None:
         )
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            log = app.query_one(OutputLog)
-            width = log._content_width()
+            log = app.query_one(BlockLog)
+            width = log.content_width()
             assert width > 80
-            prompt_lines = [line for line in log.lines if "hello" in str(line)]
+            assert "hello" in log.plain_text()
+            prompt_lines = [line for line in log.plain_text().splitlines() if "hello" in line]
             assert prompt_lines
-            assert prompt_lines[0].cell_length == width
+            # The prompt bar is padded to the log width at commit time.
+            assert len(prompt_lines[0]) >= width
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -333,38 +341,61 @@ def test_app_persists_live_chunks(tmp_path: Path) -> None:
     """Only live output is appended to the transcript, and it still is."""
 
     async def run() -> None:
-        persisted: list[OutputChunk] = []
+        persisted: list[TranscriptItem] = []
         app = _make_app(tmp_path, on_transcript=persisted.append)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             await pilot.press(*"hello")
             await pilot.press("enter")
             await pilot.pause()
-            assert any("> hello" in chunk.text for chunk in persisted)
+            texts = [item.text for item in persisted if isinstance(item, OutputChunk)]
+            assert any("> hello" in text for text in texts)
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
 
 
-# ---- output-log selection --------------------------------------------------
+def test_app_replays_structured_items_as_collapsibles(tmp_path: Path) -> None:
+    """A structured resume transcript mounts thinking/tool blocks, not flattened text."""
+
+    async def run() -> None:
+        items: list[TranscriptItem] = [
+            OutputChunk("intro\n"),
+            ThinkingItem("pondered the problem"),
+            ToolCallItem(
+                name="bash",
+                args_preview='{"command": "ls"}',
+                status="ok",
+                args_full='{"command": "ls"}',
+                result="a.txt",
+            ),
+        ]
+        app = _make_app(tmp_path, initial_transcript=items)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert app.query_one(ThinkingBlock).collapsed is True
+            assert app.query_one(ToolCallBlock).collapsed is True
+            assert "intro" in _log_text(app)
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
 
 
-def _write_log(app: AgentApp) -> OutputLog:
-    log = app.query_one(OutputLog)
-    log.write_chunk(OutputChunk("hello world\nsecond line\n"))
-    return log
+# ---- block-log selection ---------------------------------------------------
 
 
-def test_output_log_selects_text(tmp_path: Path) -> None:
+def test_block_log_selects_text(tmp_path: Path) -> None:
     async def run() -> None:
         app = _make_app(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            log = _write_log(app)
+            log = app.query_one(BlockLog)
+            log.append_chunk(OutputChunk("hello world\nsecond line\n"))
             await pilot.pause()
+            block = app.query_one(TextBlock)
 
             app.screen.selections = {
-                log: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
+                block: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
             }
             await pilot.pause()
 
@@ -374,16 +405,18 @@ def test_output_log_selects_text(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_output_log_selects_across_lines(tmp_path: Path) -> None:
+def test_block_log_selects_across_lines(tmp_path: Path) -> None:
     async def run() -> None:
         app = _make_app(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            log = _write_log(app)
+            log = app.query_one(BlockLog)
+            log.append_chunk(OutputChunk("hello world\nsecond line\n"))
             await pilot.pause()
+            block = app.query_one(TextBlock)
 
             app.screen.selections = {
-                log: Selection.from_offsets(Offset(6, 0), Offset(6, 1))
+                block: Selection.from_offsets(Offset(6, 0), Offset(6, 1))
             }
             await pilot.pause()
 
@@ -393,51 +426,23 @@ def test_output_log_selects_across_lines(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
-def test_output_log_reports_content_offsets(tmp_path: Path) -> None:
-    """Mouse hit-testing needs offset metadata, otherwise nothing is selectable."""
+def test_text_block_reports_selection_text(tmp_path: Path) -> None:
+    """A Static text block extracts the text under the selection (copy support)."""
 
     async def run() -> None:
         app = _make_app(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            log = _write_log(app)
+            log = app.query_one(BlockLog)
+            log.append_chunk(OutputChunk("hello world\nsecond line\n"))
             await pilot.pause()
+            block = app.query_one(TextBlock)
 
-            offsets = {
-                segment.style.meta["offset"]
-                for segment in log.render_line(0)
-                if segment.style is not None and "offset" in segment.style.meta
-            }
-            assert offsets
-            assert all(offset[1] == 0 for offset in offsets)
-        app._job_queue.put("__EXIT__")
-
-    asyncio.run(run())
-
-
-def test_output_log_paints_the_selection(tmp_path: Path) -> None:
-    async def run() -> None:
-        app = _make_app(tmp_path)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.pause()
-            log = _write_log(app)
-            await pilot.pause()
-
-            before = log.render_line(0)
-            app.screen.selections = {
-                log: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
-            }
-            await pilot.pause()
-            after = log.render_line(0)
-
-            assert after != before
-            highlighted = next(seg for seg in after if seg.text == "hello")
-            assert highlighted.style is not None
-            assert highlighted.style.bgcolor == Color.parse("#264f78")
-            # The rest of the line keeps its normal styling.
-            rest = next(seg for seg in after if seg.text == " world")
-            assert rest.style is not None
-            assert rest.style.bgcolor != Color.parse("#264f78")
+            result = block.get_selection(
+                Selection.from_offsets(Offset(0, 0), Offset(5, 0))
+            )
+            assert result is not None
+            assert result[0] == "hello"
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -462,10 +467,12 @@ def test_ctrl_c_copies_the_selection_instead_of_quitting(tmp_path: Path) -> None
         app = _make_app(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            log = _write_log(app)
+            log = app.query_one(BlockLog)
+            log.append_chunk(OutputChunk("hello world\nsecond line\n"))
             await pilot.pause()
+            block = app.query_one(TextBlock)
             app.screen.selections = {
-                log: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
+                block: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
             }
             await pilot.pause()
 
@@ -474,6 +481,38 @@ def test_ctrl_c_copies_the_selection_instead_of_quitting(tmp_path: Path) -> None
             assert app.clipboard == "hello"
             assert app.screen.get_selected_text() is None
             assert app.is_running
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+# ---- foldable blocks -------------------------------------------------------
+
+
+def test_app_renders_thinking_and_tool_as_collapsed_blocks(tmp_path: Path) -> None:
+    """Thinking and tool calls mount as collapsed collapsibles; expanding updates them."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._append_item(ThinkingItem("pondering the answer"))
+            app._append_item(OutputChunk("the answer\n"))
+            app._append_item(ToolCallItem(name="bash", args_preview="{}", status="ok"))
+            await pilot.pause()
+
+            thinking = app.query_one(ThinkingBlock)
+            tool = app.query_one(ToolCallBlock)
+            assert thinking.collapsed is True
+            assert tool.collapsed is True
+            # The static text landed in between, in order.
+            assert "the answer" in _log_text(app)
+
+            thinking.collapsed = False
+            tool.collapsed = False
+            await pilot.pause()
+            assert thinking.collapsed is False
+            assert tool.collapsed is False
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -510,7 +549,7 @@ def test_focusing_the_prompt_shows_the_hardware_cursor(tmp_path: Path) -> None:
             try:
                 prompt = app.query_one(PromptInput)
 
-                app.query_one(OutputLog).focus()
+                app.query_one(BlockLog).focus()
                 await pilot.pause()
                 assert "\x1b[?25l" in driver.written
 

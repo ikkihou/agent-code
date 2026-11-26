@@ -1,0 +1,75 @@
+/* Agent REPL styles.
+ *
+ * Kept under agent_code/ui/styles/ (loaded via AgentApp.CSS_PATH) so the look can be
+ * tuned, or overridden per-theme, without editing Python. Textual resolves this path
+ * relative to agent_code/ui/app.py.
+ */
+
+/* Inline mode gives the screen a "tall" (half-cell) border top and bottom. The top one
+   paints as an empty line above the log, so remove both and let the log fill the
+   terminal. */
+Screen:inline {
+    border-top: none;
+    border-bottom: none;
+}
+
+/* Every chrome widget shares the theme surface so the log, live panel, prompt and
+   status bar read as one continuous block instead of alternating black/gray. The
+   RichLog and TextArea already default to $surface; Static (live/status) defaults to
+   transparent, which would show the black terminal through it. */
+#log {
+    height: 1fr;
+    border: none;
+    padding: 0 0;
+}
+
+#live {
+    height: auto;
+    background: $surface;
+}
+
+#question {
+    height: auto;
+    color: #4fd6ff;
+    background: $surface;
+}
+
+#completion {
+    height: auto;
+    max-height: 16;
+    display: none;
+    border: solid #556677;
+    background: $surface;
+}
+
+#prompt {
+    height: auto;
+    min-height: 1;
+    border: solid #556677;
+}
+
+#status {
+    height: 1;
+    background: $surface;
+}
+
+/* The theme's scrollbar track is pure black, which cuts a dark stripe down the log and
+   the prompt. Match the track to the surface and tint the thumb to the border color so
+   the scrollbar reads as part of the same block. */
+#log,
+#completion,
+#prompt {
+    scrollbar-background: $surface;
+    scrollbar-background-hover: $surface;
+    scrollbar-background-active: $surface;
+    scrollbar-color: #556677;
+    scrollbar-color-hover: #6b7f99;
+    scrollbar-color-active: #7f95b3;
+}
+
+/* The dark theme's default selection color has identical fg/bg, which makes selected
+   text unreadable (in the log and in the prompt alike). */
+Screen > .screen--selection {
+    background: #264f78;
+    color: #ffffff;
+}

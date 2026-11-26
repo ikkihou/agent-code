@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..slash import SlashRegistry
-from ..ui.completer import FileMentionCompleter, SlashCompleter, Suggestion
+from .completer import FileMentionCompleter, SlashCompleter, Suggestion
 
 
 class CompletionSource:

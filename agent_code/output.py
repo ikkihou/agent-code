@@ -1,8 +1,11 @@
 """Canonical representation of agent output plus style rendering.
 
-OutputChunk is the single output unit shared by every frontend (one-shot direct
-printing / REPL scrollback+Live / session transcript persistence): plain text plus
-optional style fragments. Fragments use Rich inline style strings
+OutputChunk is the single static-text output unit shared by every frontend (one-shot
+direct printing / REPL scrollback+Live / session transcript persistence): plain text
+plus optional style fragments. ``TranscriptItem`` is the ordered render union -- a
+static ``OutputChunk`` plus ``ThinkingItem`` / ``ToolCallItem`` -- shared by the
+frontends and the structured transcript sidecar (so a resume can rebuild the
+collapsible thinking/tool blocks). Fragments use Rich inline style strings
 ("bold white on #444444") directly -- the output path never goes through ANSI:
 Rich only parses markup/markdown into styled segments, and each frontend renders
 the resulting fragments itself.
@@ -52,6 +55,34 @@ class OutputChunk:
     format: OutputFormat = "plain"
     fragments: tuple[StyleAndText, ...] = ()
     full_width: bool = False
+
+
+@dataclass(frozen=True)
+class ThinkingItem:
+    """One contiguous extended-thinking block (a frontend renders it collapsed)."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class ToolCallItem:
+    """One finished tool call (a frontend renders it collapsed, expandable to detail).
+
+    ``args_preview`` is the short single-line preview used in the title; ``args_full``
+    and ``result`` are the bounded detail shown when the block is expanded.
+    """
+
+    name: str
+    args_preview: str
+    status: str  # "ok" | "error" | "declined" | "skipped"
+    args_full: str = ""
+    result: str = ""
+
+
+# A render item: static text, a thinking block, or a finished tool call. Shared by the
+# frontends and by the transcript sidecar (which persists the structure so a resume can
+# rebuild the collapsible blocks).
+TranscriptItem = OutputChunk | ThinkingItem | ToolCallItem
 
 
 # ---------------------------------------------------------------------------

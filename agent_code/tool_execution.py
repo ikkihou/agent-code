@@ -181,6 +181,21 @@ def _format_call_args(args: dict[str, Any]) -> str:
     return str(preview)
 
 
+# Cap for the expanded-detail argument text carried on the wire. The full arguments
+# still reach the tool; this only bounds what the frontend renders/keeps.
+CALL_DETAIL_MAX_CHARS = 8000
+
+
+def _format_call_args_full(args: dict[str, Any]) -> str:
+    """Full argument text for the expandable tool block, bounded in length."""
+    text = str(args)
+    if len(text) <= CALL_DETAIL_MAX_CHARS:
+        return text
+    return text[:CALL_DETAIL_MAX_CHARS] + (
+        f"\n… ({len(text) - CALL_DETAIL_MAX_CHARS} chars elided)"
+    )
+
+
 def execute_one_tool_call(
     call: ToolCall,
     ctx: ToolContext,
@@ -200,6 +215,7 @@ def execute_one_tool_call(
             call_id=call.id,
             name=call.name,
             args_preview=_format_call_args(call.arguments),
+            args_full=_format_call_args_full(call.arguments),
         )
     )
 
@@ -210,6 +226,7 @@ def execute_one_tool_call(
                 name=call.name,
                 is_error=bool(block.get("is_error")),
                 outcome=outcome,
+                result=str(block.get("content", "")),
             )
         )
         return block
@@ -257,7 +274,14 @@ def execute_one_tool_call(
 
     # allow / ask approved: execute.
     result = tools.run(call, ctx)
-    wire.send(ToolCallCompleted(call_id=call.id, name=call.name, is_error=result.is_error))
+    wire.send(
+        ToolCallCompleted(
+            call_id=call.id,
+            name=call.name,
+            is_error=result.is_error,
+            result=result.content,
+        )
+    )
     if not result.is_error:
         for h in run_hooks(
             "PostToolUse",
@@ -319,14 +343,24 @@ def execute_plan_boundary_calls(
             continue
         # The skipped calls never start, so they need no Started event -- but the folded
         # tool summary in scrollback still shows them as skipped.
+        skipped_content = (
+            "Skipped because exit_plan_mode is waiting for approval. "
+            "Re-issue this tool after approval if needed."
+        )
         wire.send(
-            ToolCallCompleted(call_id=call.id, name=call.name, is_error=True, outcome="skipped")
+            ToolCallCompleted(
+                call_id=call.id,
+                name=call.name,
+                is_error=True,
+                outcome="skipped",
+                result=skipped_content,
+            )
         )
         blocks.append(
             {
                 "type": "tool_result",
                 "tool_use_id": call.id,
-                "content": "Skipped because exit_plan_mode is waiting for approval. Re-issue this tool after approval if needed.",
+                "content": skipped_content,
                 "is_error": True,
             }
         )

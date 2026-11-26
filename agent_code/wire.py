@@ -10,7 +10,8 @@ Events fall into two families:
 
 - **Content events**: ``TextDelta`` (raw model streaming text; in ``notify`` mode
   adjacent deltas merge in place inside the queue so a slow consumer never builds a
-  backlog -- with a synchronous sink every delta is flushed on its own), ``Line``
+  backlog -- with a synchronous sink every delta is flushed on its own), ``ThinkingDelta``
+  (raw extended-thinking increment, rendered as a collapsible block), ``Line``
   (one complete notification line, optionally Rich markup), ``PromptEcho`` (the echo
   block for user/cron input).
 - **Display events**: ``ToolCallStarted`` / ``DiffPreview`` / ``CommandPreview`` --
@@ -49,6 +50,14 @@ class TextDelta:
 
 
 @dataclass(frozen=True)
+class ThinkingDelta:
+    """A model extended-thinking increment (raw text; the consumer renders it as a
+    collapsible reasoning block)."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Line:
     """One complete agent notification line (continue/final/hook/error, ...).
 
@@ -71,12 +80,16 @@ class PromptEcho:
 
 @dataclass(frozen=True)
 class ToolCallStarted:
-    """A tool call starts (the Live area shows a spinner). args_preview is the truncated
-    argument preview."""
+    """A tool call starts (the Live area shows a spinner).
+
+    ``args_preview`` is the short truncated preview; ``args_full`` is the bounded full
+    argument text the frontend can show when the call is expanded.
+    """
 
     call_id: str
     name: str
     args_preview: str
+    args_full: str = ""
 
 
 @dataclass(frozen=True)
@@ -87,13 +100,15 @@ class ToolCallCompleted:
     the "running" state. ``outcome`` refines ``is_error`` for the scrollback summary:
     "" means the ordinary executed case (ok / error by ``is_error``), ``declined`` means
     the user rejected the confirmation, ``skipped`` means another call in the same batch
-    ended the turn before this one could run.
+    ended the turn before this one could run. ``result`` is the bounded tool observation
+    (or error/rejection text) shown when the call is expanded.
     """
 
     call_id: str
     name: str
     is_error: bool = False
     outcome: str = ""
+    result: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,6 +158,7 @@ class TurnEnded:
 
 WireEvent = (
     TextDelta
+    | ThinkingDelta
     | Line
     | PromptEcho
     | ToolCallStarted

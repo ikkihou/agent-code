@@ -1,0 +1,145 @@
+"""Pure transcript state machine: the wire event stream -> ordered render items.
+
+This is the frontend-agnostic half of the REPL, shared by the Textual app (and any
+future frontend). It owns the ``LiveArea`` (streaming tail / spinner / pending preview)
+and turns one drained event batch into an ordered list of render items:
+
+- ``OutputChunk`` for static text / notifications (paragraph-committed prose),
+- ``ThinkingItem`` for one contiguous extended-thinking block,
+- ``ToolCallItem`` for one finished tool call.
+
+The ordering rule is the point of the state machine: streamed prose must land before
+the tool call that followed it, and thinking must land before the answer it precedes.
+Folding/collapsing is a frontend concern; the items only carry text and status.
+"""
+
+from __future__ import annotations
+
+import time
+
+from ..output import OutputChunk, ThinkingItem, ToolCallItem, TranscriptItem
+from ..wire import (
+    TextDelta,
+    ThinkingDelta,
+    ToolCallCompleted,
+    ToolCallStarted,
+    TurnEnded,
+    TurnStarted,
+    WireEvent,
+)
+from .events import event_to_chunks, tool_outcome
+from .live import LiveArea, preview_lines
+
+
+class TranscriptSink:
+    """Consumes wire events and produces the items a frontend should commit."""
+
+    def __init__(self) -> None:
+        self.live = LiveArea()
+        # Consecutive thinking deltas form one block; the buffer flushes when any other
+        # event arrives (the next text block, a tool call, or the turn boundary).
+        self.thinking: list[str] = []
+        # call_id -> (name, args_preview, args_full) captured at ToolCallStarted, so the
+        # finished item can carry the arguments even when parallel calls settle out of
+        # order.
+        self.active_tools: dict[str, tuple[str, str, str]] = {}
+
+    def handle_batch(self, batch: list[WireEvent]) -> list[TranscriptItem]:
+        """Fold one drained batch into the items to commit (in scrollback order).
+
+        Pure state transition over the Live area and the thinking/tool buffers: no
+        terminal IO, so the ordering rules are testable without an event loop.
+        """
+        commit: list[TranscriptItem] = []
+        for event in batch:
+            if isinstance(event, ThinkingDelta):
+                # Thinking opens a block: flush any prose that preceded it so the
+                # reasoning lands before the answer that follows.
+                if not self.thinking:
+                    self._flush_prose(commit)
+                self.thinking.append(event.text)
+                continue
+            if isinstance(event, TextDelta):
+                self._flush_thinking(commit)
+                for paragraph in self.live.feed_stream(event.text):
+                    commit.append(OutputChunk(paragraph, format="markdown"))
+                continue
+            if isinstance(event, ToolCallStarted):
+                self._flush_thinking(commit)
+                self._flush_prose(commit)
+                self.active_tools[event.call_id] = (
+                    event.name,
+                    event.args_preview,
+                    event.args_full,
+                )
+                self.live.active_tool = event.name
+                continue
+            if isinstance(event, ToolCallCompleted):
+                self._flush_thinking(commit)
+                self.live.active_tool = None
+                name, args_preview, args_full = self.active_tools.pop(
+                    event.call_id, (event.name, "", "")
+                )
+                commit.append(
+                    ToolCallItem(
+                        name=name,
+                        args_preview=args_preview,
+                        status=tool_outcome(event),
+                        args_full=args_full,
+                        result=event.result,
+                    )
+                )
+                continue
+            if isinstance(event, TurnStarted):
+                self._flush_thinking(commit)
+                self._flush_prose(commit, close_fence=True)
+                self.live.turn_active = True
+                self.live.turn_started_at = time.monotonic()
+                self.live.reset_stream()
+                self.live.active_tool = None
+                self.active_tools.clear()
+                continue
+            if isinstance(event, TurnEnded):
+                self._flush_thinking(commit)
+                self._flush_prose(commit, trailing_blank=False, close_fence=True)
+                self.live.turn_active = False
+                self.live.active_tool = None
+                self.live.pending_preview = []
+                self.active_tools.clear()
+                continue
+
+            preview = preview_lines(event)
+            if preview is not None:
+                self._flush_thinking(commit)
+                self._flush_prose(commit)
+                self.live.pending_preview = preview
+                continue
+            self._flush_thinking(commit)
+            self._flush_prose(commit)
+            commit.extend(event_to_chunks(event))
+        return commit
+
+    def _flush_thinking(self, commit: list[TranscriptItem]) -> None:
+        """Close the current thinking block, if any, so it keeps its place."""
+        if not self.thinking:
+            return
+        text = "".join(self.thinking)
+        self.thinking = []
+        if text.strip():
+            commit.append(ThinkingItem(text))
+
+    def _flush_prose(
+        self,
+        commit: list[TranscriptItem],
+        *,
+        trailing_blank: bool = True,
+        close_fence: bool = False,
+    ) -> None:
+        """Move the open streamed paragraph into ``commit`` so it keeps its place."""
+        tail = self.live.flush_paragraph(close_fence=close_fence)
+        if not tail.strip():
+            return
+        if trailing_blank:
+            commit.append(OutputChunk(tail.rstrip("\n") + "\n\n", format="markdown"))
+        else:
+            commit.append(OutputChunk(tail, format="markdown"))

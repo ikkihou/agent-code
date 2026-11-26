@@ -63,7 +63,7 @@ class ModelRequestAborted(RuntimeError):
 
 @dataclass(frozen=True)
 class ModelStreamEvent:
-    type: Literal["text_delta", "completed"]
+    type: Literal["text_delta", "thinking_delta", "completed"]
     text: str | None = None
     response: ModelResponse | None = None
 
@@ -221,9 +221,10 @@ class MockProvider:
 class AnthropicProvider:
     def __init__(
         self,
-        model: str = "deepseek-v4-flash",
+        model: str = "deepseek-flash",
         max_tokens: int = 4096,
         base_url: str | None = None,
+        thinking_budget: int | None = 1024,
     ) -> None:
         # Prefer the env field of ~/.claude/settings.json, then fall back to os.environ.
         claude_env = _load_claude_settings()
@@ -242,6 +243,7 @@ class AnthropicProvider:
 
         self.model = model
         self.max_tokens = max_tokens
+        self.thinking_budget = thinking_budget
         self.base_url = (
             base_url
             or claude_env.get("ANTHROPIC_BASE_URL")
@@ -267,6 +269,14 @@ class AnthropicProvider:
 
         if system:
             kwargs["system"] = system
+
+        # Extended thinking is opt-in via ``thinking_budget``. The API requires
+        # ``budget_tokens`` to stay below ``max_tokens``; skip it when the budget is
+        # unusable instead of sending a request the provider would reject.
+        if self.thinking_budget is not None:
+            budget = min(self.thinking_budget, self.max_tokens - 1)
+            if budget > 0:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
         return kwargs
 
@@ -320,11 +330,17 @@ class AnthropicProvider:
                     if signal is not None and signal.is_set():
                         raise ModelRequestAborted()
 
-                    if event.type == "content_block_delta" and event.delta.type == "text_delta":
-                        yield ModelStreamEvent(
-                            type="text_delta",
-                            text=event.delta.text,
-                        )
+                    if event.type == "content_block_delta":
+                        if event.delta.type == "text_delta":
+                            yield ModelStreamEvent(
+                                type="text_delta",
+                                text=event.delta.text,
+                            )
+                        elif event.delta.type == "thinking_delta":
+                            yield ModelStreamEvent(
+                                type="thinking_delta",
+                                text=event.delta.thinking,
+                            )
 
                 if signal is not None and signal.is_set():
                     raise ModelRequestAborted()

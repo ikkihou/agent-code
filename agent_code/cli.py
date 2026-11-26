@@ -24,16 +24,16 @@ from rich.text import Text
 from .agent import build_system_prompt, run_agent
 from .context import ContextBudget, resolve_window
 from .model import create_provider
-from .output import OutputChunk
+from .output import OutputChunk, TranscriptItem
 from .runtime import RuntimeState
 from .scheduler import CronScheduler
 from .session import Session
 from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
-from .tui import run_interactive_shell
-from .tui.transcript import TranscriptSink
+from .ui.app import run_interactive_shell
 from .ui.banner import build_banner
 from .ui.events import render_user_prompt
+from .ui.transcript import TranscriptSink
 from .wire import (
     CommandPreview,
     ContextCompacted,
@@ -128,14 +128,14 @@ class _ConsoleWireSink:
     sidecar the REPL writes (and ``--continue`` can replay them).
     """
 
-    def __init__(self, on_transcript: Callable[[OutputChunk], None] | None = None) -> None:
+    def __init__(self, on_transcript: Callable[[TranscriptItem], None] | None = None) -> None:
         self._on_transcript = on_transcript
         self._transcript = TranscriptSink() if on_transcript is not None else None
 
     def send(self, events: list[WireEvent]) -> None:
         if self._transcript is not None and self._on_transcript is not None:
-            for chunk in self._transcript.handle_batch(events):
-                self._on_transcript(chunk)
+            for item in self._transcript.handle_batch(events):
+                self._on_transcript(item)
         for event in events:
             if isinstance(event, TextDelta):
                 console.print(event.text, markup=False, highlight=False, end="")
@@ -176,7 +176,7 @@ class _ConsoleWireSink:
                 console.print(f"[dim]{event.describe()}[/dim]")
 
 
-def _console_wire(on_transcript: Callable[[OutputChunk], None] | None = None) -> Wire:
+def _console_wire(on_transcript: Callable[[TranscriptItem], None] | None = None) -> Wire:
     wire = Wire()
     wire.sink = _ConsoleWireSink(on_transcript).send
     return wire
@@ -342,7 +342,7 @@ def main_command(
         run_turn,
         make_slash_context,
         initial_output,
-        initial_transcript=session.transcript_chunks,
+        initial_transcript=session.transcript_items,
         on_transcript=session.append_transcript,
         drain_pending=scheduler.drain_pending,
         slash_registry=slash_registry,

@@ -17,6 +17,7 @@ from agent_code.agent import run_agent
 from agent_code.model import ModelResponse, ModelStreamEvent
 from agent_code.output import (
     OutputChunk,
+    TranscriptItem,
     chunk_fragments,
     markdown_fragments,
     pad_full_width,
@@ -24,7 +25,6 @@ from agent_code.output import (
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
-from agent_code.tui.transcript import TranscriptSink
 from agent_code.ui.completer import SlashCompleter
 from agent_code.ui.events import event_to_chunks, render_user_prompt
 from agent_code.ui.live import LiveArea, cap_preview_lines
@@ -34,12 +34,18 @@ from agent_code.ui.prompts import (
     prompt_for_request,
     render_prompt_request,
 )
+from agent_code.ui.transcript import (
+    ThinkingItem,
+    ToolCallItem,
+    TranscriptSink,
+)
 from agent_code.wire import (
     CommandPreview,
     DiffPreview,
     Line,
     PromptEcho,
     TextDelta,
+    ThinkingDelta,
     ToolCallCompleted,
     ToolCallStarted,
     TurnEnded,
@@ -139,6 +145,47 @@ def test_run_agent_streaming_reaches_wire_as_text_delta(tmp_path: Path) -> None:
     # Raw deltas go onto the wire unchanged; assembling lines/paragraphs is the
     # consumer's job (LiveArea.feed_stream in the REPL).
     assert "".join(sink.texts()) == final_text
+
+
+def test_run_agent_streams_thinking_before_text(tmp_path: Path) -> None:
+    """Extended thinking reaches the wire ahead of the visible answer, in stream order."""
+
+    class _ThinkingProvider:
+        def complete_stream(
+            self,
+            messages: list[dict[str, Any]],
+            tools: list[Any] | None = None,
+            system: str | None = None,
+            *,
+            signal: Any = None,
+        ):
+            yield ModelStreamEvent(type="thinking_delta", text="let me ")
+            yield ModelStreamEvent(type="thinking_delta", text="think")
+            yield ModelStreamEvent(type="text_delta", text="42")
+            yield ModelStreamEvent(
+                type="completed", response=ModelResponse(text="42")
+            )
+
+    wire, sink = _collecting_wire()
+
+    result = run_agent(
+        "what is 6*7?",
+        _ThinkingProvider(),
+        ToolRegistry(),
+        RuntimeState(),
+        cwd=tmp_path,
+        wire=wire,
+    )
+
+    ordered = [
+        type(e).__name__
+        for e in sink.events
+        if isinstance(e, (ThinkingDelta, TextDelta))
+    ]
+    assert ordered == ["ThinkingDelta", "ThinkingDelta", "TextDelta"]
+    assert "".join(e.text for e in sink.events if isinstance(e, ThinkingDelta)) == "let me think"
+    # Thinking is display-only and never leaks into the final answer.
+    assert result.final == "42"
 
 
 def test_wire_merges_adjacent_text_deltas_in_queue() -> None:
@@ -416,22 +463,24 @@ def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
             ToolCallCompleted(call_id="1", name="git_status"),
         ]
     )
-    # Prose is committed at once; the tool burst stays open (the model may call more
-    # tools) and its summary lands when the burst closes.
-    assert [chunk.text for chunk in second] == ["Let me check git first.\n\n"]
-    assert sink.tool_fold == [("git_status", "ok")]
+    # Prose is committed at once, then the finished call becomes a foldable item.
+    assert [type(item).__name__ for item in second] == ["OutputChunk", "ToolCallItem"]
+    prose = second[0]
+    assert isinstance(prose, OutputChunk)
+    assert prose.text == "Let me check git first.\n\n"
+    assert second[1] == ToolCallItem(
+        name="git_status", args_preview="{}", status="ok"
+    )
 
     third = sink.handle_batch([TextDelta("Done. Nothing to report."), TurnEnded()])
-    assert [chunk.text for chunk in third] == [
-        "✓ git_status\n",
-        "Done. Nothing to report.\n",
-    ]
+    third_text = [item.text for item in third if isinstance(item, OutputChunk)]
+    assert third_text == ["Done. Nothing to report.\n"]
     assert sink.live.open_paragraph == []
-    assert sink.tool_fold == []
+    assert sink.active_tools == {}
 
 
-def test_consume_batch_folds_a_tool_burst_into_one_line() -> None:
-    """Twenty tool calls must not occupy twenty rows: one burst -> one summary line."""
+def test_consume_batch_emits_one_item_per_tool_call() -> None:
+    """Each tool call is its own foldable item (collapsed, one row in the log)."""
     sink = _sink_for_batch()
     calls: list[Any] = [TurnStarted()]
     for index in range(4):
@@ -439,32 +488,37 @@ def test_consume_batch_folds_a_tool_burst_into_one_line() -> None:
         calls.append(ToolCallCompleted(call_id=str(index), name="bash"))
     calls.append(TurnEnded())
 
-    chunks = sink.handle_batch(calls)
+    items = sink.handle_batch(calls)
 
-    assert [chunk.text for chunk in chunks] == ["✓ 4 tools: bash ×4\n"]
-    assert sink.tool_fold == []
+    assert len(items) == 4
+    tool_items = [item for item in items if isinstance(item, ToolCallItem)]
+    assert len(tool_items) == 4
+    assert [item.name for item in tool_items] == ["bash"] * 4
+    assert all(item.status == "ok" for item in tool_items)
+    assert sink.active_tools == {}
 
 
-def test_consume_batch_tool_summary_before_resumed_prose() -> None:
-    """The burst closes when the model speaks again, so the summary precedes that prose."""
+def test_consume_batch_tool_item_precedes_resumed_prose() -> None:
+    """The finished call is committed before the prose that follows it."""
     sink = _sink_for_batch()
-    sink.handle_batch(
+    first = sink.handle_batch(
         [
             TurnStarted(),
             ToolCallStarted(call_id="1", name="read_file", args_preview="{}"),
             ToolCallCompleted(call_id="1", name="read_file"),
         ]
     )
+    assert [type(item).__name__ for item in first] == ["ToolCallItem"]
 
-    chunks = sink.handle_batch([TextDelta("The file says hi."), TurnEnded()])
-    assert [chunk.text for chunk in chunks] == ["✓ read_file\n", "The file says hi.\n"]
+    second = sink.handle_batch([TextDelta("The file says hi."), TurnEnded()])
+    second_text = [item.text for item in second if isinstance(item, OutputChunk)]
+    assert second_text == ["The file says hi.\n"]
 
 
-def test_consume_batch_records_declined_tools_in_the_fold() -> None:
-    """A rejected confirmation settles the call (no hanging spinner) and is visible in
-    the folded summary."""
+def test_consume_batch_records_declined_tools() -> None:
+    """A rejected confirmation settles the call (no hanging spinner) as declined."""
     sink = _sink_for_batch()
-    chunks = sink.handle_batch(
+    items = sink.handle_batch(
         [
             TurnStarted(),
             ToolCallStarted(call_id="1", name="bash", args_preview="{}"),
@@ -473,7 +527,33 @@ def test_consume_batch_records_declined_tools_in_the_fold() -> None:
         ]
     )
 
-    assert [chunk.text for chunk in chunks] == ["⊘ bash (declined)\n"]
+    assert items == [ToolCallItem(name="bash", args_preview="{}", status="declined")]
+
+
+def test_consume_batch_emits_thinking_before_the_answer() -> None:
+    """A contiguous thinking run becomes one ThinkingItem ahead of the text it precedes."""
+    sink = _sink_for_batch()
+    items = sink.handle_batch(
+        [
+            TurnStarted(),
+            TextDelta("thinking about it"),
+            ThinkingDelta("step 1; "),
+            ThinkingDelta("step 2"),
+            TextDelta("answer"),
+            TurnEnded(),
+        ]
+    )
+
+    kinds = [type(item).__name__ for item in items]
+    # Order: prose before the thinking, then the thinking block, then the answer.
+    assert kinds == ["OutputChunk", "ThinkingItem", "OutputChunk"]
+    prose = items[0]
+    assert isinstance(prose, OutputChunk)
+    assert prose.text == "thinking about it\n\n"
+    assert items[1] == ThinkingItem("step 1; step 2")
+    answer = items[2]
+    assert isinstance(answer, OutputChunk)
+    assert "answer" in answer.text
 
 
 def test_tool_fold_formatting() -> None:
@@ -657,7 +737,7 @@ def test_markdown_wraps_at_the_requested_width() -> None:
 
 def test_commit_renders_at_the_passed_width() -> None:
     """The commit renderer wraps markdown and pads prompts at the width it is given."""
-    from agent_code.tui.render import chunk_to_text
+    from agent_code.ui.render import chunk_to_text
 
     prose = " ".join(["word"] * 200) + "\n"
     rendered = chunk_to_text(OutputChunk(prose, format="markdown"), width=72)
@@ -685,12 +765,14 @@ def test_console_wire_sink_writes_a_styled_transcript() -> None:
     """One-shot output also feeds a TranscriptSink, so --continue can replay it."""
     from agent_code.cli import _ConsoleWireSink
 
-    chunks: list[OutputChunk] = []
+    chunks: list[TranscriptItem] = []
     sink = _ConsoleWireSink(chunks.append)
     sink.send([TurnStarted(), TextDelta("**hi**"), TextDelta("\n\n"), TurnEnded()])
 
-    assert [chunk.text for chunk in chunks] == ["**hi**\n\n"]
-    assert chunks[0].format == "markdown"
+    texts = [item.text for item in chunks if isinstance(item, OutputChunk)]
+    assert texts == ["**hi**\n\n"]
+    prose = next(item for item in chunks if isinstance(item, OutputChunk))
+    assert prose.format == "markdown"
 
 
 def test_transcript_prompt_style_survives_resume(tmp_path: Path) -> None:

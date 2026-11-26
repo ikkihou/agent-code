@@ -68,13 +68,20 @@ Data flow: `cli.py` → `run_agent()` (`agent.py`) → `tool_execution.py` →
   `full_width`. `chunk_fragments()` is the single normalization entry point;
   `pad_full_width()` pads prompt blocks at commit time. Transcripts store the intent,
   never the padding.
-- **REPL** (`tui/` + `ui/`): a Textual `AgentApp` with `OutputLog`, `LivePanel`,
-  `QuestionLine`, `OptionList`, `PromptInput`, and `StatusBar`. The worker thread posts
+- **UI** (`ui/`): all interface code lives here. The Textual frontend is `AgentApp`
+  (`ui/app.py`, exported as `run_interactive_shell`) with `BlockLog`, `LivePanel`,
+  `QuestionLine`, `OptionList`, `PromptInput`, and `StatusBar`. `BlockLog`
+  (`ui/blocks.py`) is a `VerticalScroll` of static `TextBlock`s interleaved with
+  collapsed-by-default `ThinkingBlock`/`ToolCallBlock` collapsibles, so thinking and
+  tool calls are individually foldable in place. The worker thread posts
   wire events through a queue and wakes the UI at most once per pending drain;
-  `tui/transcript.py::TranscriptSink` folds batches into ordered chunks and owns the
-  `LiveArea` (commits closed paragraphs, keeps a short tail). `ui/` holds the
-  frontend-agnostic helpers: events, live state, banner, prompts, completion, paste,
-  status. Approvals route through `state.asker`; one-shot falls back to typer prompts.
+  `ui/transcript.py::TranscriptSink` folds batches into ordered render items
+  (`OutputChunk` / `ThinkingItem` / `ToolCallItem`) and owns the
+  `LiveArea` (commits closed paragraphs, keeps a short tail). Toolkit-agnostic helpers
+  (events, live state, banner, prompts, completer, paste, status) sit alongside the
+  Textual modules (`app`, `widgets`, `transcript`, `render`, `completion`) and the
+  `ui/styles/default.tcss` stylesheet. Approvals route through `state.asker`; one-shot
+  falls back to typer prompts.
 - **Persistence** (`session.py`, `memdir/`, `file_history.py`): append-only JSONL under
   `.agent/sessions/<cwd>/<id>.jsonl`, plus a `<id>.transcript.jsonl` sidecar for replay.
   `-c` / `--resume` work; replay is draw-only and must not re-append history. Long-term

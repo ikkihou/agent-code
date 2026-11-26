@@ -35,7 +35,7 @@ from .tool_execution import (
     partition_tool_calls,
 )
 from .tools import ToolContext, ToolRegistry
-from .wire import ContextCompacted, Line, TextDelta, Wire
+from .wire import ContextCompacted, Line, TextDelta, ThinkingDelta, Wire
 
 # Worker count for the parallel read-only tool batch. Read-only calls are safe to run
 # concurrently; write tools form their own serial batch and are not affected.
@@ -226,6 +226,11 @@ def run_agent(  ## AGENT LOOP
                     # is a frontend rendering concern (LiveArea.feed_stream in the
                     # REPL, direct printing in one-shot mode).
                     wire.send(TextDelta(text=event.text))
+                elif event.type == "thinking_delta" and event.text:
+                    # Extended thinking streams ahead of the answer in the same block
+                    # order the model produced it; it is display-only and never feeds
+                    # the final-text fallback (``streamed_parts``).
+                    wire.send(ThinkingDelta(text=event.text))
                 elif event.type == "completed":
                     response = event.response
         except ModelRequestAborted:

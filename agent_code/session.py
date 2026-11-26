@@ -26,7 +26,38 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
-from .output import OutputChunk
+from .output import OutputChunk, ThinkingItem, ToolCallItem, TranscriptItem
+
+
+def _transcript_item(data: dict[str, Any]) -> TranscriptItem:
+    """Decode one transcript record back into a render item.
+
+    Records written before the structured sidecar existed have no ``kind``; they are
+    text chunks. Unknown kinds also fall back to text so a bad record never breaks
+    resume.
+    """
+    kind = data.get("kind", "text")
+    if kind == "thinking":
+        return ThinkingItem(str(data.get("text", "")))
+    if kind == "tool":
+        return ToolCallItem(
+            name=str(data.get("name", "")),
+            args_preview=str(data.get("args_preview", "")),
+            status=str(data.get("status", "ok")),
+            args_full=str(data.get("args_full", "")),
+            result=str(data.get("result", "")),
+        )
+    fragments = data.get("fragments")
+    return OutputChunk(
+        str(data.get("text", "")),
+        format=data.get("format", "plain"),
+        fragments=(
+            tuple((str(style), str(text)) for style, text in fragments)
+            if fragments
+            else ()
+        ),
+        full_width=bool(data.get("full_width", False)),
+    )
 
 
 def _is_session_file(path: Path) -> bool:
@@ -189,33 +220,51 @@ class Session:
         """
         return self.file_path.with_name(self.file_path.stem + ".transcript.jsonl")
 
-    def append_transcript(self, chunk: OutputChunk) -> None:
-        """Append one OutputChunk already rendered to the output panel to the transcript
-        file.
+    def append_transcript(self, item: TranscriptItem) -> None:
+        """Append one rendered render item to the structured transcript sidecar.
 
-        Non-empty fragments are persisted too, so a resume replay can restore the
-        original styling (grey prompt blocks and so on); format "rich" stores the raw
+        The sidecar stores the structure (text / thinking / tool) so a resume can rebuild
+        the collapsible blocks, including tool arguments and result detail. Text chunks
+        keep their style fragments and full-width intent; format "rich" stores the raw
         markup text.
         """
-        if not chunk.text:
-            return
-        record: dict[str, Any] = {"text": chunk.text, "format": chunk.format}
-        if chunk.fragments:
-            record["fragments"] = [[style, text] for style, text in chunk.fragments]
-        if chunk.full_width:
-            # Persist the intent, not the padded line: resume uses the current terminal
-            # width, and transcript files stay independent of one terminal's columns.
-            record["full_width"] = True
+        if isinstance(item, ThinkingItem):
+            if not item.text.strip():
+                return
+            record: dict[str, Any] = {"kind": "thinking", "text": item.text}
+        elif isinstance(item, ToolCallItem):
+            record = {
+                "kind": "tool",
+                "name": item.name,
+                "args_preview": item.args_preview,
+                "args_full": item.args_full,
+                "status": item.status,
+                "result": item.result,
+            }
+        else:
+            if not item.text:
+                return
+            record = {"kind": "text", "text": item.text, "format": item.format}
+            if item.fragments:
+                record["fragments"] = [[style, text] for style, text in item.fragments]
+            if item.full_width:
+                # Persist the intent, not the padded line: resume uses the current
+                # terminal width, and transcript files stay independent of one
+                # terminal's columns.
+                record["full_width"] = True
         with open(self.transcript_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
     @property
-    def transcript_chunks(self) -> list[OutputChunk]:
-        """Read back the historical render transcript, used to rebuild the output panel
-        on resume. Returns an empty list when the file is missing."""
-        chunks: list[OutputChunk] = []
+    def transcript_items(self) -> list[TranscriptItem]:
+        """Read back the structured render transcript, used to rebuild the panel on resume.
+
+        Returns an empty list when the file is missing. Legacy flat records (no ``kind``)
+        are read back as text chunks.
+        """
+        items: list[TranscriptItem] = []
         if not self.transcript_path.exists():
-            return chunks
+            return items
         for line in self.transcript_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -224,18 +273,10 @@ class Session:
                 data = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            fragments = data.get("fragments")
-            full_width = bool(data.get("full_width", False))
-            chunks.append(
-                OutputChunk(
-                    data.get("text", ""),
-                    format=data.get("format", "plain"),
-                    fragments=(
-                        tuple((str(style), str(text)) for style, text in fragments)
-                        if fragments
-                        else ()
-                    ),
-                    full_width=full_width,
-                )
-            )
-        return chunks
+            items.append(_transcript_item(data))
+        return items
+
+    @property
+    def transcript_chunks(self) -> list[OutputChunk]:
+        """Flat view over ``transcript_items`` (text blocks only)."""
+        return [item for item in self.transcript_items if isinstance(item, OutputChunk)]

@@ -12,8 +12,8 @@ from rich.text import Text
 
 from ..output import OutputChunk, StyleAndText, chunk_fragments, pad_full_width
 from ..runtime import RuntimeState
-from ..ui.live import LiveArea
-from ..ui.status import bottom_toolbar
+from .live import LiveArea
+from .status import bottom_toolbar
 
 # Spinner / pending-preview colors, expressed in Rich inline vocabulary.
 SPINNER_STYLE = "bold #4fd6ff"
@@ -54,7 +54,10 @@ def render_live(live: LiveArea, columns: int, now: float) -> Text:
 
 
 # Status-bar segment colors, keyed by the class token that ``bottom_toolbar`` emits
-# (mirrors ``ui/theme.py::build_style``). The bar background is #222222 throughout.
+# (mirrors ``ui/theme.py::build_style``). The bar background comes from the widget's
+# CSS (``#status`` -> ``$surface``), so fragments only set the foreground; leaving the
+# background unset lets the widget paint the whole row uniformly, including the empty
+# space after the last segment.
 _STATUS_COLORS: dict[str, str] = {
     "mode.default": "#4fd6ff",
     "mode.edits": "#7ee787",
@@ -64,7 +67,6 @@ _STATUS_COLORS: dict[str, str] = {
     "seg.ctx": "#61afef",
     "ctx.hot": "#e5c07b",
 }
-_STATUS_BG = "#222222"
 _STATUS_FG = "#e5e5e5"
 
 
@@ -78,5 +80,5 @@ def render_status(state: RuntimeState) -> Text:
             if token in style:
                 color = token_color
                 break
-        text.append(piece, style=f"{color} on {_STATUS_BG}")
+        text.append(piece, style=color)
     return text

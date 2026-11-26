@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from agent_code.output import OutputChunk
+from agent_code.output import OutputChunk, ThinkingItem, ToolCallItem
 from agent_code.session import Session
 
 
@@ -103,3 +103,31 @@ def test_history_empty_when_file_missing(tmp_path: Path) -> None:
     session.file_path.unlink()
 
     assert session.history == []
+
+
+def test_structured_transcript_roundtrip(tmp_path: Path) -> None:
+    """The sidecar keeps thinking/tool structure (and tool detail) across a resume."""
+    session = Session.create(tmp_path)
+    session.append_transcript(OutputChunk("text\n"))
+    session.append_transcript(ThinkingItem("pondering"))
+    tool = ToolCallItem(
+        name="bash",
+        args_preview='{"command": "ls"}',
+        status="ok",
+        args_full='{"command": "ls -la"}',
+        result="a.txt",
+    )
+    session.append_transcript(tool)
+
+    assert session.transcript_items == [OutputChunk("text\n"), ThinkingItem("pondering"), tool]
+    # The flat view stays text-only for callers that only want plain chunks.
+    assert session.transcript_chunks == [OutputChunk("text\n")]
+
+
+def test_legacy_flat_transcript_record_reads_as_text(tmp_path: Path) -> None:
+    """A record written before the structured sidecar (no ``kind``) is a text chunk."""
+    session = Session.create(tmp_path)
+    with session.transcript_path.open("a", encoding="utf-8") as f:
+        f.write('{"text": "legacy\\n", "format": "plain"}\n')
+
+    assert session.transcript_items == [OutputChunk("legacy\n")]
