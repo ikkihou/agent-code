@@ -8,6 +8,7 @@ without a live app; the headless ``run_test`` pilot exercises the real app wirin
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -121,7 +122,13 @@ def test_transcript_commits_prose_before_the_tool_that_followed_it() -> None:
 # ---- headless app ----------------------------------------------------------
 
 
-def _make_app(tmp_path: Path) -> AgentApp:
+def _make_app(
+    tmp_path: Path,
+    *,
+    initial_output: OutputChunk | str = "",
+    initial_transcript: list[OutputChunk] | None = None,
+    on_transcript: Callable[[OutputChunk], None] | None = None,
+) -> AgentApp:
     state = RuntimeState(permission_mode="default", model="mock", provider="mock")
     registry = default_slash_registry()
 
@@ -141,6 +148,9 @@ def _make_app(tmp_path: Path) -> AgentApp:
         state,
         run_turn=lambda line, wire: None,
         make_slash_context=make_ctx,
+        initial_output=initial_output,
+        initial_transcript=initial_transcript,
+        on_transcript=on_transcript,
         slash_registry=registry,
         cwd=tmp_path,
     )
@@ -171,8 +181,8 @@ def test_app_opens_slash_completion_menu(tmp_path: Path) -> None:
             await pilot.press("tab")
             await pilot.pause()
             assert app._prompt.text == "/help"
-            # The completed word still matches: the menu stays open for refinement.
-            assert completion.display is True
+            # Tab accepts the command and closes the menu (no one-row leftover).
+            assert completion.display is False
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -222,6 +232,115 @@ def test_app_echoes_user_prompt(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause()
             assert "> hello" in _log_text(app)
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_app_tab_accepts_slash_completion_and_closes_menu(tmp_path: Path) -> None:
+    """Tab closes the menu instead of reopening a one-row list of the accepted command."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("/")
+            await pilot.pause()
+            menu = app.query_one(OptionList)
+            assert menu.display is True
+            expected = app._suggestions[0].insert
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app._prompt.text == expected
+            assert menu.display is False
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_app_shift_tab_cycles_permission_mode(tmp_path: Path) -> None:
+    """Regression: Screen's shift+tab -> focus_previous shadowed the app binding.
+
+    The app binding must be priority so shift+tab cycles the mode instead of moving
+    focus.
+    """
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert app._state.permission_mode == "default"
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert app._state.permission_mode == "acceptEdits"
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert app._state.permission_mode == "plan"
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_app_does_not_reappend_replayed_history(tmp_path: Path) -> None:
+    """The banner and resumed transcript are drawn, not written back to the sidecar.
+
+    Regression: on_mount used to route initial chunks through the live commit path,
+    which appended the banner + entire history to the transcript on every resume.
+    """
+
+    async def run() -> None:
+        persisted: list[OutputChunk] = []
+        app = _make_app(
+            tmp_path,
+            initial_output=OutputChunk("BANNER\n"),
+            initial_transcript=[OutputChunk("old line\n")],
+            on_transcript=persisted.append,
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert persisted == []
+            text = _log_text(app)
+            assert "BANNER" in text
+            assert "old line" in text
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_app_replays_history_at_the_log_width(tmp_path: Path) -> None:
+    """Resume replay must use the laid-out log width, not the 80-column fallback."""
+
+    async def run() -> None:
+        app = _make_app(
+            tmp_path,
+            initial_transcript=[render_user_prompt("hello")],
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one(OutputLog)
+            width = log._content_width()
+            assert width > 80
+            prompt_lines = [line for line in log.lines if "hello" in str(line)]
+            assert prompt_lines
+            assert prompt_lines[0].cell_length == width
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_app_persists_live_chunks(tmp_path: Path) -> None:
+    """Only live output is appended to the transcript, and it still is."""
+
+    async def run() -> None:
+        persisted: list[OutputChunk] = []
+        app = _make_app(tmp_path, on_transcript=persisted.append)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press(*"hello")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert any("> hello" in chunk.text for chunk in persisted)
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())

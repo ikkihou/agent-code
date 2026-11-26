@@ -17,35 +17,6 @@ from .context import estimate_message_tokens, estimate_messages_tokens
 _PIN_COUNT = 2
 
 
-def compact(messages: list[dict[str, Any]], keep: int = 8) -> list[dict[str, Any]]:
-    """Deterministic compression of the message history. Never calls an LLM.
-
-    Returns three concatenated parts:
-    1. pinned: the first 2 messages (they define the session's task; never dropped)
-    2. compressed: one summary user message covering the middle
-    3. working: the last `keep` messages (recent interaction, kept intact)
-
-    The cut is moved back when it would split a ``tool_use`` from its following
-    ``tool_result``, so the pinned prefix and the working tail always form valid
-    conversations on their own. When the total message count is <= keep + 2, or no
-    safe cut exists, nothing is compressed and the original list is returned as-is.
-    """
-
-    if len(messages) <= keep + _PIN_COUNT:
-        return messages
-
-    start = _safe_start(messages, _PIN_COUNT)
-    if start >= len(messages) - 1:
-        return messages
-
-    cut = _safe_cut_at_or_before(messages, len(messages) - keep, start + 1)
-    if cut is None:
-        return messages
-
-    middle = messages[start:cut]
-    return messages[:start] + [_summarize(middle)] + messages[cut:]
-
-
 def compact_to_budget(
     messages: list[dict[str, Any]],
     target_tokens: int,

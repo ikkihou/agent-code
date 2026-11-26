@@ -18,6 +18,9 @@ from ..wire import CommandPreview, DiffPreview, WireEvent
 # Streaming tail lines shown in the Live area -- the whole paragraph is committed to
 # scrollback when the turn ends.
 STREAM_TAIL_LINES = 3
+# Cap for pending confirmation previews (diffs, commands, plan panels). Long bodies
+# would otherwise grow the Live area until the input frame is pushed off-screen.
+PENDING_PREVIEW_MAX_LINES = 20
 # Spinner animation frames.
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -155,6 +158,20 @@ class LiveArea:
         if self.stream_pending:
             out.append(("", _fit_width(self.stream_pending, columns)))
         return out
+
+
+def cap_preview_lines(
+    lines: list[str], max_lines: int = PENDING_PREVIEW_MAX_LINES
+) -> list[str]:
+    """Clip a pending-preview body to ``max_lines``, marking the elision.
+
+    Confirmation previews include user/model-controlled bodies (a plan panel can be
+    arbitrarily long). Keeping the Live area bounded is what protects the input frame.
+    """
+    if len(lines) <= max_lines:
+        return lines
+    omitted = len(lines) - max_lines
+    return [*lines[:max_lines], f"... ({omitted} lines omitted)"]
 
 
 def preview_lines(event: WireEvent) -> list[str] | None:

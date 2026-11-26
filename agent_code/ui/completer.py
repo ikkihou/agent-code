@@ -8,9 +8,8 @@ triggering, and a short-circuit once the fragment already names an existing file
 discovery reuses the agent's own ``SkipPolicy`` (skip dirs + .gitignore) with an
 early-pruned scandir walk.
 
-The public API is ``suggestions(text_before_cursor) -> list[Suggestion]`` -- no
-prompt_toolkit protocol -- so both the Textual frontend and tests consume plain
-dataclasses.
+The public API is ``suggestions(text_before_cursor) -> list[Suggestion]``, so the
+Textual frontend and tests consume plain dataclasses.
 """
 
 from __future__ import annotations

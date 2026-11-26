@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 from agent_code.compact_basic import (
-    compact,
     compact_to_budget,
     is_safe_boundary,
 )
@@ -63,24 +62,6 @@ def _assert_no_orphans(messages: list[dict[str, Any]]) -> None:
     assert not pending, f"orphaned tool_use: {pending}"
 
 
-def _tool_heavy_history() -> list[dict[str, Any]]:
-    """12 messages whose greedy keep=2 cut lands on a bare tool_result."""
-    return [
-        _user("task"),
-        _assistant("sure"),
-        _user("one"),
-        _assistant("two"),
-        _user("three"),
-        _assistant("four"),
-        _user("five"),
-        _assistant("six"),
-        _user("seven"),
-        _assistant_tool("a"),
-        _tool_result("a"),  # messages[-2]: the greedy cut starts here
-        _user("next"),
-    ]
-
-
 # ---- boundary detection ----------------------------------------------------
 
 
@@ -103,48 +84,6 @@ def test_boundary_is_safe_after_a_complete_pair() -> None:
         _user("next"),
     ]
     assert is_safe_boundary(messages, 4)
-
-
-# ---- compact(): compatibility wrapper --------------------------------------
-
-
-def test_compact_returns_input_when_history_is_short() -> None:
-    messages = [_user("a"), _assistant("b"), _user("c")]
-    assert compact(messages, keep=8) is messages
-
-
-def test_compact_moves_the_cut_back_to_keep_a_tool_pair() -> None:
-    messages = _tool_heavy_history()
-    compacted = compact(messages, keep=2)
-
-    _assert_no_orphans(compacted)
-    # The cut moved from index 10 back to 9: the whole tool exchange is kept.
-    assert compacted[-3]["role"] == "assistant"
-    assert compacted[-2]["role"] == "user"
-    assert any(
-        "<compacted-history>" in str(message.get("content"))
-        for message in compacted
-        if message["role"] == "user"
-    )
-
-
-def test_compact_regression_previously_orphaned_a_tool_result() -> None:
-    """The old count-based cut produced ``[tool_result, ...]`` with no tool_use.
-
-    This is the regression the safe-cut logic fixes: the result survives and so does
-    the assistant message that requested it.
-    """
-    messages = _tool_heavy_history()
-    old_style_working = messages[-2:]
-
-    assert old_style_working[0]["content"][0]["type"] == "tool_result"
-    _assert_no_orphans(messages[-3:])  # the repaired window keeps the pair
-
-    compacted = compact(messages, keep=2)
-    _assert_no_orphans(compacted)
-    # The tool exchange survived even though the greedy cut started after it.
-    assert compacted[-3] == messages[-3]
-    assert compacted[-2] == messages[-2]
 
 
 # ---- compact_to_budget -----------------------------------------------------

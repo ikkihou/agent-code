@@ -1,9 +1,9 @@
 """Textual widgets for the agent REPL: output log, prompt input, status bar.
 
-The scrollback+Live design maps onto Textual as: ``OutputLog`` (committed history, the
-former native scrollback) + a Live panel (spinner / streaming tail / pending preview)
-+ a ``PromptInput`` (multiline input, Enter submits, Ctrl+J inserts a newline) + a
-``StatusBar``. Completion is handled by the app through a separate ``OptionList``.
+The scrollback+Live design maps onto Textual as: ``OutputLog`` (committed history) + a
+Live panel (spinner / streaming tail / pending preview) + a ``PromptInput`` (multiline
+input, Enter submits, Ctrl+J inserts a newline) + a ``StatusBar``. Completion is handled
+by the app through a separate ``OptionList``.
 """
 
 from __future__ import annotations
@@ -58,12 +58,23 @@ class OutputLog(RichLog):
         )
 
     def write_chunk(self, chunk: OutputChunk) -> None:
-        """Commit one OutputChunk as a styled Rich renderable."""
-        self.write(chunk_to_text(chunk, width=self._content_width()))
+        """Commit one OutputChunk as a styled Rich renderable.
+
+        The width is passed explicitly: RichLog otherwise measures against the app
+        console's width, which can lag the widget (and clamps ``full_width`` prompt
+        bars / markdown wrapping to a stale value). Rendering and committing at the
+        same width keeps those two in sync.
+        """
+        width = self._content_width()
+        self.write(chunk_to_text(chunk, width=width), width=width)
 
     def _content_width(self) -> int:
-        width = self.size.width
-        return width if width > 0 else 80
+        # The scrollable region excludes a visible scrollbar; fall back to the widget
+        # width (and finally to 80) before the first layout pass.
+        width = self.scrollable_content_region.width
+        if width > 0:
+            return width
+        return self.size.width if self.size.width > 0 else 80
 
     # ---- text selection -----------------------------------------------------
 

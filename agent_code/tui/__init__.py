@@ -1,7 +1,7 @@
-"""Textual frontend for the agent REPL (prompt_toolkit replacement).
+"""Textual frontend for the agent REPL.
 
 The public entry point is ``run_interactive_shell`` in ``app.py``, which ``cli.py``
-calls in place of the old ``ui.shell.run_interactive_shell``.
+calls.
 """
 
 from __future__ import annotations

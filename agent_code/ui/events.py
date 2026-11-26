@@ -8,7 +8,9 @@ the consumer (the REPL commits the fold when prose resumes or the turn ends).
 
 from __future__ import annotations
 
-from ..output import OutputChunk
+from rich.markup import escape
+
+from ..output import OutputChunk, StyleAndText
 from ..prompt_ui import render_diff
 from ..wire import (
     CommandPreview,
@@ -19,8 +21,6 @@ from ..wire import (
     ToolCallCompleted,
     WireEvent,
 )
-
-StyleAndText = tuple[str, str]
 
 # Tool outcome -> marker glyph. "ok" is the executed-and-succeeded case; the others
 # refine ``ToolCallCompleted.outcome`` / ``is_error``.
@@ -96,7 +96,9 @@ def event_to_chunks(event: WireEvent) -> list[OutputChunk]:
         return [chunk] if chunk is not None else []
     if isinstance(event, DiffPreview):
         return [
-            OutputChunk(f"\nDiff for {event.path}:", format="rich"),
+            # Paths are tool arguments: escape them so a bracket in a filename is
+            # rendered literally instead of being parsed as Rich markup.
+            OutputChunk(f"\nDiff for {escape(event.path)}:", format="rich"),
             OutputChunk(render_diff(event.old, event.new, event.path) + "\n", format="rich"),
         ]
     if isinstance(event, CommandPreview):
@@ -106,17 +108,16 @@ def event_to_chunks(event: WireEvent) -> list[OutputChunk]:
     return []
 
 
-def render_user_prompt(text: str, *, source: str = "user") -> OutputChunk:
+def render_user_prompt(text: str) -> OutputChunk:
     normalized = text.rstrip()
     if not normalized.strip():
         return OutputChunk("")
     body = "\n".join(f"> {line}" for line in normalized.splitlines())
-    # Bold white on dark grey, padded to the terminal width by the scrollback commit
-    # path. Fragments use Rich's inline style vocabulary, which the commit path hands
-    # to rich.text.Text as-is. The prompt echo ends with a single newline: the Live
-    # area adds the blank separator line before its spinner, so the visual gap is
-    # exactly one line. The source header is no longer rendered; the parameter is
-    # kept for compatibility only.
+    # Bold white on dark grey, padded to the terminal width by the commit path.
+    # Fragments use Rich's inline style vocabulary, which the commit path hands to
+    # rich.text.Text as-is. The prompt echo ends with a single newline: the Live area
+    # adds the blank separator line before its spinner, so the visual gap is exactly
+    # one line.
     style = "bold white on #444444"
     fragments: tuple[StyleAndText, ...] = (("", "\n\n"), (style, body), ("", "\n"))
     return OutputChunk("\n\n" + body + "\n", fragments=fragments, full_width=True)

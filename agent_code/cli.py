@@ -13,10 +13,12 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.text import Text
 
 from .agent import build_system_prompt, run_agent
@@ -29,7 +31,9 @@ from .session import Session
 from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
 from .tui import run_interactive_shell
+from .tui.transcript import TranscriptSink
 from .ui.banner import build_banner
+from .ui.events import render_user_prompt
 from .wire import (
     CommandPreview,
     ContextCompacted,
@@ -39,6 +43,8 @@ from .wire import (
     TextDelta,
     ToolCallCompleted,
     ToolCallStarted,
+    TurnEnded,
+    TurnStarted,
     Wire,
     WireEvent,
 )
@@ -88,18 +94,28 @@ def run_once(
         scheduler=scheduler,
         context_budget=budget,
     )
-    run_agent(
-        prompt,
-        provider,
-        default_tools(),
-        max_steps=max_steps,
-        cwd=cwd,
-        state=state,
-        session=session,
-        system_prompt=system_prompt,
-        wire=_console_wire(),
-        budget=budget,
-    )
+    wire = _console_wire(session.append_transcript if session is not None else None)
+    if session is not None:
+        # The REPL echoes the submitted prompt into its transcript; one-shot has no
+        # prompt echo, so persist it here to keep resumed history complete.
+        session.append_transcript(render_user_prompt(prompt))
+    wire.send(TurnStarted())
+    try:
+        run_agent(
+            prompt,
+            provider,
+            default_tools(),
+            max_steps=max_steps,
+            cwd=cwd,
+            state=state,
+            session=session,
+            system_prompt=system_prompt,
+            wire=wire,
+            budget=budget,
+        )
+    finally:
+        # Flushes the final streamed paragraph and any pending tool fold.
+        wire.send(TurnEnded())
 
 
 class _ConsoleWireSink:
@@ -107,43 +123,62 @@ class _ConsoleWireSink:
     to the terminal.
 
     run_agent calls send on this same thread and notify is empty, so the sink receives
-    each event batch immediately.
+    each event batch immediately. When ``on_transcript`` is set, the same events also
+    feed a ``TranscriptSink``, so one-shot sessions get the same styled transcript
+    sidecar the REPL writes (and ``--continue`` can replay them).
     """
 
+    def __init__(self, on_transcript: Callable[[OutputChunk], None] | None = None) -> None:
+        self._on_transcript = on_transcript
+        self._transcript = TranscriptSink() if on_transcript is not None else None
+
     def send(self, events: list[WireEvent]) -> None:
+        if self._transcript is not None and self._on_transcript is not None:
+            for chunk in self._transcript.handle_batch(events):
+                self._on_transcript(chunk)
         for event in events:
             if isinstance(event, TextDelta):
                 console.print(event.text, markup=False, highlight=False, end="")
             elif isinstance(event, Line):
                 console.print(event.text, markup=event.markup, highlight=False)
             elif isinstance(event, PromptEcho):
-                console.print(f"> {event.text}")
+                console.print(f"> {event.text}", markup=False, highlight=False)
             elif isinstance(event, ToolCallStarted):
-                console.print(f"tool_call: {event.name} {event.args_preview}")
+                console.print(
+                    f"tool_call: {event.name} {event.args_preview}",
+                    markup=False,
+                    highlight=False,
+                )
             elif isinstance(event, ToolCallCompleted):
                 suffix = (
                     f" ({event.outcome})"
                     if event.outcome
                     else (" (error)" if event.is_error else "")
                 )
-                console.print(f"✓ {event.name}{suffix}")
+                console.print(f"✓ {event.name}{suffix}", markup=False, highlight=False)
             elif isinstance(event, DiffPreview):
-                console.print(f"\nDiff for {event.path}:", markup=True)
+                console.print(
+                    f"\nDiff for {escape(event.path)}:", markup=True, highlight=False
+                )
                 from .prompt_ui import render_diff
 
                 # render_diff wraps lines in [red]/[green] markup; diff-line content
                 # is escaped inside render_diff, so a body "[x]" cannot be parsed as
                 # a Rich style here.
-                console.print(render_diff(event.old, event.new, event.path), markup=True)
+                console.print(
+                    render_diff(event.old, event.new, event.path), markup=True, highlight=False
+                )
             elif isinstance(event, CommandPreview):
-                console.print(f"\nCommand: {event.command}", markup=True)
+                console.print(
+                    f"\nCommand: {event.command}", markup=False, highlight=False
+                )
             elif isinstance(event, ContextCompacted):
                 console.print(f"[dim]{event.describe()}[/dim]")
 
 
-def _console_wire() -> Wire:
+def _console_wire(on_transcript: Callable[[OutputChunk], None] | None = None) -> Wire:
     wire = Wire()
-    wire.sink = _ConsoleWireSink().send
+    wire.sink = _ConsoleWireSink(on_transcript).send
     return wire
 
 
@@ -152,7 +187,7 @@ def main_command(
     prompt: str = typer.Argument("", help="Prompt to send to the agent."),
     cwd: Path = typer.Option(Path.cwd(), "--cwd", "-C"),
     provider: str = typer.Option("anthropic", "--provider"),
-    model: str = typer.Option("workbuddy/auto", "--model"),
+    model: str = typer.Option("deepseek-flash", "--model"),
     base_url: str | None = typer.Option(None, "--base-url"),
     max_steps: int = typer.Option(20, "--max-steps"),
     permission_mode: str = typer.Option(

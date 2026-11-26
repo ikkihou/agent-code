@@ -11,10 +11,12 @@ the resulting fragments itself.
 # here put the import lib
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from io import StringIO
 from typing import Callable, Literal
 
+from rich.cells import cell_len
 from rich.console import Console
 
 OutputFormat = Literal["plain", "rich", "markdown"]
@@ -102,7 +104,7 @@ def rich_markup_fragments(markup_text: str) -> list[StyleAndText]:
 
 
 # ---------------------------------------------------------------------------
-# chunk -> fragment normalization entry point
+# chunk -> fragment normalization
 # ---------------------------------------------------------------------------
 
 
@@ -123,6 +125,70 @@ def chunk_fragments(chunk: OutputChunk, width: int | None = None) -> list[StyleA
     if chunk.text:
         return [("", chunk.text)]
     return []
+
+
+def pad_full_width(fragments: Iterable[StyleAndText], columns: int) -> list[StyleAndText]:
+    """Pad each *visual line* to ``columns`` display cells.
+
+    Width is accumulated across all fragments (a line may be split into several
+    styled pieces), and padding is emitted only when the line ends at ``\n``. Tabs are
+    expanded before measuring because ``cell_len("\t")`` is 1 while terminals expand
+    tabs to real columns. Over-wide lines are left unpadded; Rich is configured with a
+    4096-column offscreen width, so it does not wrap them and the terminal handles the
+    overflow (wrapped continuation lines intentionally get no synthetic background).
+    Padding inherits the last non-empty style on the line, so a prompt background
+    becomes one continuous bar.
+
+    Padding happens at commit time only; stored text/fragments remain unpadded.
+    """
+    if columns <= 0:
+        return list(fragments)
+
+    padded: list[StyleAndText] = []
+    line_width = 0
+    line_has_text = False
+    line_style = ""
+
+    def emit(style: str, text: str) -> None:
+        if not text:
+            return
+        if padded and padded[-1][0] == style:
+            padded[-1] = (style, padded[-1][1] + text)
+        else:
+            padded.append((style, text))
+
+    for style, text in fragments:
+        text = text.expandtabs(8)
+        start = 0
+        for index, char in enumerate(text):
+            if char != "\n":
+                continue
+            segment = text[start:index]
+            if segment:
+                emit(style, segment)
+                line_width += cell_len(segment)
+                line_has_text = True
+                if style:
+                    line_style = style
+            if line_has_text and line_style and line_width < columns:
+                emit(line_style, " " * (columns - line_width))
+            emit(style, "\n")
+            line_width = 0
+            line_has_text = False
+            line_style = ""
+            start = index + 1
+
+        tail = text[start:]
+        if tail:
+            emit(style, tail)
+            line_width += cell_len(tail)
+            line_has_text = True
+            if style:
+                line_style = style
+
+    if line_has_text and line_style and line_width < columns:
+        emit(line_style, " " * (columns - line_width))
+    return padded
 
 
 # ---------------------------------------------------------------------------

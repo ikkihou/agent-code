@@ -1,10 +1,9 @@
 """Pure transcript state machine: the wire event stream -> OutputChunks.
 
-This is the frontend-agnostic half of the REPL, ported out of ``ui/shell.py`` so the
-Textual app (and any future frontend) shares one tested implementation. It owns the
-``LiveArea`` (streaming tail / spinner / pending preview) and the tool-burst fold
-buffer, and turns one drained event batch into the chunks to commit, in scrollback
-order.
+This is the frontend-agnostic half of the REPL, shared by the Textual app (and any
+future frontend). It owns the ``LiveArea`` (streaming tail / spinner / pending preview)
+and the tool-burst fold buffer, and turns one drained event batch into the chunks to
+commit, in scrollback order.
 
 The ordering rule is the point of the state machine: streamed prose must land in
 scrollback before the tool call that followed it, and a burst of finished tool calls

@@ -1,13 +1,12 @@
 """The Textual frontend for the agent REPL.
 
-Replaces ``ui/shell.py`` (prompt_toolkit) with a Textual ``App``. The threading model is
-unchanged in spirit: a worker thread runs ``run_agent`` / cron handling and posts wire
-events to the UI through a thread-safe queue + ``call_from_thread``; the UI thread owns
-the ``LiveArea`` state machine, the output log and the input widget.
+A worker thread runs ``run_agent`` / cron handling and posts wire events to the UI
+through a thread-safe queue + ``call_from_thread``; the UI thread owns the ``LiveArea``
+state machine, the output log and the input widget.
 
-The former native scrollback becomes the ``OutputLog`` widget; the former Live window
-becomes the ``LivePanel``; the pending question becomes the ``QuestionLine``; completion
-is an ``OptionList`` kept directly above the input.
+Layout: ``OutputLog`` (committed history), ``LivePanel`` (in-progress content),
+``QuestionLine`` (pending question), ``OptionList`` (completion), ``PromptInput``, and
+``StatusBar``.
 """
 
 from __future__ import annotations
@@ -33,6 +32,7 @@ from ..output import OutputChunk
 from ..runtime import PromptFallback, PromptRequest, RuntimeState
 from ..slash import SlashContext, SlashRegistry, dispatch_slash
 from ..ui.events import render_user_prompt
+from ..ui.live import cap_preview_lines
 from ..ui.paste import PasteCache
 from ..ui.prompts import (
     parse_choice_index,
@@ -50,8 +50,16 @@ from .widgets import LivePanel, OutputLog, PromptInput, QuestionLine, StatusBar
 class AgentApp(App[None]):
     """The agent REPL: scrollback log + Live panel + multiline prompt + status bar."""
 
+    # Textual writes one blank line above an inline app by default. The log is the top
+    # widget, so that line shows up as an empty row above the conversation; drop it.
+    INLINE_PADDING = 0
+
     CSS = """
-    #log { border: none; padding: 0 1; }
+    /* Inline mode gives the screen a "tall" (half-cell) border top and bottom. The top
+       one paints as an empty line above the log, so remove both and let the log fill
+       the terminal. */
+    Screen:inline { border-top: none; border-bottom: none; }
+    #log { border: none; padding: 0 0; }
     #live { height: auto; }
     #question { height: auto; color: #4fd6ff; }
     #completion { height: auto; max-height: 16; display: none; border: solid #556677; }
@@ -65,7 +73,15 @@ class AgentApp(App[None]):
     BINDINGS = [
         Binding("escape", "escape_key", "abort / close completion", show=False),
         Binding("ctrl+c", "abort_or_quit", "abort turn / quit", show=False),
-        Binding("shift+tab", "cycle_mode", "cycle permission mode", show=False),
+        # ``priority=True`` is required: Textual's Screen binds shift+tab to
+        # focus_previous, and non-priority screen bindings shadow app-level ones.
+        Binding(
+            "shift+tab",
+            "cycle_mode",
+            "cycle permission mode",
+            show=False,
+            priority=True,
+        ),
     ]
 
     def __init__(
@@ -93,6 +109,11 @@ class AgentApp(App[None]):
         self._job_queue: queue.Queue[str] = queue.Queue()
         self._busy = threading.Event()
         self._event_queue: queue.Queue[list[WireEvent]] = queue.Queue()
+        # Only one UI wake-up is scheduled at a time: while it is pending the worker
+        # keeps queueing batches, so a fast model produces one drain per UI cycle
+        # instead of one blocking ``call_from_thread`` per token.
+        self._wake_lock = threading.Lock()
+        self._wake_pending = False
         self._transcript = TranscriptSink()
         self._live = self._transcript.live
         # Pending confirm/choice prompt: the worker waits on ``queue`` for the answer.
@@ -127,8 +148,12 @@ class AgentApp(App[None]):
     # ---- mount --------------------------------------------------------------
 
     def on_mount(self) -> None:
-        for chunk in self._initial_chunks:
-            self._commit_chunk(chunk)
+        # Replay the banner + resumed transcript after the first layout pass: at
+        # ``on_mount`` the log still has width 0, so committing here would hard-wrap
+        # markdown and pad prompt bars at the 80-column fallback. Initial chunks are
+        # drawn only -- they are already in the transcript file and must not be
+        # appended to it again.
+        self.call_after_refresh(self._commit_initial_chunks)
         self._completion = CompletionSource(self._slash_registry, self._cwd)
         self._prompt = self.query_one(PromptInput)
         self._completion_list = self.query_one(OptionList)
@@ -166,7 +191,9 @@ class AgentApp(App[None]):
                     self._run_turn(text, wire)
                 except Exception as e:  # never let a provider/tool error kill the worker
                     detail = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-                    self._worker_sink([Line(f"[error] {e}\n{detail}", markup=True)])
+                    # Plain text: a traceback can contain ``[int]``/``[b]``-shaped
+                    # fragments that Rich markup would swallow or turn into styles.
+                    self._worker_sink([Line(f"[error] {e}\n{detail}", markup=False)])
                 finally:
                     self._worker_sink([TurnEnded()])
                     self._busy.clear()
@@ -179,9 +206,23 @@ class AgentApp(App[None]):
                     self._handle_cron_prompt(prompt)
 
     def _worker_sink(self, batch: list[WireEvent]) -> None:
-        """The worker's wire sink: post a batch to the UI thread and wake it up."""
+        """The worker's wire sink: post a batch and wake the UI at most once.
+
+        ``call_from_thread`` blocks until the callback runs, so waking per batch would
+        make every streamed token a synchronous round-trip. The pending flag lets the
+        worker keep queueing while a drain is already scheduled; that drain consumes
+        every batch that arrived in the meantime.
+        """
         self._event_queue.put(batch)
-        self.call_from_thread(self._drain_events)
+        with self._wake_lock:
+            if self._wake_pending:
+                return
+            self._wake_pending = True
+        try:
+            self.call_from_thread(self._drain_events)
+        except RuntimeError:
+            # The app is shutting down: there is no UI thread left to drain into.
+            pass
 
     def _handle_cron_prompt(self, text: str) -> None:
         text = text.strip()
@@ -201,6 +242,10 @@ class AgentApp(App[None]):
     # ---- UI thread: event drain ---------------------------------------------
 
     def _drain_events(self) -> None:
+        with self._wake_lock:
+            # Reset before draining so events that arrive during this drain schedule a
+            # fresh wake-up instead of being silently dropped.
+            self._wake_pending = False
         batches: list[list[WireEvent]] = []
         while True:
             try:
@@ -226,6 +271,15 @@ class AgentApp(App[None]):
         if self._on_transcript is not None:
             self._on_transcript(chunk)
         self.query_one(OutputLog).write_chunk(chunk)
+
+    def _commit_initial_chunks(self) -> None:
+        """Draw the banner and resumed history (no transcript append)."""
+        if not self._initial_chunks:
+            return
+        log = self.query_one(OutputLog)
+        for chunk in self._initial_chunks:
+            log.write_chunk(chunk)
+        self._initial_chunks.clear()
 
     def _commit_now(self, text: str) -> None:
         self._commit_chunk(OutputChunk(text))
@@ -255,7 +309,10 @@ class AgentApp(App[None]):
     def _begin_prompt(self, request: PromptRequest, result_queue: queue.Queue[Any]) -> None:
         self._pending_prompt = {"request": request, "queue": result_queue}
         self._pending_answer_chunk = None
-        self._live.pending_preview = render_prompt_request(request).rstrip().splitlines()
+        # A plan-approval body is the whole plan panel; cap it so a long plan cannot
+        # push the input frame off-screen.
+        preview = render_prompt_request(request).rstrip().splitlines()
+        self._live.pending_preview = cap_preview_lines(preview)
         self._prompt_was_active = self._live.turn_active
         self._live.turn_active = False
         self._refresh_question()
@@ -399,9 +456,9 @@ class AgentApp(App[None]):
         lines[-1] = line[: len(line) - self._replace_len] + suggestion.insert
         self._prompt.load_text("\n".join(lines))
         self._prompt.move_cursor((len(lines) - 1, len(lines[-1])))
-        # load_text posts Changed, which recomputes suggestions: the completed word
-        # usually matches again, so the menu stays open for further refinement (e.g.
-        # "@src/u" -> "@src/util/" keeps listing deeper paths).
+        # load_text posts Changed, which recomputes suggestions. A directory mention
+        # ("@src/u" -> "@src/util/") keeps listing deeper paths; a completed word that
+        # exactly matches a candidate is hidden by _refresh_completion.
         self._refresh_completion()
 
     def _refresh_completion(self) -> None:
@@ -414,6 +471,12 @@ class AgentApp(App[None]):
         self._suggestions = suggestions
         self._replace_len = replace_len
         if not suggestions:
+            self._hide_completion()
+            return
+        # The line already equals a candidate: the completion is done (e.g. Tab on
+        # "/exi" produced "/exit"). Reopening here would show a menu containing the
+        # command the user just accepted.
+        if any(suggestion.insert == line for suggestion in suggestions):
             self._hide_completion()
             return
         self._completion_list.clear_options()
@@ -511,7 +574,7 @@ def _pbcopy(text: str) -> None:
             check=False,
             capture_output=True,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         pass
 
 

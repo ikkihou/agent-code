@@ -1,8 +1,8 @@
 """Tests for REPL input ergonomics: @file mention completion and paste placeholdering.
 
 Pure-function tests: the completer is exercised through its frontend-agnostic
-``suggestions(text)`` API (no live app, no prompt_toolkit), and the paste cache /
-key-binding logic through direct calls.
+``suggestions(text)`` API (no live app), and the paste cache / key-binding logic
+through direct calls.
 """
 
 from __future__ import annotations

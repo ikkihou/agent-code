@@ -1,9 +1,9 @@
 """Event translation, transcript state-machine, and rendering tests (frontend-agnostic).
 
 Never touches a real terminal: LiveArea / event_to_chunks / TranscriptSink / the
-scrollback fragment pipeline are pure functions or injectable state objects, and
-run_agent is driven by a fake provider. These are the pieces the prompt_toolkit shell
-and the Textual frontend share.
+output fragment pipeline are pure functions or injectable state objects, and
+run_agent is driven by a fake provider. These are the pieces the one-shot sink and
+the Textual frontend share.
 """
 
 from __future__ import annotations
@@ -15,21 +15,25 @@ from rich.cells import cell_len
 
 from agent_code.agent import run_agent
 from agent_code.model import ModelResponse, ModelStreamEvent
-from agent_code.output import OutputChunk, markdown_fragments
+from agent_code.output import (
+    OutputChunk,
+    chunk_fragments,
+    markdown_fragments,
+    pad_full_width,
+)
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, dispatch_slash
 from agent_code.tools import ToolRegistry
 from agent_code.tui.transcript import TranscriptSink
 from agent_code.ui.completer import SlashCompleter
 from agent_code.ui.events import event_to_chunks, render_user_prompt
-from agent_code.ui.live import LiveArea
+from agent_code.ui.live import LiveArea, cap_preview_lines
 from agent_code.ui.prompts import (
     parse_choice_index,
     parse_confirm_answer,
     prompt_for_request,
     render_prompt_request,
 )
-from agent_code.ui.scrollback import _chunk_fragments
 from agent_code.wire import (
     CommandPreview,
     DiffPreview,
@@ -323,8 +327,7 @@ def test_markdown_fragments_style_real_markdown() -> None:
 
 
 def test_fragment_styles_are_rich_vocabulary_and_parseable() -> None:
-    """Fragment styles are Rich inline style strings: every one must parse and none may
-    use prompt_toolkit-only vocabulary.
+    """Fragment styles are Rich inline style strings: every one must parse.
 
     Regression for: code fences rendered all-underlined because rich's pygments theme
     emits Style(underline=False). The style string must keep the negation
@@ -343,7 +346,6 @@ def test_fragment_styles_are_rich_vocabulary_and_parseable() -> None:
         if not style:
             continue
         Style.parse(style)  # raises on anything Rich cannot consume
-        assert not any(token.startswith(("ansi", "bg:", "fg:")) for token in style.split()), style
 
     # Headings and links legitimately use underline; the regression is that code
     # tokens acquire it. Check the code fence content specifically.
@@ -547,9 +549,21 @@ def test_event_to_chunks_renders_wire_events() -> None:
 
 
 def test_chunk_fragments_normalizes_plain_and_rich() -> None:
-    assert _chunk_fragments(OutputChunk("plain\n")) == [("", "plain\n")]
-    rich = _chunk_fragments(OutputChunk("[bold]b[/bold]\n", format="rich"))
+    assert chunk_fragments(OutputChunk("plain\n")) == [("", "plain\n")]
+    rich = chunk_fragments(OutputChunk("[bold]b[/bold]\n", format="rich"))
     assert ("bold", "b") in rich
+    # Explicit fragments are adopted as-is.
+    explicit = OutputChunk("x", fragments=(("bold", "x"),))
+    assert chunk_fragments(explicit) == [("bold", "x")]
+
+
+def test_cap_preview_lines_marks_the_elision() -> None:
+    lines = [f"line {i}" for i in range(30)]
+    capped = cap_preview_lines(lines, max_lines=5)
+    assert capped[:5] == lines[:5]
+    assert capped[5] == "... (25 lines omitted)"
+    assert len(capped) == 6
+    assert cap_preview_lines(["only"], max_lines=5) == ["only"]
 
 
 def test_render_user_prompt_formats_prompt_blocks() -> None:
@@ -558,8 +572,6 @@ def test_render_user_prompt_formats_prompt_blocks() -> None:
     assert chunk.full_width is True
     assert chunk.text == "\n\n> hello\n"
     assert render_user_prompt("first\nsecond").text == "\n\n> first\n> second\n"
-    # The source header is no longer rendered; the parameter is kept for compatibility only.
-    assert render_user_prompt("expanded", source="user /slash").text == "\n\n> expanded\n"
     empty = render_user_prompt("")
     assert empty.format == "plain"
     assert empty.text == ""
@@ -579,58 +591,23 @@ def test_prompt_echo_and_live_spinner_have_exactly_one_blank_gap() -> None:
     assert fragments[0] == ("", "\n")
 
 
-def test_scrollback_renders_rich_and_legacy_prompt_styles() -> None:
-    """New prompt chunks carry Rich vocabulary and render straight through; fragments
-    persisted by older versions use prompt_toolkit vocabulary and go through the
-    legacy shim. Both must produce the truecolor background and the padded bar.
-    """
-    from agent_code.ui.scrollback import _chunk_to_ansi
+def test_prompt_chunk_keeps_its_background_and_pads() -> None:
+    """Prompt echoes carry their background style and pad to the commit width."""
+    chunk = render_user_prompt("hello")
+    fragments = chunk_fragments(chunk)
+    assert ("bold white on #444444", "> hello") in fragments
 
-    ansi = _chunk_to_ansi(render_user_prompt("hello"), columns=40)
-    assert "48;2;68;68;68" in ansi  # truecolor background #444444
-    assert "> hello" + " " * (40 - len("> hello")) in ansi  # padded bar
+    padded = "".join(part for _, part in pad_full_width(fragments, 40))
+    assert "> hello" + " " * (40 - len("> hello")) + "\n" in padded
 
     # >80 columns is the regression case for the offscreen Console's width=4096.
-    wide = _chunk_to_ansi(render_user_prompt("hello"), columns=132)
-    assert "> hello" + " " * (132 - len("> hello")) in wide
-
-    # Legacy transcript records (prompt_toolkit vocabulary) must render too.
-    legacy = OutputChunk(
-        "\n\n> hi\n\n",
-        fragments=(("bold ansiwhite bg:#444444", "> hi"),),
-        full_width=True,
-    )
-    legacy_ansi = _chunk_to_ansi(legacy, columns=40)
-    assert "48;2;68;68;68" in legacy_ansi
-    assert "> hi" + " " * (40 - len("> hi")) in legacy_ansi
-
-
-def test_legacy_pt_style_detection() -> None:
-    """Only prompt_toolkit-vocabulary styles are routed through the legacy shim.
-
-    Detection covers both prefixed tokens (ansi*/bg:/fg:) and pt-only attribute
-    spellings (nobold/hidden/...), which Rich raises on rather than ignoring.
-    """
-    from agent_code.ui.scrollback import _legacy_pt_style, _looks_legacy_pt_style
-
-    assert _looks_legacy_pt_style("bold ansiwhite bg:#444444")
-    assert _looks_legacy_pt_style("fg:red")
-    assert _looks_legacy_pt_style("nounderline")
-    assert _looks_legacy_pt_style("bold hidden")
-    assert not _looks_legacy_pt_style("bold white on #444444")
-    assert not _looks_legacy_pt_style("not bold #66d9ef on #272822")
-    assert not _looks_legacy_pt_style("")
-    # Attributes both vocabularies share must not trigger the shim.
-    assert not _looks_legacy_pt_style("bold underline dim")
-
-    assert _legacy_pt_style("bold ansiwhite bg:#444444") == "bold white on #444444"
+    wide = "".join(part for _, part in pad_full_width(fragments, 132))
+    assert "> hello" + " " * (132 - len("> hello")) + "\n" in wide
 
 
 def test_pad_full_width_accumulates_across_fragments() -> None:
     """Multiple styled fragments on one visual line produce one padded line."""
-    from agent_code.ui.scrollback import _pad_full_width
-
-    padded = _pad_full_width(
+    padded = pad_full_width(
         [("bold", "> "), ("white on #444444", "hello"), ("", "\n")],
         columns=20,
     )
@@ -641,14 +618,12 @@ def test_pad_full_width_accumulates_across_fragments() -> None:
 
 def test_pad_full_width_expands_tabs_and_skips_overwide_lines() -> None:
     """Tabs count as real columns; over-wide lines are left alone."""
-    from agent_code.ui.scrollback import _pad_full_width
-
-    tabbed = _pad_full_width([("style", "a\tb\n")], columns=20)
+    tabbed = pad_full_width([("style", "a\tb\n")], columns=20)
     tab_text = "".join(part for _, part in tabbed)
     assert "\t" not in tab_text
     assert tab_text == "a       b" + " " * (20 - len("a       b")) + "\n"
 
-    wide = _pad_full_width([("style", "x" * 30 + "\n")], columns=20)
+    wide = pad_full_width([("style", "x" * 30 + "\n")], columns=20)
     assert "".join(part for _, part in wide) == "x" * 30 + "\n"
 
 
@@ -665,8 +640,8 @@ def test_markdown_wraps_at_the_requested_width() -> None:
     """
     prose = " ".join(["word"] * 200) + "\n"
 
-    narrow = _chunk_fragments(OutputChunk(prose, format="markdown"), 60)
-    wide = _chunk_fragments(OutputChunk(prose, format="markdown"), 120)
+    narrow = chunk_fragments(OutputChunk(prose, format="markdown"), 60)
+    wide = chunk_fragments(OutputChunk(prose, format="markdown"), 120)
 
     assert _max_line_width(narrow) <= 60
     assert _max_line_width(wide) <= 120
@@ -676,35 +651,23 @@ def test_markdown_wraps_at_the_requested_width() -> None:
     assert narrow_text.count("\n") > wide_text.count("\n")
 
     # Callers without a terminal width keep the deterministic fallback.
-    default = _chunk_fragments(OutputChunk(prose, format="markdown"))
+    default = chunk_fragments(OutputChunk(prose, format="markdown"))
     assert _max_line_width(default) <= 100
 
 
-def test_commit_width_reaches_the_markdown_renderer(monkeypatch: Any) -> None:
-    """_chunk_to_ansi resolves the terminal width itself and forwards it to markdown."""
-    import re
+def test_commit_renders_at_the_passed_width() -> None:
+    """The commit renderer wraps markdown and pads prompts at the width it is given."""
+    from agent_code.tui.render import chunk_to_text
 
-    from agent_code.ui import scrollback
-
-    monkeypatch.setattr(scrollback, "_terminal_columns", lambda: 72)
     prose = " ".join(["word"] * 200) + "\n"
-    rendered = scrollback._chunk_to_ansi(OutputChunk(prose, format="markdown"))
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", rendered)
-    widths = [len(line) for line in plain.split("\n")]
+    rendered = chunk_to_text(OutputChunk(prose, format="markdown"), width=72)
+    widths = [cell_len(line) for line in rendered.plain.split("\n")]
     assert max(widths) <= 72
-    assert max(widths) > 40  # wrapped at 72, not at some default
+    assert max(widths) > 40  # wrapped at 72, not at the 100-column fallback
 
-
-def test_pad_full_width_targets_the_commit_width(monkeypatch: Any) -> None:
-    """full_width chunks still pad to the terminal width after the width plumbing."""
-    from agent_code.ui import scrollback
-
-    monkeypatch.setattr(scrollback, "_terminal_columns", lambda: 33)
-    chunk = render_user_prompt("hi")
-    rendered = scrollback._chunk_to_ansi(chunk)
-    bar = [line for line in rendered.split("\n") if "hi" in line][0]
-    # ANSI prefix + 2 visible chars + padding spaces.
-    assert bar.endswith(" " * (33 - len("> hi")) + "\x1b[0m")
+    prompt = chunk_to_text(render_user_prompt("hi"), width=33)
+    bar = [line for line in prompt.plain.split("\n") if "hi" in line][0]
+    assert bar == "> hi" + " " * (33 - len("> hi"))
 
 
 def test_live_tail_truncates_by_display_width() -> None:
@@ -718,52 +681,31 @@ def test_live_tail_truncates_by_display_width() -> None:
     assert _fit_width("anything", 0) == ""
 
 
+def test_console_wire_sink_writes_a_styled_transcript() -> None:
+    """One-shot output also feeds a TranscriptSink, so --continue can replay it."""
+    from agent_code.cli import _ConsoleWireSink
+
+    chunks: list[OutputChunk] = []
+    sink = _ConsoleWireSink(chunks.append)
+    sink.send([TurnStarted(), TextDelta("**hi**"), TextDelta("\n\n"), TurnEnded()])
+
+    assert [chunk.text for chunk in chunks] == ["**hi**\n\n"]
+    assert chunks[0].format == "markdown"
+
+
 def test_transcript_prompt_style_survives_resume(tmp_path: Path) -> None:
     """Transcript fragments round-trip through JSONL and still render on replay."""
     from agent_code.session import Session
-    from agent_code.ui.scrollback import _chunk_to_ansi
 
     session = Session.create(tmp_path)
     session.append_transcript(render_user_prompt("hello"))
     resumed = Session.load_by_id(tmp_path, session.session_id)
 
     assert resumed is not None
-    ansi = _chunk_to_ansi(resumed.transcript_chunks[0], columns=40)
-    assert "48;2;68;68;68" in ansi
-    assert "> hello" + " " * (40 - len("> hello")) in ansi
-
-
-def test_transcript_full_width_inference_covers_both_vocabularies(tmp_path: Path) -> None:
-    """Records without the explicit flag infer full_width from the prompt background
-    in either vocabulary: pt's "bg:#444444" (old) or Rich's "on #444444" (current)."""
-    import json
-
-    from agent_code.session import Session
-
-    session = Session.create(tmp_path)
-    records = [
-        {
-            "text": "\n\n> old\n",
-            "format": "plain",
-            "fragments": [["", "\n\n"], ["bold ansiwhite bg:#444444", "> old"], ["", "\n"]],
-        },
-        {
-            "text": "\n\n> new\n",
-            "format": "plain",
-            "fragments": [["", "\n\n"], ["bold white on #444444", "> new"], ["", "\n"]],
-        },
-        {"text": "plain\n", "format": "plain"},
-    ]
-    with session.transcript_path.open("a", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record) + "\n")
-
-    resumed = Session.load_by_id(tmp_path, session.session_id)
-    assert resumed is not None
-    chunks = resumed.transcript_chunks
-    assert chunks[0].full_width is True  # legacy pt vocabulary
-    assert chunks[1].full_width is True  # current Rich vocabulary
-    assert chunks[2].full_width is False  # no prompt background, no inference
+    chunk = resumed.transcript_chunks[0]
+    assert chunk.full_width is True
+    padded = "".join(part for _, part in pad_full_width(chunk_fragments(chunk), 40))
+    assert "> hello" + " " * (40 - len("> hello")) + "\n" in padded
 
 
 # ---- prompt request rendering and parsing ------------------------------------

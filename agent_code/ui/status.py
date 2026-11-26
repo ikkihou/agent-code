@@ -1,9 +1,7 @@
 """Bottom status-bar text (permission mode · model · context usage).
 
 The fragment styles carry the REPL's class tokens (``class:mode.*`` / ``class:seg.*`` /
-``class:ctx.hot``); the frontend maps those tokens to concrete colors. Kept free of
-prompt_toolkit so the Textual frontend can render it without pulling in the old
-stylesheet machinery.
+``class:ctx.hot``); the frontend maps those tokens to concrete colors.
 """
 
 from __future__ import annotations
