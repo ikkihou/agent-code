@@ -14,19 +14,30 @@ it without wrapping the surrounding prose (which stays static and in order).
 
 from __future__ import annotations
 
+import json
+
 from rich.text import Text
 from textual.containers import VerticalScroll
+from textual.events import Resize
 from textual.selection import Selection
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
 from ..output import OutputChunk, ThinkingItem, ToolCallItem, TranscriptItem
+from ..prompt_ui import render_diff
 from .events import format_tool_call
-from .render import chunk_to_text
+from .render import _preview_line_style, chunk_to_text
+from .theme import PALETTE
+
+# Blank columns left on each side of every committed block. The margin itself comes from
+# the ``#log > .text/.thinking/.tool`` rule in ``styles/default.tcss``; the two must stay
+# in sync because ``content_width()`` subtracts this before wrapping prose and padding
+# full-width prompt bars.
+BLOCK_GUTTER = 2
 
 
 def _thinking_title(duration: float) -> str:
-    """Pi-style collapsed thinking label: ``✻ Thought for 184ms``."""
+    """Collapsed thinking label: ``✻ Thought for 184ms``."""
     if duration <= 0:
         return "✻ Thought"
     if duration < 1:
@@ -83,7 +94,17 @@ class TextBlock(_SelectableStatic):
     """One committed text chunk, rendered as static (selectable) text."""
 
     def __init__(self, chunk: OutputChunk, width: int) -> None:
-        super().__init__(chunk_to_text(chunk, width=width), markup=False)
+        super().__init__(chunk_to_text(chunk, width=width), markup=False, classes="text")
+        self._chunk = chunk
+        self._rendered_width = width
+
+    def rewrap(self, width: int) -> None:
+        """Re-render markdown / full-width prompt bars when the log width changes."""
+        if width <= 0 or width == self._rendered_width:
+            return
+        self._rendered_width = width
+        if self._chunk.format == "markdown" or self._chunk.full_width:
+            self.update(chunk_to_text(self._chunk, width=width))
 
 
 class ThinkingBlock(Collapsible):
@@ -103,18 +124,56 @@ class ThinkingBlock(Collapsible):
         )
 
 
+def _format_tool_detail(item: ToolCallItem) -> Text:
+    """Format expanded tool-call detail (pretty JSON args, colored edit diffs, result)."""
+    detail = Text()
+    raw_args = item.args_full or item.args_preview
+    parsed: object = None
+    if raw_args:
+        try:
+            parsed = json.loads(raw_args)
+        except TypeError, ValueError:
+            parsed = None
+
+    if (
+        item.name == "file_edit"
+        and isinstance(parsed, dict)
+        and isinstance(parsed.get("old_string"), str)
+        and isinstance(parsed.get("new_string"), str)
+    ):
+        path = str(parsed.get("file_path") or "file")
+        diff_text = render_diff(
+            parsed["old_string"],
+            parsed["new_string"],
+            path,
+            markup=False,
+        )
+        detail.append("diff:\n", style=PALETTE.muted)
+        for line in diff_text.splitlines():
+            detail.append(line + "\n", style=_preview_line_style(line))
+    else:
+        detail.append("args: ", style=PALETTE.muted)
+        if isinstance(parsed, dict) and parsed:
+            pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+            detail.append(pretty)
+        else:
+            detail.append(raw_args or "(none)")
+
+    if item.result:
+        if len(detail) and not detail.plain.endswith("\n"):
+            detail.append("\n")
+        detail.append("\nresult:\n", style=PALETTE.muted)
+        result_style = PALETTE.error if item.status == "error" else ""
+        detail.append(item.result, style=result_style)
+    return detail
+
+
 class ToolCallBlock(Collapsible):
     """A single finished tool call, collapsed by default (click to expand detail)."""
 
     def __init__(self, item: ToolCallItem) -> None:
-        detail = Text()
-        detail.append("args: ")
-        detail.append(item.args_full or item.args_preview or "(none)")
-        if item.result:
-            detail.append("\n\nresult:\n")
-            detail.append(item.result)
         super().__init__(
-            _SelectableStatic(detail, markup=False),
+            _SelectableStatic(_format_tool_detail(item), markup=False),
             title=format_tool_call(
                 item.name,
                 item.args_preview,
@@ -143,21 +202,23 @@ class BlockLog(VerticalScroll):
         # block needs no extra margin after prose. Thinking/tool blocks end on their
         # title line and do need one.
         self._prev_was_text = False
+        # Auto-follow new content while the user is at the bottom; pause when the user
+        # scrolls up to read history, and resume once they scroll back to the end.
+        self._auto_scroll = True
+        self._last_width = 0
 
     def content_width(self) -> int:
         width = self.scrollable_content_region.width
-        if width > 0:
-            return width
-        return self.size.width if self.size.width > 0 else 80
+        if width <= 0:
+            width = self.size.width if self.size.width > 0 else 80
+        # Committed blocks are inset by BLOCK_GUTTER on each side, so the wrap/pad target
+        # is the inner width rather than the whole scrollable region.
+        return max(1, width - 2 * BLOCK_GUTTER)
 
     def append_chunk(self, chunk: OutputChunk) -> None:
         # Prompt echoes already start with their own blank lines, and prose blocks end
         # with one; only foldable/content blocks after a fold need a leading gap.
-        gap = (
-            self._block_count > 0
-            and not self._prev_was_text
-            and not chunk.text.startswith("\n")
-        )
+        gap = self._block_count > 0 and not self._prev_was_text and not chunk.text.startswith("\n")
         self._append(TextBlock(chunk, self.content_width()), gap=gap)
         self._prev_was_text = True
 
@@ -188,9 +249,39 @@ class BlockLog(VerticalScroll):
         self._block_count += 1
         self.mount(widget)
         # Trim on the next refresh (mount is deferred, so ``children`` is not yet
-        # up to date), then keep the view pinned to the newest block.
+        # up to date), then keep the view pinned to the newest block unless the user
+        # has scrolled up to inspect earlier output.
         self.call_after_refresh(self._trim)
-        self.call_after_refresh(self.scroll_end, animate=False)
+        self.call_after_refresh(self._auto_scroll_end)
+
+    def _auto_scroll_end(self) -> None:
+        if self._auto_scroll:
+            self.scroll_end(animate=False)
+
+    def release_anchor(self) -> None:
+        super().release_anchor()
+        if self.scroll_target_y < self.max_scroll_y:
+            self._auto_scroll = False
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        if round(new_value) >= self.max_scroll_y:
+            self._auto_scroll = True
+        elif round(new_value) < round(old_value):
+            self._auto_scroll = False
+
+    def on_resize(self, _event: Resize) -> None:
+        self._rewrap_blocks()
+        self.call_after_refresh(self._rewrap_blocks)
+
+    def _rewrap_blocks(self) -> None:
+        width = self.content_width()
+        if width <= 0 or width == self._last_width:
+            return
+        self._last_width = width
+        for child in self.children:
+            if isinstance(child, TextBlock):
+                child.rewrap(width)
 
     def _trim(self) -> None:
         excess = self._block_count - self.MAX_BLOCKS
@@ -210,3 +301,11 @@ class BlockLog(VerticalScroll):
             elif isinstance(child, Collapsible):
                 parts.append(str(child.title))
         return "".join(parts)
+
+    def toggle_latest_fold(self) -> bool:
+        """Toggle the most recent ThinkingBlock or ToolCallBlock; return True if found."""
+        for child in reversed(self.children):
+            if isinstance(child, Collapsible):
+                child.collapsed = not child.collapsed
+                return True
+        return False

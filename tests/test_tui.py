@@ -21,7 +21,7 @@ from agent_code.output import OutputChunk, TranscriptItem
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, default_slash_registry
 from agent_code.ui.app import AgentApp
-from agent_code.ui.blocks import BlockLog, TextBlock, ThinkingBlock, ToolCallBlock
+from agent_code.ui.blocks import BLOCK_GUTTER, BlockLog, TextBlock, ThinkingBlock, ToolCallBlock
 from agent_code.ui.completion import CompletionSource
 from agent_code.ui.events import render_user_prompt
 from agent_code.ui.render import chunk_to_text, render_status
@@ -43,8 +43,8 @@ def test_chunk_to_text_pads_full_width_prompt() -> None:
     text = chunk_to_text(chunk, width=40)
 
     lines = text.plain.split("\n")
-    body = next(line for line in lines if "> hello" in line)
-    assert body == "> hello" + " " * (40 - len("> hello"))
+    body = next(line for line in lines if " hello" in line)
+    assert body == " hello" + " " * (40 - len(" hello"))
 
 
 def test_chunk_to_text_plain_passthrough() -> None:
@@ -237,7 +237,7 @@ def test_app_echoes_user_prompt(tmp_path: Path) -> None:
             await pilot.press(*"hello")
             await pilot.press("enter")
             await pilot.pause()
-            assert "> hello" in _log_text(app)
+            assert " hello" in _log_text(app)
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -341,6 +341,33 @@ def test_app_replays_history_at_the_log_width(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+def test_committed_blocks_keep_a_two_cell_gutter(tmp_path: Path) -> None:
+    """Every block type is inset on both sides by the log gutter.
+
+    The CSS margin and ``BlockLog.BLOCK_GUTTER`` (subtracted before wrapping) must
+    agree, otherwise prose wraps at a column wider than the block.
+    """
+
+    async def run() -> None:
+        items: list[TranscriptItem] = [
+            OutputChunk("hello\n"),
+            ThinkingItem("pondered the problem"),
+            ToolCallItem(name="bash", args_preview='{"command": "ls"}', status="ok"),
+        ]
+        app = _make_app(tmp_path, initial_transcript=items)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+            left = log.content_region.x
+            assert len(log.children) == len(items)
+            for block in log.children:
+                assert block.region.x == left + BLOCK_GUTTER
+                assert block.size.width == log.content_width()
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
 def test_app_persists_live_chunks(tmp_path: Path) -> None:
     """Only live output is appended to the transcript, and it still is."""
 
@@ -353,7 +380,7 @@ def test_app_persists_live_chunks(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause()
             texts = [item.text for item in persisted if isinstance(item, OutputChunk)]
-            assert any("> hello" in text for text in texts)
+            assert any(" hello" in text for text in texts)
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())
@@ -398,9 +425,7 @@ def test_block_log_selects_text(tmp_path: Path) -> None:
             await pilot.pause()
             block = app.query_one(TextBlock)
 
-            app.screen.selections = {
-                block: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
-            }
+            app.screen.selections = {block: Selection.from_offsets(Offset(0, 0), Offset(5, 0))}
             await pilot.pause()
 
             assert app.screen.get_selected_text() == "hello"
@@ -419,9 +444,7 @@ def test_block_log_selects_across_lines(tmp_path: Path) -> None:
             await pilot.pause()
             block = app.query_one(TextBlock)
 
-            app.screen.selections = {
-                block: Selection.from_offsets(Offset(6, 0), Offset(6, 1))
-            }
+            app.screen.selections = {block: Selection.from_offsets(Offset(6, 0), Offset(6, 1))}
             await pilot.pause()
 
             assert app.screen.get_selected_text() == "world\nsecond"
@@ -462,6 +485,7 @@ def test_block_selection_handles_wrapped_lines(tmp_path: Path) -> None:
 
 def test_text_block_reports_selection_text(tmp_path: Path) -> None:
     """A Static text block extracts the text under the selection (copy support)."""
+
     async def run() -> None:
         app = _make_app(tmp_path)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -471,9 +495,7 @@ def test_text_block_reports_selection_text(tmp_path: Path) -> None:
             await pilot.pause()
             block = app.query_one(TextBlock)
 
-            result = block.get_selection(
-                Selection.from_offsets(Offset(0, 0), Offset(5, 0))
-            )
+            result = block.get_selection(Selection.from_offsets(Offset(0, 0), Offset(5, 0)))
             assert result is not None
             assert result[0] == "hello"
         app._job_queue.put("__EXIT__")
@@ -504,9 +526,7 @@ def test_ctrl_c_copies_the_selection_instead_of_quitting(tmp_path: Path) -> None
             log.append_chunk(OutputChunk("hello world\nsecond line\n"))
             await pilot.pause()
             block = app.query_one(TextBlock)
-            app.screen.selections = {
-                block: Selection.from_offsets(Offset(0, 0), Offset(5, 0))
-            }
+            app.screen.selections = {block: Selection.from_offsets(Offset(0, 0), Offset(5, 0))}
             await pilot.pause()
 
             app.action_abort_or_quit()
@@ -749,6 +769,371 @@ def test_terminal_cursor_tracks_the_prompt_caret(tmp_path: Path) -> None:
             await pilot.press("enter")
             await pilot.pause()
             assert app.cursor_position == prompt.cursor_screen_offset
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+# ---- Phase 1 P0 fixes ------------------------------------------------------
+
+
+def test_prompt_input_placeholders_oversized_paste_and_expands_on_submit(tmp_path: Path) -> None:
+    """Oversized pastes insert a compact placeholder token in PromptInput, echo the
+    placeholder in BlockLog, and expand to full text when dispatched to the worker."""
+    from textual.events import Paste
+
+    submitted_turns: list[str] = []
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        app._run_turn = lambda line, wire: submitted_turns.append(line)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptInput)
+            big_paste = "\n".join(f"line {i}" for i in range(40))
+            prompt.post_message(Paste(big_paste))
+            await pilot.pause()
+
+            assert prompt.text == "[Pasted text #1 +40 lines]"
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "[Pasted text #1 +40 lines]" in _log_text(app)
+            assert "line 39" not in _log_text(app)
+        app._job_queue.put("__EXIT__")
+        app._worker.join(timeout=2)
+
+    asyncio.run(run())
+    assert submitted_turns and "line 39" in submitted_turns[0]
+
+
+def test_stylesheet_contains_no_hex_literals() -> None:
+    """styles/default.tcss must resolve colors through AGENT_THEME variables, not inline hex."""
+    import re
+
+    tcss_path = Path(__file__).resolve().parent.parent / "agent_code" / "ui" / "styles" / "default.tcss"
+    content = tcss_path.read_text(encoding="utf-8")
+    assert re.search(r"#[0-9a-fA-F]{3,8}\b", content) is None
+
+
+def test_block_log_pauses_auto_scroll_when_scrolled_up_and_resumes_at_bottom(
+    tmp_path: Path,
+) -> None:
+    """Scrolling up pauses auto-follow; scrolling back to the bottom resumes it."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(80, 12)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+            for i in range(20):
+                log.append_chunk(OutputChunk(f"line {i}\n"))
+            await pilot.pause()
+            await pilot.pause()
+            assert log.max_scroll_y > 0
+            assert log.is_vertical_scroll_end
+
+            # User scrolls to the top to inspect earlier lines.
+            log.scroll_to(y=0, animate=False)
+            await pilot.pause()
+            assert log._auto_scroll is False
+            assert log.scroll_offset.y == 0
+
+            # New chunks arrive while scrolled up: the viewport must stay at y=0.
+            log.append_chunk(OutputChunk("new line while reading\n"))
+            await pilot.pause()
+            await pilot.pause()
+            assert log.scroll_offset.y == 0
+
+            # User jumps back to the bottom: auto-scroll resumes for subsequent chunks.
+            log.scroll_end(animate=False)
+            await pilot.pause()
+            assert log._auto_scroll is True
+            log.append_chunk(OutputChunk("followed line\n"))
+            await pilot.pause()
+            await pilot.pause()
+            assert log.is_vertical_scroll_end
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_block_log_rewraps_markdown_and_prompt_bars_on_resize(tmp_path: Path) -> None:
+    """Resizing the terminal re-wraps markdown blocks and re-pads full-width prompts."""
+
+    async def run() -> None:
+        prose = " ".join(["word"] * 40) + "\n"
+        app = _make_app(
+            tmp_path,
+            initial_transcript=[
+                render_user_prompt("hello"),
+                OutputChunk(prose, format="markdown"),
+            ],
+        )
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+            wide_width = log.content_width()
+            prompt_lines_wide = [
+                line for line in log.plain_text().splitlines() if "hello" in line
+            ]
+            assert prompt_lines_wide and len(prompt_lines_wide[0]) == wide_width
+
+            await pilot.resize_terminal(70, 30)
+            await pilot.pause()
+            await pilot.pause()
+            narrow_width = log.content_width()
+            assert narrow_width < wide_width
+            prompt_lines_narrow = [
+                line for line in log.plain_text().splitlines() if "hello" in line
+            ]
+            assert prompt_lines_narrow and len(prompt_lines_narrow[0]) == narrow_width
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_slash_permissions_command_updates_prompt_border(tmp_path: Path) -> None:
+    """Switching permission mode via /permissions updates PromptInput's border class."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptInput)
+            assert prompt.has_class("mode-default")
+
+            app._submit_text("/permissions plan")
+            await pilot.pause()
+            assert app._state.permission_mode == "plan"
+            assert prompt.has_class("mode-plan")
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_transcript_tracks_parallel_active_tools() -> None:
+    """Completing one parallel tool call keeps the remaining active tools on the spinner."""
+    sink = TranscriptSink()
+    sink.handle_batch(
+        [
+            TurnStarted(),
+            ToolCallStarted(call_id="1", name="read_file", args_preview="{}"),
+            ToolCallStarted(call_id="2", name="grep", args_preview="{}"),
+        ]
+    )
+    assert sink.live.active_tool == "read_file (+1 more)"
+
+    sink.handle_batch([ToolCallCompleted(call_id="1", name="read_file")])
+    assert sink.live.active_tool == "grep"
+
+    sink.handle_batch([ToolCallCompleted(call_id="2", name="grep")])
+    assert sink.live.active_tool is None
+
+
+# ---- Phase 2 UX & interaction upgrades -------------------------------------
+
+
+def test_completion_menu_renders_meta_and_respects_cursor_location(tmp_path: Path) -> None:
+    """Slash options show meta descriptions; @file completion replaces at the cursor row/col."""
+    (tmp_path / "readme.md").write_text("hi\n", encoding="utf-8")
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press(*"/he")
+            await pilot.pause()
+            menu = app.query_one("#completion", OptionList)
+            option = menu.get_option_at_index(0)
+            prompt_text = str(option.prompt)
+            assert "/help" in prompt_text
+            assert "show all available slash commands" in prompt_text
+
+            # Multiline input with cursor on row 0: completion replaces on row 0 only.
+            app._prompt.load_text("check @read\nsecond line")
+            app._prompt.move_cursor((0, len("check @read")))
+            app._refresh_completion()
+            await pilot.pause()
+            assert menu.display is True
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app._prompt.text == "check readme.md\nsecond line"
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_pending_confirm_prompt_supports_single_key_y_n_and_always_allow(
+    tmp_path: Path,
+) -> None:
+    """Confirm requests open OptionList, accept y/n/a or arrows+Enter, and swallow typing."""
+    import queue
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            menu = app.query_one("#completion", OptionList)
+            q1: queue.Queue[bool] = queue.Queue()
+            app._begin_prompt({"type": "confirm", "message": "Run bash?", "default": False}, q1)
+            await pilot.pause()
+            assert menu.display is True
+            assert menu.highlighted == 1  # default=False highlights "No"
+
+            await pilot.press("y")
+            await pilot.pause()
+            assert q1.get_nowait() is True
+            assert app._pending_prompt is None
+            assert menu.display is False
+            assert app._prompt.text == ""
+
+            q2: queue.Queue[bool] = queue.Queue()
+            app._begin_prompt({"type": "confirm", "message": "Apply edit?", "default": False}, q2)
+            await pilot.pause()
+
+            await pilot.press("a")
+            await pilot.pause()
+            assert q2.get_nowait() is True
+            assert app._state.permission_mode == "acceptEdits"
+            assert app.query_one(PromptInput).has_class("mode-edits")
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_pending_choice_prompt_supports_arrow_navigation_and_enter(tmp_path: Path) -> None:
+    """Choice requests open OptionList without duplicating options in LiveArea."""
+    import queue
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            q: queue.Queue[str] = queue.Queue()
+            app._begin_prompt(
+                {
+                    "type": "choice",
+                    "question": "Pick a target",
+                    "labels": ["Alpha", "Beta"],
+                    "default": 0,
+                },
+                q,
+            )
+            await pilot.pause()
+            menu = app.query_one("#completion", OptionList)
+            assert menu.display is True
+            assert app._live.pending_preview == []
+
+            await pilot.press("down")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert q.get_nowait() == "2"
+            assert menu.display is False
+            assert "Pick a target → Beta" in _log_text(app)
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_render_live_colors_diff_preview_lines() -> None:
+    """Diff lines in LiveArea.pending_preview get green/red/cyan styles instead of flat amber."""
+    from agent_code.ui.live import LiveArea
+    from agent_code.ui.render import render_live
+    from agent_code.ui.theme import PALETTE
+
+    live = LiveArea()
+    live.pending_preview = [
+        "--- a/foo.py",
+        "+++ b/foo.py",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+    ]
+    rendered = render_live(live, columns=80, now=1.0)
+    span_styles = [str(span.style) for span in rendered.spans]
+    assert any(PALETTE.success in style for style in span_styles)
+    assert any(PALETTE.error in style for style in span_styles)
+    assert any(PALETTE.accent in style for style in span_styles)
+
+
+def test_prompt_input_history_recall_and_draft_preservation(tmp_path: Path) -> None:
+    """Up/Down recalls submitted prompts and preserves the current unsubmitted draft."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press(*"first prompt")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            await pilot.press(*"second prompt")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            await pilot.press(*"draft text")
+            await pilot.pause()
+            assert app._prompt.text == "draft text"
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert app._prompt.text == "second prompt"
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert app._prompt.text == "first prompt"
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert app._prompt.text == "second prompt"
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert app._prompt.text == "draft text"
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_ctrl_o_toggles_latest_collapsible_block_and_formats_edit_diff(
+    tmp_path: Path,
+) -> None:
+    """Ctrl+O expands/collapses the latest foldable block; file_edit blocks format a diff."""
+    import json
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            args_json = json.dumps(
+                {
+                    "file_path": "a.py",
+                    "old_string": "x = 1\n",
+                    "new_string": "x = 2\n",
+                }
+            )
+            app._append_item(
+                ToolCallItem(
+                    name="file_edit",
+                    args_preview=args_json,
+                    status="ok",
+                    args_full=args_json,
+                    result="edited a.py",
+                )
+            )
+            await pilot.pause()
+            block = app.query_one(ToolCallBlock)
+            assert block.collapsed is True
+
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert block.collapsed is False
+
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert block.collapsed is True
         app._job_queue.put("__EXIT__")
 
     asyncio.run(run())

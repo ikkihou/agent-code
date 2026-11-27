@@ -18,6 +18,7 @@ from rich.cells import cell_len
 from .. import __version__
 from ..output import OutputChunk, StyleAndText
 from .textfit import clip_fragments, display_path, middle_truncate
+from .theme import PALETTE
 
 # ---------------------------------------------------------------------------
 # Logo art
@@ -33,25 +34,37 @@ _BAO = (
 # Palette (Rich inline vocabulary, same as the rest of the UI)
 # ---------------------------------------------------------------------------
 
-_STYLE_ACCENT = "bold #4fd6ff"
-_STYLE_PROJECT = "bold #4fd6ff"
-_STYLE_MODEL = "bold #c678dd"
-_STYLE_LABEL = "#8899aa"
-_STYLE_VALUE = "default"
-_STYLE_HINT_KEY = "bold #e5c07b"
-_STYLE_HINT = "#8899aa"
-_STYLE_NOISE = "dim"
+_STYLE_ACCENT = f"bold {PALETTE.accent}"
+_STYLE_PROJECT = f"bold {PALETTE.accent}"
+_STYLE_MODEL = f"bold {PALETTE.accent_alt}"
+_STYLE_LABEL = PALETTE.muted
+_STYLE_VALUE = PALETTE.fg
+_STYLE_HINT_KEY = f"bold {PALETTE.warning}"
+_STYLE_HINT = PALETTE.muted
+_STYLE_NOISE = PALETTE.faint
 
 
 def _columns() -> int:
     return shutil.get_terminal_size((80, 24)).columns
 
 
-def build_banner(cwd: Path, provider: str, model: str, base_url: str | None) -> OutputChunk:
-    """Render the mascot beside startup info and key hints (fixed, clipped rows)."""
+def build_banner(
+    cwd: Path,
+    provider: str,
+    model: str,
+    base_url: str | None,
+    *,
+    gutter: int = 0,
+) -> OutputChunk:
+    """Render the mascot beside startup info and key hints (fixed, clipped rows).
+
+    ``gutter`` is the number of columns the frontend leaves blank on *each* side of a
+    committed block, so the header is clipped to the block width instead of wrapping
+    inside an inset log.
+    """
     columns = _columns()
     logo_width = max(cell_len(line) for line in _BAO)
-    content_width = max(1, columns - logo_width - 2)
+    content_width = max(1, columns - 2 * gutter - logo_width - 2)
 
     path = middle_truncate(display_path(cwd), max(8, content_width))
     cut = max(path.rfind("/"), path.rfind("\\"))

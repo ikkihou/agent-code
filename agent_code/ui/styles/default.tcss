@@ -30,7 +30,7 @@ Screen:inline {
 
 #question {
     height: auto;
-    color: #4fd6ff;
+    color: $accent;
     background: $surface;
 }
 
@@ -44,31 +44,31 @@ Screen:inline {
     height: auto;
     max-height: 16;
     display: none;
-    border: solid #556677;
+    border: solid $line-strong;
     background: $surface;
 }
 
 #prompt {
     height: auto;
     min-height: 1;
-    border: solid #556677;
+    border: solid $line-strong;
 }
 
 /* The prompt border follows the permission mode, like Pi's editor border. */
 #prompt.mode-default {
-    border: solid #4a6076;
+    border: solid $line-strong;
 }
 
 #prompt.mode-edits {
-    border: solid #7ee787;
+    border: solid $success;
 }
 
 #prompt.mode-plan {
-    border: solid #e5c07b;
+    border: solid $warning;
 }
 
 #prompt.mode-full {
-    border: solid #ff6b6b;
+    border: solid $error;
 }
 
 #status {
@@ -86,15 +86,25 @@ Screen:inline {
     scrollbar-background: $surface;
     scrollbar-background-hover: $surface;
     scrollbar-background-active: $surface;
-    scrollbar-color: #556677;
-    scrollbar-color-hover: #6b7f99;
-    scrollbar-color-active: #7f95b3;
+    scrollbar-color: $line-strong;
+    scrollbar-color-hover: $muted;
+    scrollbar-color-active: $accent;
 }
 
 /* One blank row between committed blocks (Pi inserts a spacer before each content
    block). Only top margins are used, so two adjacent blocks never double up. */
 .gap {
     margin-top: 1;
+}
+
+/* Every committed block (prose, thinking, tool call) keeps a two-cell gutter on both
+   sides, so the conversation never touches the terminal edges. Must match
+   ``BlockLog.BLOCK_GUTTER``: ``content_width()`` subtracts it before wrapping. */
+#log > .text,
+#log > .thinking,
+#log > .tool {
+    margin-left: 2;
+    margin-right: 2;
 }
 
 /* Foldable block chrome: no card border or background. Thinking reads as quiet inline
@@ -116,23 +126,23 @@ Screen:inline {
 }
 
 .thinking CollapsibleTitle {
-    color: #8a8a8a;
+    color: $muted;
     text-style: italic;
 }
 
 /* Tool-call outcome is readable without expanding: green success, red error,
    amber declined/skipped. */
 .tool.ok CollapsibleTitle {
-    color: #7ee787;
+    color: $success;
 }
 
 .tool.error CollapsibleTitle {
-    color: #ff6b6b;
+    color: $error;
 }
 
 .tool.declined CollapsibleTitle,
 .tool.skipped CollapsibleTitle {
-    color: #e5c07b;
+    color: $warning;
 }
 
 .thinking CollapsibleTitle:hover,
@@ -145,6 +155,6 @@ Screen:inline {
 /* The dark theme's default selection color has identical fg/bg, which makes selected
    text unreadable (in the log and in the prompt alike). */
 Screen > .screen--selection {
-    background: #264f78;
-    color: #ffffff;
+    background: $selection;
+    color: $foreground;
 }

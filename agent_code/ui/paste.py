@@ -7,11 +7,11 @@ token backed by an in-memory cache; the full text is restored only where it matt
 -- the prompt the model actually sees -- while everything the user sees stays one
 short line.
 
-Flow: the ``Keys.BracketedPaste`` key binding (installed by ``build_key_bindings``)
-detects an oversized paste and swaps the buffer text for a placeholder; ``expand``
-(called from ``InteractiveShell._submit_text``) restores the original text before
-the prompt enters the agent loop. The prompt echo therefore shows the placeholder
-line, and the cache holds the real content for exactly one submission.
+Flow: ``PromptInput._on_paste`` intercepts Textual's ``Paste`` event, detects an
+oversized paste and inserts a placeholder token into the input document; ``expand``
+(called from ``AgentApp._submit_text``) restores the original text before the prompt
+enters the agent loop. The prompt echo therefore shows the placeholder line, and the
+cache holds the real content for the submission.
 
 Everything here is UI-thread state; the cache deliberately does not survive a
 restart -- a paste only matters within the submission that carries it.

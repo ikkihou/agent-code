@@ -46,7 +46,7 @@ def read_git(cwd: Path | None, *, timeout: float = 0.4) -> GitInfo:
             timeout=timeout,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except OSError, subprocess.SubprocessError, ValueError:
         return GitInfo()
     if result.returncode != 0:
         return GitInfo()

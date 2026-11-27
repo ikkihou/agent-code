@@ -32,6 +32,7 @@ from .slash import SlashContext, default_slash_registry, dispatch_slash
 from .tools import default_tools
 from .ui.app import run_interactive_shell
 from .ui.banner import build_banner
+from .ui.blocks import BLOCK_GUTTER
 from .ui.events import render_user_prompt
 from .ui.transcript import TranscriptSink
 from .wire import (
@@ -157,9 +158,7 @@ class _ConsoleWireSink:
                 )
                 console.print(f"✓ {event.name}{suffix}", markup=False, highlight=False)
             elif isinstance(event, DiffPreview):
-                console.print(
-                    f"\nDiff for {escape(event.path)}:", markup=True, highlight=False
-                )
+                console.print(f"\nDiff for {escape(event.path)}:", markup=True, highlight=False)
                 from .prompt_ui import render_diff
 
                 # render_diff wraps lines in [red]/[green] markup; diff-line content
@@ -169,9 +168,7 @@ class _ConsoleWireSink:
                     render_diff(event.old, event.new, event.path), markup=True, highlight=False
                 )
             elif isinstance(event, CommandPreview):
-                console.print(
-                    f"\nCommand: {event.command}", markup=False, highlight=False
-                )
+                console.print(f"\nCommand: {event.command}", markup=False, highlight=False)
             elif isinstance(event, ContextCompacted):
                 console.print(f"[dim]{event.describe()}[/dim]")
 
@@ -336,7 +333,9 @@ def main_command(
             context_window=context_window,
         )
 
-    initial_output = build_banner(resolved_cwd, provider, model, base_url)
+    initial_output = build_banner(
+        resolved_cwd, provider, model, base_url, gutter=BLOCK_GUTTER
+    )
     run_interactive_shell(
         state,
         run_turn,

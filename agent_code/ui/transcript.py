@@ -80,14 +80,14 @@ class TranscriptSink:
                     event.args_preview,
                     event.args_full,
                 )
-                self.live.active_tool = event.name
+                self._sync_active_tool()
                 continue
             if isinstance(event, ToolCallCompleted):
                 self._flush_thinking(commit)
-                self.live.active_tool = None
                 name, args_preview, args_full = self.active_tools.pop(
                     event.call_id, (event.name, "", "")
                 )
+                self._sync_active_tool()
                 commit.append(
                     ToolCallItem(
                         name=name,
@@ -126,6 +126,17 @@ class TranscriptSink:
             self._flush_prose(commit)
             commit.extend(event_to_chunks(event))
         return commit
+
+    def _sync_active_tool(self) -> None:
+        """Keep ``live.active_tool`` aligned with all currently in-flight tool calls."""
+        if not self.active_tools:
+            self.live.active_tool = None
+            return
+        names = [entry[0] for entry in self.active_tools.values()]
+        if len(names) == 1:
+            self.live.active_tool = names[0]
+        else:
+            self.live.active_tool = f"{names[0]} (+{len(names) - 1} more)"
 
     def _flush_thinking(self, commit: list[TranscriptItem]) -> None:
         """Close the current thinking block, if any, so it keeps its place."""

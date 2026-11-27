@@ -23,6 +23,7 @@ from ..wire import (
     ToolCallCompleted,
     WireEvent,
 )
+from .theme import PALETTE
 
 # Tool outcome -> marker glyph. "ok" is the executed-and-succeeded case; the others
 # refine ``ToolCallCompleted.outcome`` / ``is_error``.
@@ -66,15 +67,15 @@ def _summarize_args(args_preview: str, args_full: str) -> str:
             continue
         try:
             parsed = json.loads(raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             parsed = None
         if isinstance(parsed, dict):
             for key in _SUMMARY_KEYS:
                 value = parsed.get(key)
                 if isinstance(value, str) and value.strip():
-                    return _one_line(value)[: _SUMMARY_MAX_CELLS]
+                    return _one_line(value)[:_SUMMARY_MAX_CELLS]
         elif isinstance(parsed, str) and parsed.strip():
-            return _one_line(parsed)[: _SUMMARY_MAX_CELLS]
+            return _one_line(parsed)[:_SUMMARY_MAX_CELLS]
     return ""
 
 
@@ -166,12 +167,12 @@ def render_user_prompt(text: str) -> OutputChunk:
     normalized = text.rstrip()
     if not normalized.strip():
         return OutputChunk("")
-    body = "\n".join(f"> {line}" for line in normalized.splitlines())
+    body = "\n".join(f" {line}" for line in normalized.splitlines())
     # Bold white on dark grey, padded to the terminal width by the commit path.
     # Fragments use Rich's inline style vocabulary, which the commit path hands to
     # rich.text.Text as-is. The prompt echo ends with a single newline: the Live area
     # adds the blank separator line before its spinner, so the visual gap is exactly
     # one line.
-    style = "bold white on #444444"
-    fragments: tuple[StyleAndText, ...] = (("", "\n\n"), (style, body), ("", "\n"))
-    return OutputChunk("\n\n" + body + "\n", fragments=fragments, full_width=True)
+    style = f"bold {PALETTE.fg} on {PALETTE.echo}"
+    fragments: tuple[StyleAndText, ...] = ((style, body), ("", "\n"))
+    return OutputChunk(body + "\n", fragments=fragments, full_width=True)

@@ -161,9 +161,7 @@ class LiveArea:
         return out
 
 
-def cap_preview_lines(
-    lines: list[str], max_lines: int = PENDING_PREVIEW_MAX_LINES
-) -> list[str]:
+def cap_preview_lines(lines: list[str], max_lines: int = PENDING_PREVIEW_MAX_LINES) -> list[str]:
     """Clip a pending-preview body to ``max_lines``, marking the elision.
 
     Confirmation previews include user/model-controlled bodies (a plan panel can be

@@ -78,7 +78,7 @@ def display_path(path: Path) -> str:
     try:
         home = Path.home().resolve()
         rel = path.resolve().relative_to(home)
-    except (OSError, RuntimeError, ValueError):
+    except OSError, RuntimeError, ValueError:
         return str(path)
     text = rel.as_posix()
     return "~" if text == "." else f"~/{text}"

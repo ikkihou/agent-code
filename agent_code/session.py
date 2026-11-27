@@ -55,9 +55,7 @@ def _transcript_item(data: dict[str, Any]) -> TranscriptItem:
         str(data.get("text", "")),
         format=data.get("format", "plain"),
         fragments=(
-            tuple((str(style), str(text)) for style, text in fragments)
-            if fragments
-            else ()
+            tuple((str(style), str(text)) for style, text in fragments) if fragments else ()
         ),
         full_width=bool(data.get("full_width", False)),
     )

@@ -87,9 +87,7 @@ def _model_fragments(state: RuntimeState) -> list[StyleAndText]:
     return fragments
 
 
-def _align(
-    left: list[StyleAndText], right: list[StyleAndText], width: int
-) -> list[StyleAndText]:
+def _align(left: list[StyleAndText], right: list[StyleAndText], width: int) -> list[StyleAndText]:
     if width <= 0:
         return [*left, (_style("seg.gap"), "  "), *right]
 

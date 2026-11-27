@@ -29,9 +29,8 @@ from agent_code.ui.completer import SlashCompleter
 from agent_code.ui.events import event_to_chunks, render_user_prompt
 from agent_code.ui.live import LiveArea, cap_preview_lines
 from agent_code.ui.prompts import (
-    parse_choice_index,
-    parse_confirm_answer,
     prompt_for_request,
+    prompt_options,
     render_prompt_request,
 )
 from agent_code.ui.transcript import (
@@ -162,9 +161,7 @@ def test_run_agent_streams_thinking_before_text(tmp_path: Path) -> None:
             yield ModelStreamEvent(type="thinking_delta", text="let me ")
             yield ModelStreamEvent(type="thinking_delta", text="think")
             yield ModelStreamEvent(type="text_delta", text="42")
-            yield ModelStreamEvent(
-                type="completed", response=ModelResponse(text="42")
-            )
+            yield ModelStreamEvent(type="completed", response=ModelResponse(text="42"))
 
     wire, sink = _collecting_wire()
 
@@ -177,11 +174,7 @@ def test_run_agent_streams_thinking_before_text(tmp_path: Path) -> None:
         wire=wire,
     )
 
-    ordered = [
-        type(e).__name__
-        for e in sink.events
-        if isinstance(e, (ThinkingDelta, TextDelta))
-    ]
+    ordered = [type(e).__name__ for e in sink.events if isinstance(e, (ThinkingDelta, TextDelta))]
     assert ordered == ["ThinkingDelta", "ThinkingDelta", "TextDelta"]
     assert "".join(e.text for e in sink.events if isinstance(e, ThinkingDelta)) == "let me think"
     # Thinking is display-only and never leaks into the final answer.
@@ -468,9 +461,7 @@ def test_consume_batch_commits_prose_before_the_tool_that_followed_it() -> None:
     prose = second[0]
     assert isinstance(prose, OutputChunk)
     assert prose.text == "Let me check git first.\n\n"
-    assert second[1] == ToolCallItem(
-        name="git_status", args_preview="{}", status="ok"
-    )
+    assert second[1] == ToolCallItem(name="git_status", args_preview="{}", status="ok")
 
     third = sink.handle_batch([TextDelta("Done. Nothing to report."), TurnEnded()])
     third_text = [item.text for item in third if isinstance(item, OutputChunk)]
@@ -607,7 +598,7 @@ def test_event_to_chunks_renders_wire_events() -> None:
     assert chunks[0].text == "hello\n"
 
     echo = event_to_chunks(PromptEcho("hi there"))
-    assert echo[0].text == "\n\n> hi there\n"  # render_user_prompt's dark-grey block
+    assert echo[0].text == " hi there\n"  # render_user_prompt's dark-grey block
 
     done = event_to_chunks(ToolCallCompleted(call_id="1", name="read_file"))
     assert done[0].text == "✓ read_file\n"
@@ -647,15 +638,17 @@ def test_cap_preview_lines_marks_the_elision() -> None:
 
 
 def test_render_user_prompt_formats_prompt_blocks() -> None:
+    from agent_code.ui.theme import PALETTE
+
     chunk = render_user_prompt("hello")
     assert chunk.format == "plain"
     assert chunk.full_width is True
-    assert chunk.text == "\n\n> hello\n"
-    assert render_user_prompt("first\nsecond").text == "\n\n> first\n> second\n"
+    assert chunk.text == " hello\n"
+    assert render_user_prompt("first\nsecond").text == " first\n second\n"
     empty = render_user_prompt("")
     assert empty.format == "plain"
     assert empty.text == ""
-    assert ("bold white on #444444", "> hello") in chunk.fragments
+    assert (f"bold {PALETTE.fg} on {PALETTE.echo}", " hello") in chunk.fragments
     assert chunk.fragments[-1] == ("", "\n")
 
 
@@ -673,16 +666,18 @@ def test_prompt_echo_and_live_spinner_have_exactly_one_blank_gap() -> None:
 
 def test_prompt_chunk_keeps_its_background_and_pads() -> None:
     """Prompt echoes carry their background style and pad to the commit width."""
+    from agent_code.ui.theme import PALETTE
+
     chunk = render_user_prompt("hello")
     fragments = chunk_fragments(chunk)
-    assert ("bold white on #444444", "> hello") in fragments
+    assert (f"bold {PALETTE.fg} on {PALETTE.echo}", " hello") in fragments
 
     padded = "".join(part for _, part in pad_full_width(fragments, 40))
-    assert "> hello" + " " * (40 - len("> hello")) + "\n" in padded
+    assert " hello" + " " * (40 - len(" hello")) + "\n" in padded
 
     # >80 columns is the regression case for the offscreen Console's width=4096.
     wide = "".join(part for _, part in pad_full_width(fragments, 132))
-    assert "> hello" + " " * (132 - len("> hello")) + "\n" in wide
+    assert " hello" + " " * (132 - len(" hello")) + "\n" in wide
 
 
 def test_pad_full_width_accumulates_across_fragments() -> None:
@@ -747,7 +742,7 @@ def test_commit_renders_at_the_passed_width() -> None:
 
     prompt = chunk_to_text(render_user_prompt("hi"), width=33)
     bar = [line for line in prompt.plain.split("\n") if "hi" in line][0]
-    assert bar == "> hi" + " " * (33 - len("> hi"))
+    assert bar == " hi" + " " * (33 - len(" hi"))
 
 
 def test_live_tail_truncates_by_display_width() -> None:
@@ -787,36 +782,37 @@ def test_transcript_prompt_style_survives_resume(tmp_path: Path) -> None:
     chunk = resumed.transcript_chunks[0]
     assert chunk.full_width is True
     padded = "".join(part for _, part in pad_full_width(chunk_fragments(chunk), 40))
-    assert "> hello" + " " * (40 - len("> hello")) + "\n" in padded
+    assert " hello" + " " * (40 - len(" hello")) + "\n" in padded
 
 
-# ---- prompt request rendering and parsing ------------------------------------
+# ---- prompt request rendering and option building ---------------------------
 
 
-def test_prompt_request_helpers_parse_confirm_answers() -> None:
-    assert parse_confirm_answer("", default=False) is False
-    assert parse_confirm_answer("", default=True) is True
-    assert parse_confirm_answer("y") is True
-    assert parse_confirm_answer("YES") is True
-    assert parse_confirm_answer("n") is False
-    assert parse_confirm_answer("maybe") is None
+def test_prompt_request_helpers_build_confirm_options() -> None:
+    options_no, default_no = prompt_options(
+        {"type": "confirm", "message": "Run?", "default": False}
+    )
+    assert [key for key, _ in options_no] == ["y", "n", "a"]
+    assert default_no == 1
+
+    _, default_yes = prompt_options({"type": "confirm", "message": "Run?", "default": True})
+    assert default_yes == 0
 
 
-def test_prompt_request_helpers_parse_choice_indexes() -> None:
-    assert parse_choice_index("", option_count=2, default=0) == 0
-    assert parse_choice_index("2", option_count=2) == 2
-    assert parse_choice_index("0", option_count=2) == 0
-    assert parse_choice_index("3", option_count=2) is None
-    assert parse_choice_index("abc", option_count=2) is None
+def test_prompt_request_helpers_build_choice_options() -> None:
+    options, default_idx = prompt_options(
+        {"type": "choice", "question": "Pick one", "labels": ["A", "B"], "default": 1}
+    )
+    assert options == [("1", "A"), ("2", "B"), ("0", "Skip / Other")]
+    assert default_idx == 1
 
 
 def test_prompt_request_helpers_render_bottom_prompt_text() -> None:
     confirm_request = {"type": "confirm", "message": "Run this command?", "default": False}
-    # render_prompt_request: content BELOW the question line for the Live area.
-    # A bare confirm has no content -- the question line alone is the whole prompt.
+    # render_prompt_request: preview body for the Live area (empty for bare confirm/choice).
     assert render_prompt_request(confirm_request) == ""
-    # prompt_for_request: the one-line input prompt (goes into the prompt message).
-    assert prompt_for_request(confirm_request) == "? Run this command? [y/N]: "
+    # prompt_for_request: the clean question header shown in QuestionLine.
+    assert prompt_for_request(confirm_request) == "? Run this command?"
 
     choice_request = {
         "type": "choice",
@@ -824,8 +820,9 @@ def test_prompt_request_helpers_render_bottom_prompt_text() -> None:
         "labels": ["A", "B"],
         "default": 0,
     }
-    assert render_prompt_request(choice_request) == "  1. A\n  2. B\n  0. Skip / Other\n"
-    assert prompt_for_request(choice_request) == "? Pick one (1-2, default 1): "
+    # Choices live in OptionList, never duplicated in LiveArea.pending_preview.
+    assert render_prompt_request(choice_request) == ""
+    assert prompt_for_request(choice_request) == "? Pick one"
 
 
 def test_prompt_request_helpers_render_detail_field() -> None:

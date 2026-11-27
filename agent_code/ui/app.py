@@ -38,12 +38,12 @@ from .events import render_user_prompt
 from .live import cap_preview_lines
 from .paste import PasteCache
 from .prompts import (
-    parse_choice_index,
-    parse_confirm_answer,
     prompt_for_request,
+    prompt_options,
     render_prompt_request,
 )
 from .render import render_live
+from .theme import AGENT_THEME, PALETTE
 from .transcript import TranscriptSink
 from .widgets import HintBar, LivePanel, PromptInput, QuestionLine, StatusBar
 
@@ -62,6 +62,13 @@ class AgentApp(App[None]):
     BINDINGS = [
         Binding("escape", "escape_key", "abort / close completion", show=False),
         Binding("ctrl+c", "abort_or_quit", "abort turn / quit", show=False),
+        Binding(
+            "ctrl+o",
+            "toggle_last_fold",
+            "expand / collapse block",
+            show=False,
+            priority=True,
+        ),
         # ``priority=True`` is required: Textual's Screen binds shift+tab to
         # focus_previous, and non-priority screen bindings shadow app-level ones.
         Binding(
@@ -86,6 +93,10 @@ class AgentApp(App[None]):
         cwd: Path | None = None,
     ) -> None:
         super().__init__()
+        # The palette lives in ui/theme.py; registering it here is what makes the
+        # stylesheet's $accent/$line/... variables resolve.
+        self.register_theme(AGENT_THEME)
+        self.theme = AGENT_THEME.name
         self._state = state
         self._run_turn = run_turn
         self._make_slash_context = make_slash_context
@@ -148,6 +159,8 @@ class AgentApp(App[None]):
         self._prompt = self.query_one(PromptInput)
         self._completion_list = self.query_one(OptionList)
         self._prompt.completion_handler = self._handle_completion_key
+        self._prompt.prompt_key_handler = self._handle_pending_prompt_key
+        self._prompt.paste_cache = self._paste_cache
         self._prompt.set_permission_mode(self._state.permission_mode)
         self._prompt.focus()
         self.set_terminal_cursor(True)
@@ -249,6 +262,10 @@ class AgentApp(App[None]):
             for item in self._transcript.handle_batch(batch):
                 self._append_item(item)
         self._refresh_live()
+        self._sync_status()
+
+    def _sync_status(self) -> None:
+        self.query_one(PromptInput).set_permission_mode(self._state.permission_mode)
         self.query_one(StatusBar).refresh_status()
 
     def _tick(self) -> None:
@@ -292,7 +309,12 @@ class AgentApp(App[None]):
         question = self.query_one(QuestionLine)
         if self._pending_prompt is not None:
             request: PromptRequest = self._pending_prompt["request"]
-            question.update(Text(prompt_for_request(request), style="bold #4fd6ff"))
+            question.update(
+                Text(
+                    prompt_for_request(request),
+                    style=f"bold {PALETTE.accent}",
+                )
+            )
         else:
             question.update(Text())
 
@@ -314,6 +336,17 @@ class AgentApp(App[None]):
         self._live.pending_preview = cap_preview_lines(preview)
         self._prompt_was_active = self._live.turn_active
         self._live.turn_active = False
+
+        options, default_idx = prompt_options(request)
+        self._completion_list.clear_options()
+        self._completion_list.add_options(
+            [
+                Option(_format_prompt_option(hotkey, label), id=f"prompt-{i}")
+                for i, (hotkey, label) in enumerate(options)
+            ]
+        )
+        self._completion_list.highlighted = default_idx
+        self._completion_list.display = True
         self._refresh_question()
         self._refresh_live()
 
@@ -321,11 +354,85 @@ class AgentApp(App[None]):
         self._pending_prompt = None
         self._live.pending_preview = []
         self._live.turn_active = self._prompt_was_active
+        self._hide_completion()
         self._refresh_question()
         self._refresh_live()
+        self._sync_status()
         answer, self._pending_answer_chunk = self._pending_answer_chunk, None
         if answer is not None:
             self._commit_chunk(answer)
+
+    def _resolve_prompt(self, option_index: int) -> None:
+        """Settle the pending confirm/choice request from the chosen option index."""
+        if self._pending_prompt is None:
+            return
+        request: PromptRequest = self._pending_prompt["request"]
+        result_queue: queue.Queue[Any] = self._pending_prompt["queue"]
+
+        if request.get("type") == "choice":
+            labels = [str(label) for label in (request.get("labels") or [])]
+            if 0 <= option_index < len(labels):
+                result_queue.put(str(option_index + 1))
+                answer = labels[option_index]
+            else:
+                result_queue.put("0")
+                answer = "skip"
+            self._pending_answer_chunk = self._answer_chunk(request, answer)
+            self._finish_prompt()
+            return
+
+        if option_index == 0:
+            result_queue.put(True)
+            self._pending_answer_chunk = self._answer_chunk(request, "yes")
+        elif option_index == 2:
+            self._state.permission_mode = "acceptEdits"
+            result_queue.put(True)
+            self._pending_answer_chunk = self._answer_chunk(request, "yes (accept edits)")
+        else:
+            result_queue.put(False)
+            self._pending_answer_chunk = self._answer_chunk(request, "no")
+        self._finish_prompt()
+
+    def _handle_pending_prompt_key(self, key: str) -> bool:
+        """Handle all keys while a confirm/choice option menu is active."""
+        if self._pending_prompt is None:
+            return False
+        request: PromptRequest = self._pending_prompt["request"]
+        request_type = request.get("type")
+
+        if key in ("up", "k"):
+            self._completion_list.action_cursor_up()
+            return True
+        if key in ("down", "j"):
+            self._completion_list.action_cursor_down()
+            return True
+        if key == "enter":
+            highlighted = self._completion_list.highlighted
+            self._resolve_prompt(0 if highlighted is None else highlighted)
+            return True
+
+        if request_type == "choice":
+            labels = list(request.get("labels") or [])
+            if key in ("escape", "0"):
+                self._resolve_prompt(len(labels))
+                return True
+            if len(key) == 1 and key.isdigit():
+                idx = int(key)
+                if 1 <= idx <= len(labels):
+                    self._resolve_prompt(idx - 1)
+                    return True
+            return True
+
+        if key in ("y", "Y"):
+            self._resolve_prompt(0)
+            return True
+        if key in ("n", "N", "escape"):
+            self._resolve_prompt(1)
+            return True
+        if key in ("a", "A"):
+            self._resolve_prompt(2)
+            return True
+        return True
 
     def _answer_chunk(self, request: PromptRequest, answer: str) -> OutputChunk:
         if request.get("type") == "choice":
@@ -338,33 +445,6 @@ class AgentApp(App[None]):
 
     def _submit_text(self, text: str) -> None:
         text = text.strip()
-        if self._pending_prompt is not None:
-            entry = self._pending_prompt
-            request: PromptRequest = entry["request"]
-            result_queue: queue.Queue[Any] = entry["queue"]
-            request_type = request.get("type")
-
-            if request_type == "choice":
-                labels = request.get("labels") or []
-                idx = parse_choice_index(text, len(labels), int(request.get("default", 0)))
-                if idx is None:
-                    self._commit_now("Invalid choice. Enter a listed number.\n")
-                    return
-                result_queue.put(str(idx))
-                answer = "skip" if idx == 0 else labels[idx - 1]
-                self._pending_answer_chunk = self._answer_chunk(request, str(answer))
-                self._finish_prompt()
-                return
-
-            answer = parse_confirm_answer(text, bool(request.get("default", False)))
-            if answer is None:
-                self._commit_now("Invalid answer. Enter y or n.\n")
-                return
-            result_queue.put(answer)
-            self._pending_answer_chunk = self._answer_chunk(request, "yes" if answer else "no")
-            self._finish_prompt()
-            return
-
         if not text:
             return
 
@@ -384,6 +464,7 @@ class AgentApp(App[None]):
         result = dispatch_slash(text, self._make_slash_context())
         if not result.handled:
             return False
+        self._sync_status()
         if result.message:
             chunk = OutputChunk(
                 str(result.message) + "\n", format="rich" if result.markup else "plain"
@@ -411,7 +492,13 @@ class AgentApp(App[None]):
 
     def _last_input_line(self) -> str:
         lines = self._prompt.text.split("\n")
-        return lines[-1] if lines else ""
+        if not lines:
+            return ""
+        row, col = self._prompt.cursor_location
+        row = min(max(row, 0), len(lines) - 1)
+        line = lines[row]
+        col = min(max(col, 0), len(line))
+        return line[:col]
 
     def _handle_completion_key(self, key: str) -> bool:
         if not self._completion_list.display:
@@ -451,10 +538,15 @@ class AgentApp(App[None]):
     def _apply_completion(self, suggestion: Suggestion) -> None:
         text = self._prompt.text
         lines = text.split("\n")
-        line = lines[-1]
-        lines[-1] = line[: len(line) - self._replace_len] + suggestion.insert
+        row, col = self._prompt.cursor_location
+        row = min(max(row, 0), len(lines) - 1)
+        line = lines[row]
+        col = min(max(col, 0), len(line))
+        start = max(0, col - self._replace_len)
+        prefix = line[:start] + suggestion.insert
+        lines[row] = prefix + line[col:]
         self._prompt.load_text("\n".join(lines))
-        self._prompt.move_cursor((len(lines) - 1, len(lines[-1])))
+        self._prompt.move_cursor((row, len(prefix)))
         # load_text posts Changed, which recomputes suggestions. A directory mention
         # ("@src/u" -> "@src/util/") keeps listing deeper paths; a completed word that
         # exactly matches a candidate is hidden by _refresh_completion.
@@ -462,6 +554,8 @@ class AgentApp(App[None]):
 
     def _refresh_completion(self) -> None:
         """Recompute suggestions for the current input line and redraw the menu."""
+        if self._pending_prompt is not None:
+            return
         if self._completion is None:
             self._hide_completion()
             return
@@ -478,9 +572,13 @@ class AgentApp(App[None]):
         if any(suggestion.insert == line for suggestion in suggestions):
             self._hide_completion()
             return
+        pad_width = max((len(s.insert) for s in suggestions), default=0)
         self._completion_list.clear_options()
         self._completion_list.add_options(
-            [Option(s.insert, id=str(i)) for i, s in enumerate(suggestions)]
+            [
+                Option(_format_suggestion_option(s, pad_width), id=str(i))
+                for i, s in enumerate(suggestions)
+            ]
         )
         self._completion_list.highlighted = 0
         self._completion_list.display = True
@@ -527,6 +625,9 @@ class AgentApp(App[None]):
     # ---- key actions --------------------------------------------------------
 
     def action_escape_key(self) -> None:
+        if self._pending_prompt is not None:
+            self._handle_pending_prompt_key("escape")
+            return
         if self._completion_list.display:
             self._hide_completion()
             return
@@ -551,17 +652,40 @@ class AgentApp(App[None]):
 
     def action_cycle_mode(self) -> None:
         self._state.cycle_permission_mode()
-        self.query_one(PromptInput).set_permission_mode(self._state.permission_mode)
-        self.query_one(StatusBar).refresh_status()
+        self._sync_status()
+
+    def action_toggle_last_fold(self) -> None:
+        self.query_one(BlockLog).toggle_latest_fold()
 
     # ---- message handlers ---------------------------------------------------
 
     def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
+        if self._pending_prompt is None and message.text.strip():
+            self._prompt.record_history(message.text)
         self._submit_text(message.text)
         self._prompt.load_text("")
 
     def on_prompt_input_abort(self, message: PromptInput.Abort) -> None:
         self.action_abort_or_quit()
+
+
+def _format_suggestion_option(suggestion: Suggestion, pad_width: int) -> Text:
+    """Format one completion option with a left token column and a dimmed meta description."""
+    label = Text()
+    label.append(suggestion.insert, style=f"bold {PALETTE.accent}")
+    if suggestion.meta and suggestion.meta != suggestion.insert:
+        gap = max(2, pad_width - len(suggestion.insert) + 2)
+        label.append(" " * gap)
+        label.append(suggestion.meta, style=PALETTE.muted)
+    return label
+
+
+def _format_prompt_option(hotkey: str, description: str) -> Text:
+    """Format one interactive confirm/choice option with a highlighted shortcut key."""
+    label = Text()
+    label.append(f" {hotkey} ", style=f"bold {PALETTE.warning}")
+    label.append(f" {description}", style=PALETTE.fg)
+    return label
 
 
 def _pbcopy(text: str) -> None:
@@ -609,7 +733,7 @@ def run_interactive_shell(
     try:
         # Inline (not alternate-screen) so the terminal's native scrollback above the
         # app survives while running and the last frame stays on screen after exit.
-        app.run(inline=True, inline_no_clear=True)
+        app.run(inline=False, inline_no_clear=True)
     finally:
         state.asker = None
         app._job_queue.put("__EXIT__")

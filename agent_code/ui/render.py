@@ -17,10 +17,11 @@ from ..runtime import RuntimeState
 from .gitinfo import GitInfo
 from .live import LiveArea
 from .status import bottom_toolbar
+from .theme import PALETTE
 
 # Spinner / pending-preview colors, expressed in Rich inline vocabulary.
-SPINNER_STYLE = "bold #4fd6ff"
-PREVIEW_STYLE = "#e5c07b"
+SPINNER_STYLE = f"bold {PALETTE.accent}"
+PREVIEW_STYLE = PALETTE.warning
 
 
 def chunk_to_text(chunk: OutputChunk, width: int | None = None) -> Text:
@@ -38,6 +39,19 @@ def chunk_to_text(chunk: OutputChunk, width: int | None = None) -> Text:
     return text
 
 
+def _preview_line_style(line: str) -> str:
+    """Color unified diff lines inside a confirmation preview; keep amber for other previews."""
+    if line.startswith("---") or line.startswith("+++"):
+        return f"bold {PALETTE.fg}"
+    if line.startswith("+"):
+        return PALETTE.success
+    if line.startswith("-"):
+        return PALETTE.error
+    if line.startswith("@@"):
+        return PALETTE.accent
+    return PREVIEW_STYLE
+
+
 def render_live(live: LiveArea, columns: int, now: float) -> Text:
     """LiveArea -> Rich Text for the in-progress panel (spinner / preview / streaming tail).
 
@@ -50,33 +64,33 @@ def render_live(live: LiveArea, columns: int, now: float) -> Text:
         if "spinner" in style:
             text.append(piece, style=SPINNER_STYLE)
         elif "preview" in style:
-            text.append(piece, style=PREVIEW_STYLE)
+            text.append(piece, style=_preview_line_style(piece))
         else:
             text.append(piece)
     return text
 
 
-# Status-bar segment colors, keyed by the class token that ``bottom_toolbar`` emits
-# (mirrors ``ui/theme.py::build_style``). The bar background comes from the widget's
-# CSS (``#status`` -> ``$surface``), so fragments only set the foreground; leaving the
-# background unset lets the widget paint the whole row uniformly, including the empty
-# space after the last segment.
+# Status-bar segment colors, keyed by the class token that ``bottom_toolbar`` emits.
+# The bar background comes from the widget's CSS (``#status`` -> ``$surface``), so
+# fragments only set the foreground; leaving the background unset lets the widget paint
+# the whole row uniformly, including the empty space after the last segment. Mode badges
+# are the exception: they paint their own filled pill, so they set both.
 _STATUS_COLORS: dict[str, str] = {
-    "mode.default": "bold #0b0e14 on #4fd6ff",
-    "mode.edits": "bold #0b0e14 on #7ee787",
-    "mode.plan": "bold #0b0e14 on #e5c07b",
-    "mode.full": "bold #0b0e14 on #ff6b6b",
-    "seg.branch.dirty": "#e5c07b",
-    "seg.branch": "#7ee787",
-    "seg.project": "bold #4fd6ff",
-    "seg.cwd": "#6b7280",
-    "seg.model": "#c678dd",
-    "seg.provider": "#8899aa",
-    "seg.ctx": "#61afef",
-    "ctx.hot": "#e5c07b",
-    "ctx.critical": "#ff6b6b",
+    "mode.default": f"bold {PALETTE.on_accent} on {PALETTE.accent}",
+    "mode.edits": f"bold {PALETTE.on_accent} on {PALETTE.success}",
+    "mode.plan": f"bold {PALETTE.on_accent} on {PALETTE.warning}",
+    "mode.full": f"bold {PALETTE.on_accent} on {PALETTE.error}",
+    "seg.branch.dirty": PALETTE.warning,
+    "seg.branch": PALETTE.success,
+    "seg.project": f"bold {PALETTE.accent}",
+    "seg.cwd": PALETTE.faint,
+    "seg.model": PALETTE.accent_alt,
+    "seg.provider": PALETTE.muted,
+    "seg.ctx": PALETTE.info,
+    "ctx.hot": PALETTE.warning,
+    "ctx.critical": PALETTE.error,
 }
-_STATUS_FG = "#e5e5e5"
+_STATUS_FG = PALETTE.fg
 
 
 def render_status(
