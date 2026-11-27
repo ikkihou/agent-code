@@ -21,11 +21,23 @@ from agent_code.output import OutputChunk, TranscriptItem
 from agent_code.runtime import RuntimeState
 from agent_code.slash import SlashContext, default_slash_registry
 from agent_code.ui.app import AgentApp
-from agent_code.ui.blocks import BLOCK_GUTTER, BlockLog, TextBlock, ThinkingBlock, ToolCallBlock
+from agent_code.ui.blocks import (
+    BLOCK_GUTTER,
+    BlockLog,
+    StepBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+)
 from agent_code.ui.completion import CompletionSource
 from agent_code.ui.events import render_user_prompt
 from agent_code.ui.render import chunk_to_text, render_status
-from agent_code.ui.transcript import ThinkingItem, ToolCallItem, TranscriptSink
+from agent_code.ui.transcript import (
+    ThinkingItem,
+    ToolCallItem,
+    TranscriptSink,
+    format_step_title,
+)
 from agent_code.ui.widgets import HintBar, PromptInput
 from agent_code.wire import (
     TextDelta,
@@ -359,7 +371,7 @@ def test_committed_blocks_keep_a_two_cell_gutter(tmp_path: Path) -> None:
             await pilot.pause()
             log = app.query_one(BlockLog)
             left = log.content_region.x
-            assert len(log.children) == len(items)
+            assert len(log.children) == 2
             for block in log.children:
                 assert block.region.x == left + BLOCK_GUTTER
                 assert block.size.width == log.content_width()
@@ -669,9 +681,84 @@ def test_block_log_puts_one_blank_row_between_blocks(tmp_path: Path) -> None:
             assert [block.has_class("gap") for block in blocks] == [
                 False,  # first block: no leading blank
                 False,  # prose already ends with a blank row
-                True,  # thinking -> tool needs a separator
-                True,  # tool -> prose needs a separator
+                True,  # step -> prose needs a separator
                 False,  # prompt echo carries its own leading blanks
+            ]
+            # Verify the computed layout actually leaves one blank row between StepBlock
+            # and the TextBlock that follows it (not clobbered by #log > .text margin).
+            assert blocks[2].styles.margin.top == 1
+            assert blocks[2].region.y == blocks[1].region.bottom + 1
+        app._job_queue.put("__EXIT__")
+
+    asyncio.run(run())
+
+
+def test_format_step_title_counts_thinking_and_tools() -> None:
+    assert format_step_title(1, 0) == "✻ 1 thinking"
+    assert format_step_title(2, 0) == "✻ 2 thinking"
+    assert format_step_title(0, 1) == "✻ 1 tool"
+    assert format_step_title(0, 3) == "✻ 3 tools"
+    assert format_step_title(1, 1) == "✻ 1 thinking, 1 tool"
+    assert format_step_title(2, 3) == "✻ 2 thinking, 3 tools"
+
+
+def test_step_block_mounts_immediately_and_updates_counts_between_texts(
+    tmp_path: Path,
+) -> None:
+    """Consecutive thinking/tool items between two texts share one live-updating StepBlock."""
+
+    async def run() -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            log = app.query_one(BlockLog)
+
+            # First item immediately mounts a collapsed StepBlock.
+            app._append_item(ThinkingItem("step 1 reasoning", duration=0.4))
+            await pilot.pause()
+            steps = list(log.query(StepBlock))
+            assert len(steps) == 1
+            assert steps[0].collapsed is True
+            assert steps[0].title == "✻ 1 thinking"
+
+            # Subsequent tool calls and thinking before any text dynamically update the
+            # same StepBlock in place.
+            app._append_item(ToolCallItem(name="bash", args_preview='{"command": "ls"}', status="ok"))
+            await pilot.pause()
+            assert len(log.query(StepBlock)) == 1
+            assert steps[0].title == "✻ 1 thinking, 1 tool"
+
+            app._append_item(ThinkingItem("step 2 reasoning", duration=1.1))
+            app._append_item(
+                ToolCallItem(name="read_file", args_preview='{"path": "a.py"}', status="ok")
+            )
+            await pilot.pause()
+            assert len(log.query(StepBlock)) == 1
+            assert steps[0].title == "✻ 2 thinking, 2 tools"
+            assert [type(w) for w in steps[0].step_widgets] == [
+                ThinkingBlock,
+                ToolCallBlock,
+                ThinkingBlock,
+                ToolCallBlock,
+            ]
+            assert len(steps[0].query(ThinkingBlock)) == 2
+            assert len(steps[0].query(ToolCallBlock)) == 2
+            assert all(w.collapsed is True for w in steps[0].step_widgets)
+
+            # Text closes the current StepBlock; the next tool call after text opens a new one.
+            app._append_item(OutputChunk("intermediate explanation\n\n", format="markdown"))
+            app._append_item(
+                ToolCallItem(name="file_edit", args_preview='{"file_path": "a.py"}', status="ok")
+            )
+            await pilot.pause()
+            steps = list(log.query(StepBlock))
+            assert len(steps) == 2
+            assert steps[0].title == "✻ 2 thinking, 2 tools"
+            assert steps[1].title == "✻ 1 tool"
+            assert [type(child) for child in log.children] == [
+                StepBlock,
+                TextBlock,
+                StepBlock,
             ]
         app._job_queue.put("__EXIT__")
 

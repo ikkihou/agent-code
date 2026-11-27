@@ -10,7 +10,9 @@ and turns one drained event batch into an ordered list of render items:
 
 The ordering rule is the point of the state machine: streamed prose must land before
 the tool call that followed it, and thinking must land before the answer it precedes.
-Folding/collapsing is a frontend concern; the items only carry text and status.
+Consecutive ``ThinkingItem`` and ``ToolCallItem`` items emitted between two prose
+``OutputChunk``s form one foldable step group in the TUI, titled with
+``format_step_title``.
 """
 
 from __future__ import annotations
@@ -29,6 +31,19 @@ from ..wire import (
 )
 from .events import event_to_chunks, tool_outcome
 from .live import LiveArea, preview_lines
+
+
+def format_step_title(thinking_count: int, tool_count: int) -> str:
+    """Collapsed step-group label summarizing thinking and tool-call counts."""
+    parts: list[str] = []
+    if thinking_count > 0:
+        parts.append(f"{thinking_count} thinking")
+    if tool_count > 0:
+        noun = "tool" if tool_count == 1 else "tools"
+        parts.append(f"{tool_count} {noun}")
+    if not parts:
+        return "✻ 0 steps"
+    return "✻ " + ", ".join(parts)
 
 
 class TranscriptSink:
@@ -84,6 +99,7 @@ class TranscriptSink:
                 continue
             if isinstance(event, ToolCallCompleted):
                 self._flush_thinking(commit)
+                self._flush_prose(commit)
                 name, args_preview, args_full = self.active_tools.pop(
                     event.call_id, (event.name, "", "")
                 )

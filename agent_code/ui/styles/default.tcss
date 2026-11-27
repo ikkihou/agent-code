@@ -91,25 +91,31 @@ Screen:inline {
     scrollbar-color-active: $accent;
 }
 
-/* One blank row between committed blocks (Pi inserts a spacer before each content
-   block). Only top margins are used, so two adjacent blocks never double up. */
+/* Every committed block (prose, step, thinking, tool call) keeps a two-cell gutter on both
+   sides, so the conversation never touches the terminal edges. Must match
+   ``BlockLog.BLOCK_GUTTER``: ``content_width()`` subtracts it before wrapping. */
+#log > .text,
+#log > .step,
+#log > .thinking,
+#log > .tool {
+    margin: 0 2;
+}
+
+/* One blank row between a foldable block and the block that follows it. Textual stores
+   ``margin`` as a single 4-tuple (top, right, bottom, left), so ``#log > .gap`` must
+   match ``#log > .text`` specificity and preserve the two-cell horizontal gutter. */
 .gap {
     margin-top: 1;
 }
 
-/* Every committed block (prose, thinking, tool call) keeps a two-cell gutter on both
-   sides, so the conversation never touches the terminal edges. Must match
-   ``BlockLog.BLOCK_GUTTER``: ``content_width()`` subtracts it before wrapping. */
-#log > .text,
-#log > .thinking,
-#log > .tool {
-    margin-left: 2;
-    margin-right: 2;
+#log > .gap {
+    margin: 1 2 0 2;
 }
 
-/* Foldable block chrome: no card border or background. Thinking reads as quiet inline
-   reasoning (the title carries the model's thinking duration); tool calls keep a
-   title, so a collapsed call is still one compact line. */
+/* Foldable block chrome: no card border or background. Step groups and thinking read as
+   quiet inline headers; tool calls keep a title, so a collapsed call is still one
+   compact line. */
+.step,
 .thinking,
 .tool {
     border-top: none;
@@ -119,32 +125,43 @@ Screen:inline {
     padding-left: 0;
 }
 
+.step > Contents {
+    padding: 0 0 0 2;
+}
+
+.step CollapsibleTitle,
 .thinking CollapsibleTitle,
 .tool CollapsibleTitle {
     padding: 0;
     background: transparent;
 }
 
-.thinking CollapsibleTitle {
+.step > CollapsibleTitle {
+    color: $muted;
+}
+
+.thinking > CollapsibleTitle {
     color: $muted;
     text-style: italic;
 }
 
 /* Tool-call outcome is readable without expanding: green success, red error,
    amber declined/skipped. */
-.tool.ok CollapsibleTitle {
+.tool.ok > CollapsibleTitle {
     color: $success;
 }
 
-.tool.error CollapsibleTitle {
+.tool.error > CollapsibleTitle {
     color: $error;
 }
 
-.tool.declined CollapsibleTitle,
-.tool.skipped CollapsibleTitle {
+.tool.declined > CollapsibleTitle,
+.tool.skipped > CollapsibleTitle {
     color: $warning;
 }
 
+.step CollapsibleTitle:hover,
+.step CollapsibleTitle:focus,
 .thinking CollapsibleTitle:hover,
 .thinking CollapsibleTitle:focus,
 .tool CollapsibleTitle:hover,

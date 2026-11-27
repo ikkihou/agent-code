@@ -5,11 +5,16 @@ tool calls be individually foldable *in place* (interleaved with static prose), 
 log is now a ``VerticalScroll`` of ordered block widgets:
 
 - ``TextBlock``  -- one committed text chunk, rendered as static selectable text;
-- ``ThinkingBlock`` -- one extended-thinking block, collapsed by default;
-- ``ToolCallBlock`` -- one finished tool call, collapsed by default.
+- ``StepBlock``  -- one foldable group of consecutive thinking and tool-call blocks
+  between text chunks, collapsed by default with a count-summary title;
+- ``ThinkingBlock`` -- one extended-thinking block (nested inside ``StepBlock``),
+  collapsed by default;
+- ``ToolCallBlock`` -- one finished tool call (nested inside ``StepBlock``),
+  collapsed by default.
 
-Each thinking / tool block is its own ``Collapsible``, so a click on its header toggles
-it without wrapping the surrounding prose (which stays static and in order).
+Each step group and inner thinking / tool block is its own ``Collapsible``, so a click
+on its header toggles it without wrapping the surrounding prose (which stays static and
+in order).
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from __future__ import annotations
 import json
 
 from rich.text import Text
+from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.events import Resize
 from textual.selection import Selection
@@ -28,11 +34,12 @@ from ..prompt_ui import render_diff
 from .events import format_tool_call
 from .render import _preview_line_style, chunk_to_text
 from .theme import PALETTE
+from .transcript import format_step_title
 
 # Blank columns left on each side of every committed block. The margin itself comes from
-# the ``#log > .text/.thinking/.tool`` rule in ``styles/default.tcss``; the two must stay
-# in sync because ``content_width()`` subtracts this before wrapping prose and padding
-# full-width prompt bars.
+# the ``#log > .text/.step/.thinking/.tool`` rule in ``styles/default.tcss``; the two
+# must stay in sync because ``content_width()`` subtracts this before wrapping prose and
+# padding full-width prompt bars.
 BLOCK_GUTTER = 2
 
 
@@ -120,7 +127,7 @@ class ThinkingBlock(Collapsible):
             _SelectableStatic(Text(item.text), markup=False),
             title=_thinking_title(item.duration),
             collapsed=True,
-            classes="thinking",
+            classes="thinking -collapsed",
         )
 
 
@@ -181,12 +188,65 @@ class ToolCallBlock(Collapsible):
                 item.args_full,
             ),
             collapsed=True,
-            classes=f"tool {item.status}",
+            classes=f"tool {item.status} -collapsed",
         )
 
 
+class StepBlock(Collapsible):
+    """A foldable group of thinking and tool-call blocks produced between text chunks.
+
+    Mounted as soon as the first thinking or tool-call item arrives and updated in place
+    as subsequent items settle before the next text chunk. Collapsed by default with a
+    count-summary title (e.g. ``✻ 1 thinking, 2 tools``); expanding reveals the nested
+    ``ThinkingBlock`` and ``ToolCallBlock`` widgets in order.
+    """
+
+    def __init__(self, first: ThinkingItem | ToolCallItem | None = None) -> None:
+        self.thinking_count: int = 0
+        self.tool_count: int = 0
+        self.step_widgets: list[ThinkingBlock | ToolCallBlock] = []
+        self._contents_container: Collapsible.Contents | None = None
+        super().__init__(
+            title=format_step_title(0, 0),
+            collapsed=True,
+            classes="step -collapsed",
+        )
+        if first is not None:
+            self.append_step_item(first)
+
+    def compose(self) -> ComposeResult:
+        yield self._title
+        container = self.Contents()
+        self._contents_container = container
+        with container:
+            yield from self._contents_list
+
+    def append_step_item(
+        self, item: ThinkingItem | ToolCallItem
+    ) -> ThinkingBlock | ToolCallBlock:
+        """Append one thinking or tool-call block and update the summary title."""
+        if isinstance(item, ThinkingItem):
+            widget: ThinkingBlock | ToolCallBlock = ThinkingBlock(item)
+            self.thinking_count += 1
+        else:
+            widget = ToolCallBlock(item)
+            self.tool_count += 1
+        self.step_widgets.append(widget)
+        title = format_step_title(self.thinking_count, self.tool_count)
+        self.title = title
+        self._title.label = title
+        if self._contents_container is not None and self._contents_container.is_attached:
+            if self._contents_container._pending_children:
+                self._contents_container.compose_add_child(widget)
+            else:
+                self._contents_container.mount(widget)
+        else:
+            self._contents_list.append(widget)
+        return widget
+
+
 class BlockLog(VerticalScroll):
-    """Ordered committed conversation: static text runs + foldable thinking/tool blocks."""
+    """Ordered committed conversation: static text runs + foldable step blocks."""
 
     can_focus = True
 
@@ -199,9 +259,12 @@ class BlockLog(VerticalScroll):
         super().__init__(id=id)
         self._block_count = 0
         # A TextBlock renders the chunk's trailing newline as an empty row, so the next
-        # block needs no extra margin after prose. Thinking/tool blocks end on their
+        # block needs no extra margin after prose. Foldable step blocks end on their
         # title line and do need one.
         self._prev_was_text = False
+        # Active step block collecting consecutive thinking/tool items until the next
+        # text chunk arrives.
+        self._current_step: StepBlock | None = None
         # Auto-follow new content while the user is at the bottom; pause when the user
         # scrolls up to read history, and resume once they scroll back to the end.
         self._auto_scroll = True
@@ -216,21 +279,31 @@ class BlockLog(VerticalScroll):
         return max(1, width - 2 * BLOCK_GUTTER)
 
     def append_chunk(self, chunk: OutputChunk) -> None:
+        # Text closes any active step group so subsequent thinking/tool items open a new
+        # foldable widget after this prose chunk.
+        self._current_step = None
         # Prompt echoes already start with their own blank lines, and prose blocks end
         # with one; only foldable/content blocks after a fold need a leading gap.
         gap = self._block_count > 0 and not self._prev_was_text and not chunk.text.startswith("\n")
         self._append(TextBlock(chunk, self.content_width()), gap=gap)
         self._prev_was_text = True
 
-    def append_thinking(self, item: ThinkingItem) -> None:
+    def _append_step_item(self, item: ThinkingItem | ToolCallItem) -> None:
+        if self._current_step is not None:
+            self._current_step.append_step_item(item)
+            self.call_after_refresh(self._auto_scroll_end)
+            return
         gap = self._block_count > 0 and not self._prev_was_text
-        self._append(ThinkingBlock(item), gap=gap)
+        step = StepBlock(item)
+        self._current_step = step
+        self._append(step, gap=gap)
         self._prev_was_text = False
 
+    def append_thinking(self, item: ThinkingItem) -> None:
+        self._append_step_item(item)
+
     def append_tool(self, item: ToolCallItem) -> None:
-        gap = self._block_count > 0 and not self._prev_was_text
-        self._append(ToolCallBlock(item), gap=gap)
-        self._prev_was_text = False
+        self._append_step_item(item)
 
     def append_item(self, item: TranscriptItem) -> None:
         """Mount any render item (used by both live commits and resume replay)."""
@@ -289,6 +362,8 @@ class BlockLog(VerticalScroll):
             return
         removable = list(self.children)[:excess]
         for child in removable:
+            if child is self._current_step:
+                self._current_step = None
             child.remove()
         self._block_count -= len(removable)
 
@@ -303,8 +378,14 @@ class BlockLog(VerticalScroll):
         return "".join(parts)
 
     def toggle_latest_fold(self) -> bool:
-        """Toggle the most recent ThinkingBlock or ToolCallBlock; return True if found."""
+        """Toggle the most recent foldable block; return True if found."""
         for child in reversed(self.children):
+            if isinstance(child, StepBlock):
+                new_collapsed = not child.collapsed
+                child.collapsed = new_collapsed
+                for sub in child.step_widgets:
+                    sub.collapsed = new_collapsed
+                return True
             if isinstance(child, Collapsible):
                 child.collapsed = not child.collapsed
                 return True
